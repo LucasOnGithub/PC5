@@ -1,0 +1,116 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+/* PC5: its settings file (pc5_settings.h). */
+#include "pc5_settings.h"
+
+#include <stdio.h>
+#include <string.h>
+
+static const char *const corner_keys[] = { "top-left", "top-right", "bottom-left", "bottom-right" };
+static const char *const corner_names[] = { "Top left", "Top right", "Bottom left", "Bottom right" };
+static const char *const light_keys[] = { "game", "screen", "console" };
+static const char *const light_names[] = { "Game's colour", "Follows the screen", "Console's colour" };
+static const char *const trigger_keys[] = { "off", "rumble", "resistance", "both" };
+static const char *const trigger_names[] = { "Off", "Rumble", "Resistance", "Rumble + resistance" };
+
+void pc5_settings_default(Pc5Settings *settings)
+{
+    memset(settings, 0, sizeof(*settings));
+    settings->fps = 0;
+    settings->fps_corner = PC5_CORNER_TOP_RIGHT;
+    settings->vibration = 100;
+    settings->light_bar = PC5_LIGHT_GAME;
+    settings->triggers = PC5_TRIGGERS_OFF;
+    settings->trigger_rumble = 100;
+    settings->trigger_resistance = 50;
+    settings->check_updates = 1;
+    settings->keep_logs = 0;
+}
+
+static int pick(const char *value, const char *const *keys, int count, int fallback)
+{
+    for (int i = 0; i < count; i++)
+        if (!strcmp(value, keys[i])) return i;
+    return fallback;
+}
+
+static int on_off(const char *value, int fallback)
+{
+    if (!strcmp(value, "on")) return 1;
+    if (!strcmp(value, "off")) return 0;
+    return fallback;
+}
+
+/* A strength in percent, in steps of 25 from lowest; "on" and "off" as 100 and 0. */
+static int percent(const char *value, int lowest, int fallback)
+{
+    int n = 0, digits = 0;
+    if (!strcmp(value, "on")) return 100;
+    if (!strcmp(value, "off")) return lowest ? fallback : 0;
+    for (const char *p = value; *p >= '0' && *p <= '9' && digits < 4; p++, digits++) n = n * 10 + (*p - '0');
+    if (!digits || n > 100 || n < lowest || n % 25) return fallback;
+    return n;
+}
+
+int pc5_strength_next(int value, int lowest, int step)
+{
+    value += step > 0 ? 25 : -25;
+    if (value > 100) value = lowest;
+    if (value < lowest) value = 100;
+    return value;
+}
+
+int pc5_settings_load(const char *root, Pc5Settings *settings)
+{
+    char path[PC5_PATH];
+    Pc5Buf text = { 0 };
+
+    pc5_settings_default(settings);
+    if (pc5_format(path, sizeof(path), "%s/pc5/settings.txt", root) || pc5_read_file(path, &text, 16 * 1024)) {
+        pc5_buf_free(&text);
+        return -1;
+    }
+    for (char *line = (char *)text.data, *next; line && *line; line = next) {
+        char name[32], value[32];
+        next = strchr(line, '\n');
+        if (next) *next++ = 0;
+        if (line[0] == '#' || sscanf(line, " %31[a-z_] = %31[a-z0-9-]", name, value) != 2) continue;
+        if (!strcmp(name, "fps")) settings->fps = on_off(value, settings->fps);
+        else if (!strcmp(name, "fps_corner"))
+            settings->fps_corner = (Pc5Corner)pick(value, corner_keys, PC5_CORNERS, (int)settings->fps_corner);
+        else if (!strcmp(name, "vibration")) settings->vibration = percent(value, 0, settings->vibration);
+        else if (!strcmp(name, "trigger_rumble")) settings->trigger_rumble = percent(value, 25, settings->trigger_rumble);
+        else if (!strcmp(name, "trigger_resistance"))
+            settings->trigger_resistance = percent(value, 25, settings->trigger_resistance);
+        else if (!strcmp(name, "light_bar"))
+            settings->light_bar = (Pc5Light)pick(value, light_keys, PC5_LIGHTS, (int)settings->light_bar);
+        else if (!strcmp(name, "triggers"))
+            settings->triggers = (Pc5Triggers)pick(value, trigger_keys, PC5_TRIGGERS_COUNT, (int)settings->triggers);
+        else if (!strcmp(name, "check_updates")) settings->check_updates = on_off(value, settings->check_updates);
+        else if (!strcmp(name, "keep_logs")) settings->keep_logs = on_off(value, settings->keep_logs);
+    }
+    pc5_buf_free(&text);
+    return 0;
+}
+
+int pc5_settings_save(const char *root, const Pc5Settings *settings)
+{
+    char path[PC5_PATH], text[600];
+    int length;
+
+    if (pc5_format(path, sizeof(path), "%s/pc5", root) || pc5_mkdirs(path) ||
+        pc5_format(path, sizeof(path), "%s/pc5/settings.txt", root))
+        return -1;
+    length = snprintf(text, sizeof(text),
+                      "# PC5's settings (Settings in PC5 changes them)\n"
+                      "fps = %s\nfps_corner = %s\nvibration = %d\nlight_bar = %s\ntriggers = %s\n"
+                      "trigger_rumble = %d\ntrigger_resistance = %d\ncheck_updates = %s\nkeep_logs = %s\n",
+                      settings->fps ? "on" : "off", corner_keys[settings->fps_corner % PC5_CORNERS], settings->vibration,
+                      light_keys[settings->light_bar % PC5_LIGHTS], trigger_keys[settings->triggers % PC5_TRIGGERS_COUNT],
+                      settings->trigger_rumble, settings->trigger_resistance, settings->check_updates ? "on" : "off",
+                      settings->keep_logs ? "on" : "off");
+    return pc5_write_file(path, text, (size_t)length);
+}
+
+const char *pc5_corner_name(Pc5Corner corner) { return corner_names[corner % PC5_CORNERS]; }
+const char *pc5_light_name(Pc5Light light) { return light_names[light % PC5_LIGHTS]; }
+const char *pc5_triggers_name(Pc5Triggers triggers) { return trigger_names[triggers % PC5_TRIGGERS_COUNT]; }

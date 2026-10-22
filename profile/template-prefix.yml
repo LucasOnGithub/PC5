@@ -1,0 +1,20 @@
+# PC5's empty Windows (tools/make-prefix.py runs it through prospero-win's
+# tools/pw_install.py): a prefix made as the user "prospero", with DXVK in it
+# (2.6.2-prospero2, the build prospero-win tested GTA IV and Half-Life 2 on,
+# pinned by SHA-256 in pw_install.py). make-prefix.py then adds VKD3D-Proton.
+# Every game PC5 installs gets its own copy, with the game in C:\Games.
+name: "PC5 empty prefix"
+game_slug: pc5-template
+runner: wine
+prospero:
+  name: PC5 empty prefix
+  graphics: dxvk
+script:
+  game:
+    exe: drive_c/windows/system32/winver.exe
+    prefix: $GAMEDIR
+  wine:
+    dxvk: true
+    dxvk_version: "2.6.2-prospero2"
+  installer:
+  - task: {name: create_prefix, prefix: $GAMEDIR, arch: win32}

@@ -1,0 +1,49 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+/* PC5: game folders on USB drives. A game folder is any folder at the top of
+ * a drive (or in its Games folder) with a Windows program somewhere inside.
+ * Drives are only read. */
+#ifndef PC5_SOURCE_H
+#define PC5_SOURCE_H
+#include "pc5.h"
+#include "pc5_pe.h"
+
+enum { PC5_SOURCES = 64, PC5_EXES = 12, PC5_DEPTH = 6 };
+
+typedef struct Pc5Source {
+    char name[PC5_NAME];      /* the folder's name: the game's name in PC5 */
+    char path[PC5_PATH];
+    int drive;                /* /mnt/usb<drive> */
+} Pc5Source;
+
+/* Folders found on the drives under roots (NULL-terminated; the console's
+ * are /mnt/usb0 to /mnt/usb7). Returns how many, sorted by name. */
+int pc5_source_scan(const char *const roots[], Pc5Source *out, int max);
+
+typedef struct Pc5Exe {
+    char path[PC5_PATH];      /* inside the folder, with '/' */
+    uint64_t size;
+    int score;                /* how likely it is the game itself */
+    Pc5PeInfo pe;
+    uint32_t beside;          /* the imports of the libraries in its folder */
+} Pc5Exe;
+
+typedef struct Pc5Folder {
+    char path[PC5_PATH];
+    char name[PC5_NAME];
+    uint64_t bytes;
+    uint32_t files, folders;
+    Pc5Exe exes[PC5_EXES];    /* best first */
+    int exe_count;
+    uint32_t imports;         /* every program and library in the game's folders */
+    uint32_t steam_appid;     /* a steam_appid.txt at the top, or 0 */
+    char problem[PC5_ERROR];  /* why it can't be installed, or "" */
+} Pc5Folder;
+
+/* Walks the whole folder: its size, its programs (ranked), what they draw
+ * with. A problem (no Windows program, a name Windows can't use, too deep)
+ * is in problem. -1 only when the folder can't be read at all. */
+int pc5_folder_inspect(const char *path, const char *name, Pc5Folder *folder);
+/* The API of the chosen program, with the libraries beside it. */
+Pc5Api pc5_folder_api(const Pc5Folder *folder, int exe);
+
+#endif

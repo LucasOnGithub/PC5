@@ -1,0 +1,335 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+/* PC5 on the console (pc5_console.h): prospero-win's presenter, pad and
+ * keyboard, the console's clock and settings, and its HTTPS. */
+#include "pc5_console.h"
+#include "pc5.h"
+#include "pc5_game.h"
+#include "pc5_net.h"
+#include "pc5_ui.h"
+
+#include "pw_hid_ps5.h"
+#include "pw_pad_ps5.h"
+#include "pw_videoout_ps5.h"
+#include "../src/pw_present.h"
+#include "../include/prospero_win.h"
+
+#include <fcntl.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <time.h>
+#include <unistd.h>
+
+int sceSystemServiceParamGetInt(int id, int *value);
+
+/* The console's notification (libkernel): text in the request's message. */
+typedef struct NotifyRequest {
+    char reserved[45];
+    char message[3075];
+} NotifyRequest;
+int sceKernelSendNotificationRequest(int device, NotifyRequest *request, size_t size, int blocking);
+void pc5_net_ps5_init(const char *app, void (*log)(const char *line));
+void pc5_game_ps5_ops(Pc5GameOps *ops, void (*log)(const char *line));
+
+/* sceSystemServiceParamGetInt's ids, as the PS4 and PS5 SDKs number them. */
+enum { PARAM_LANG = 1, PARAM_TIME_FORMAT = 3, PARAM_TIME_ZONE = 4, PARAM_SUMMERTIME = 5, PARAM_ENTER_BUTTON = 1000 };
+
+enum { PAD_OPTIONS = 0x8u, PAD_UP = 0x10u, PAD_RIGHT = 0x20u, PAD_DOWN = 0x40u, PAD_LEFT = 0x80u, PAD_L1 = 0x400u,
+       PAD_R1 = 0x800u, PAD_TRIANGLE = 0x1000u, PAD_CIRCLE = 0x2000u, PAD_CROSS = 0x4000u, PAD_SQUARE = 0x8000u };
+
+static const Pc5Console *console;
+static int time_format = -1, time_zone, summer;
+
+const char *pc5_console_locale(void)
+{
+    /* SCE_SYSTEM_PARAM_LANG_*: Wine takes the Windows language from LC_ALL. */
+    static const char *const locales[] = {
+        "ja_JP", "en_US", "fr_FR", "es_ES", "de_DE", "it_IT", "nl_NL", "pt_PT", "ru_RU", "ko_KR",
+        "zh_TW", "zh_CN", "fi_FI", "sv_SE", "da_DK", "nb_NO", "pl_PL", "pt_BR", "en_GB", "tr_TR",
+        "es_MX", "ar_SA", "fr_CA", "cs_CZ", "hu_HU", "el_GR", "ro_RO", "th_TH", "vi_VN", "id_ID",
+    };
+    static char locale[24];
+    int language = -1;
+
+    if (sceSystemServiceParamGetInt(PARAM_LANG, &language) || language < 0 ||
+        language >= (int)(sizeof(locales) / sizeof(locales[0])))
+        return NULL;
+    snprintf(locale, sizeof(locale), "%s.UTF-8", locales[language]);
+    return locale;
+}
+
+static void log_line(void *context, const char *line)
+{
+    (void)context;
+    if (console->log) console->log(line);
+}
+
+static void plain_log(const char *line)
+{
+    if (console->log) console->log(line);
+}
+
+/* The time as the console shows it: UTC from the clock, the console's time
+ * zone and summer time, its 12- or 24-hour setting. */
+static void clock_text(void *context, char *out, size_t size)
+{
+    time_t now = time(NULL);
+    (void)context;
+    out[0] = 0;
+    if (time_format < 0 || now < 1600000000) return;
+    long long local = (long long)now + (long long)time_zone * 60 + (summer ? 3600 : 0);
+    int minutes = (int)((local / 60) % (24 * 60));
+    if (minutes < 0) minutes += 24 * 60;
+    int hour = minutes / 60, minute = minutes % 60;
+    if (time_format == 0) snprintf(out, size, "%d:%02d %s", hour % 12 ? hour % 12 : 12, minute, hour < 12 ? "AM" : "PM");
+    else snprintf(out, size, "%02d:%02d", hour, minute);
+}
+
+static void notify_text(void *context, const char *text)
+{
+    static NotifyRequest request;
+    (void)context;
+    memset(&request, 0, sizeof(request));
+    snprintf(request.message, sizeof(request.message), "%s", text);
+    int rc = sceKernelSendNotificationRequest(0, &request, sizeof(request), 0);
+    char line[160];
+    snprintf(line, sizeof(line), "PC5 notification rc=%d", rc);
+    if (console->log) console->log(line);
+}
+
+/* Seconds since 1970 and the console's offset from UTC (its time zone and summer time). */
+static int64_t unix_time(void *context, int *offset_s)
+{
+    time_t now = time(NULL);
+    (void)context;
+    if (offset_s) *offset_s = time_format >= 0 ? time_zone * 60 + (summer ? 3600 : 0) : 0;
+    return now < 1600000000 ? 0 : (int64_t)now;
+}
+
+/* PC5's own crash: a file naming this session, for pc5_logs_tidy when PC5
+ * next opens (the kernel ends the process; the log has no end line, as when
+ * the PS button closes PC5). Only async-signal-safe calls. */
+static char crash_marker[PC5_PATH];
+
+static void crashed(int sig)
+{
+    int fd = open(crash_marker, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) {
+        char text[16] = "signal ";
+        text[7] = (char)('0' + (sig / 10) % 10);
+        text[8] = (char)('0' + sig % 10);
+        text[9] = '\n';
+        (void)!write(fd, text, 10);
+        close(fd);
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void watch_for_crashes(const char *root)
+{
+    char path[PC5_PATH];
+    Pc5Buf text = { 0 };
+    int next = -1;
+
+    if (!pc5_format(path, sizeof(path), "%s/logs/next.txt", root) && !pc5_read_file(path, &text, 32))
+        next = atoi((char *)text.data);
+    pc5_buf_free(&text);
+    /* This session is the one before next.txt's (prospero-win's eight). */
+    if (next < 0 || next > 7 || pc5_format(path, sizeof(path), "%s/pc5", root) || pc5_mkdirs(path) ||
+        pc5_format(crash_marker, sizeof(crash_marker), "%s/pc5/crash-%d.txt", root, (next + 7) % 8))
+        return;
+    unlink(crash_marker);
+    signal(SIGSEGV, crashed);
+    signal(SIGBUS, crashed);
+    signal(SIGILL, crashed);
+    signal(SIGFPE, crashed);
+    signal(SIGABRT, crashed);
+}
+
+static PwVideoOutPs5 video;
+static PwPadPs5 pad;
+static int video_status = PW_ERR_STATE, pad_status = PW_ERR_STATE;
+
+/* The game gets the screen and the pad: PC5 lets go of them first, and
+ * takes them again only if the game could not be started. */
+static void play(void *context, const char *id)
+{
+    static const PwPadKeyMap open_map[] = { { PAD_CROSS, 0x20, 0, 0, "cross" } };
+    PwPadPs5Ops ops;
+    (void)context;
+    if (pad_status == PW_OK) pw_pad_ps5_close(&pad);
+    if (video_status == PW_OK) pw_videoout_ps5_close(&video);
+    pad_status = video_status = PW_ERR_STATE;
+    console->play(id);
+    video_status = pw_videoout_ps5_open(&video);
+    if (pw_pad_ps5_platform_ops(&ops) == PW_OK) pad_status = pw_pad_ps5_open(&pad, &ops, open_map, 1);
+}
+
+static uint64_t now_ms(void)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * 1000u + (uint64_t)now.tv_nsec / 1000000u;
+}
+
+static uint32_t key_of(uint16_t vk)
+{
+    switch (vk) {
+    case 0x26: return PC5_KEY_UP;
+    case 0x28: return PC5_KEY_DOWN;
+    case 0x25: return PC5_KEY_LEFT;
+    case 0x27: return PC5_KEY_RIGHT;
+    case 0x0d: case 0x20: return PC5_KEY_ACCEPT;
+    case 0x1b: case 0x08: return PC5_KEY_BACK;
+    case 0x70: case 0x5d: case 0x09: return PC5_KEY_OPTIONS;   /* F1, the menu key, Tab */
+    case 0x21: return PC5_KEY_L1;                             /* Page Up */
+    case 0x22: return PC5_KEY_R1;                             /* Page Down */
+    case 0x71: case 0x2e: return PC5_KEY_SQUARE;              /* F2, Delete */
+    case 0x72: return PC5_KEY_TRIANGLE;                       /* F3 */
+    default: return 0;
+    }
+}
+
+void pc5_console_run(const Pc5Console *config)
+{
+    static const PwPadKeyMap open_map[] = { { PAD_CROSS, 0x20, 0, 0, "cross" } };
+    static PwHidPs5 hid;
+    const char *usb_roots[] = { "/mnt/usb0", "/mnt/usb1", "/mnt/usb2", "/mnt/usb3", "/mnt/usb4", "/mnt/usb5",
+                                "/mnt/usb6", "/mnt/usb7", NULL };
+    char template_prefix[PC5_PATH], fonts[PC5_PATH], line[256];
+    const size_t frame_bytes = (size_t)1920 * 1080 * 4;
+    uint32_t *frame;
+    PwPadPs5Ops pad_ops;
+    int hid_status, enter = 1;
+    uint32_t keyboard_held = 0, stick_held = 0, previous = 0;
+    uint64_t frames = 0, drawn = 0, draw_ms = 0, last_report;
+    Pc5Platform platform;
+    Pc5Ui *ui;
+
+    console = config;
+    pc5_net_ps5_init(config->app, plain_log);
+    snprintf(template_prefix, sizeof(template_prefix), "%s/pc5/prefix", config->app);
+    snprintf(fonts, sizeof(fonts), "%s/pc5/fonts.bin", config->app);
+    if (sceSystemServiceParamGetInt(PARAM_TIME_FORMAT, &time_format)) time_format = -1;
+    if (sceSystemServiceParamGetInt(PARAM_TIME_ZONE, &time_zone) || time_zone < -720 || time_zone > 840) time_format = -1;
+    if (sceSystemServiceParamGetInt(PARAM_SUMMERTIME, &summer)) summer = 0;
+    if (sceSystemServiceParamGetInt(PARAM_ENTER_BUTTON, &enter)) enter = 1;
+    snprintf(line, sizeof(line), "PC5 start version=%s root=%s app=%s cycle=%u time_format=%d zone=%d summer=%d enter=%d locale=%s",
+             PC5_VERSION, config->root, config->app, config->cycle, time_format, time_zone, summer, enter,
+             pc5_console_locale() ? pc5_console_locale() : "-");
+    plain_log(line);
+
+    frame = mmap(NULL, frame_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    video_status = pw_videoout_ps5_open(&video);
+    if (frame == MAP_FAILED || video_status != PW_OK) {
+        snprintf(line, sizeof(line), "PC5 no screen video=%s frame=%d", pw_result_name(video_status), frame != MAP_FAILED);
+        plain_log(line);
+        if (video_status == PW_OK) pw_videoout_ps5_close(&video);
+        if (frame != MAP_FAILED) munmap(frame, frame_bytes);
+        return;
+    }
+    pad_status = pw_pad_ps5_platform_ops(&pad_ops);
+    if (pad_status == PW_OK) pad_status = pw_pad_ps5_open(&pad, &pad_ops, open_map, 1);
+    {
+        int32_t user = pad_status == PW_OK ? pad.user_id : -1;
+        if (user < 0 && pw_pad_ps5_platform_ops(&pad_ops) == PW_OK) {
+            (void)pad_ops.user_initialize(NULL);
+            (void)pad_ops.foreground_user(&user);
+        }
+        hid_status = pw_hid_ps5_open(&hid, pw_hid_ps5_system_ops(plain_log), user);
+    }
+    snprintf(line, sizeof(line), "PC5 devices pad=%s keyboard=%s", pw_result_name(pad_status), pw_result_name(hid_status));
+    plain_log(line);
+    /* A game may have left the light bar or the triggers set: as the console had them. */
+    if (pad_status == PW_OK) {
+        Pc5GameOps game_ops;
+        Pc5Trigger off = { PC5_TRIGGER_OFF, 0, 0, 0, 0 };
+        pc5_game_ps5_ops(&game_ops, plain_log);
+        int light = game_ops.light_bar_reset(pad.pad_handle), triggers = game_ops.triggers(pad.pad_handle, &off, &off);
+        snprintf(line, sizeof(line), "PC5 controller reset light=%d triggers=%d", light, triggers);
+        plain_log(line);
+    }
+
+    watch_for_crashes(config->root);
+    platform = (Pc5Platform){ NULL, { NULL, pc5_net_get }, clock_text, play, log_line, notify_text, unix_time, enter == 0 };
+    {
+        Pc5UiConfig ui_config = { config->root, template_prefix, fonts, usb_roots };
+        ui = pc5_ui_create(&ui_config, &platform);
+    }
+    if (!ui) {
+        plain_log("PC5 out of memory");
+        pw_videoout_ps5_close(&video);
+        return;
+    }
+    last_report = now_ms();
+    for (uint64_t tick = 1;; tick++) {
+        Pc5Input input = { 0, 0 };
+        uint32_t held = keyboard_held;
+        if (pad_status == PW_OK && pw_pad_ps5_read(&pad) == PW_OK) {
+            uint32_t buttons = pad.core.previous_buttons;
+            uint32_t accept = enter == 0 ? PAD_CIRCLE : PAD_CROSS, back = enter == 0 ? PAD_CROSS : PAD_CIRCLE;
+            if (buttons & PAD_UP) held |= PC5_KEY_UP;
+            if (buttons & PAD_DOWN) held |= PC5_KEY_DOWN;
+            if (buttons & PAD_LEFT) held |= PC5_KEY_LEFT;
+            if (buttons & PAD_RIGHT) held |= PC5_KEY_RIGHT;
+            if (buttons & accept) held |= PC5_KEY_ACCEPT;
+            if (buttons & back) held |= PC5_KEY_BACK;
+            if (buttons & PAD_OPTIONS) held |= PC5_KEY_OPTIONS;
+            if (buttons & PAD_L1) held |= PC5_KEY_L1;
+            if (buttons & PAD_R1) held |= PC5_KEY_R1;
+            if (buttons & PAD_SQUARE) held |= PC5_KEY_SQUARE;
+            if (buttons & PAD_TRIANGLE) held |= PC5_KEY_TRIANGLE;
+            /* The left stick moves too, past a third of its travel. */
+            stick_held = 0;
+            if (pad.left_stick.x < 0x40) stick_held |= PC5_KEY_LEFT;
+            if (pad.left_stick.x > 0xc0) stick_held |= PC5_KEY_RIGHT;
+            if (pad.left_stick.y < 0x40) stick_held |= PC5_KEY_UP;
+            if (pad.left_stick.y > 0xc0) stick_held |= PC5_KEY_DOWN;
+            held |= stick_held;
+        } else {
+            held |= stick_held;
+        }
+        if (hid.ops.load_module) {
+            PwHidPs5Poll poll;
+            if (hid_status != PW_OK && tick % 300 == 0) hid_status = pw_hid_ps5_retry(&hid);
+            pw_hid_ps5_poll(&hid, &poll);
+            for (size_t i = 0; i < poll.count; i++)
+                if (poll.events[i].kind == PW_HID_EVENT_KEY) {
+                    uint32_t key = key_of(poll.events[i].code);
+                    if (poll.events[i].down) { keyboard_held |= key; held |= key; input.pressed |= key & ~previous; }
+                    else keyboard_held &= ~key;
+                }
+        }
+        input.held = held;
+        input.pressed |= held & ~previous;
+        previous = held;
+        uint64_t now = now_ms();
+        if (pc5_ui_update(ui, &input, now)) {
+            const PwPresentView view = { (const uint8_t *)frame, 1920, 1080, 1920 * 4, (uint32_t)frame_bytes };
+            Pc5Canvas canvas = { frame, 1920, 1080, 1920 };
+            uint64_t before = now_ms();
+            pc5_ui_draw(ui, &canvas);
+            int status = video_status == PW_OK ? pw_videoout_ps5_present(&video, &view) : video_status;
+            draw_ms += now_ms() - before;
+            drawn++;
+            if (status != PW_OK && drawn < 5) {
+                snprintf(line, sizeof(line), "PC5 present=%s", pw_result_name(status));
+                plain_log(line);
+            }
+        } else {
+            usleep(12000);
+        }
+        frames++;
+        if (now - last_report >= 30000 && drawn) {
+            snprintf(line, sizeof(line), "PC5 frames=%llu drawn=%llu draw_ms_avg=%.1f screen=%s",
+                     (unsigned long long)frames, (unsigned long long)drawn, (double)draw_ms / (double)drawn,
+                     pc5_ui_screen(ui));
+            plain_log(line);
+            last_report = now;
+            frames = drawn = draw_ms = 0;
+        }
+    }
+}

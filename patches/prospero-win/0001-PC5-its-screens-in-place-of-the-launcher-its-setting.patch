@@ -1,0 +1,996 @@
+From e90a69172f4c74eabc4e0dd295314f28697b1333 Mon Sep 17 00:00:00 2001
+From: bornaradusin <bornaradusin@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 16:30:00 +0100
+Subject: [PATCH] PC5: its screens in place of the launcher, its settings in
+ games
+
+Built with PW_PC5 (PC5, PPSA11018) the title shows PC5's screens
+(native/pc5_*.c, added by the PC5 build) instead of the launcher;
+choosing a game reads the profiles again, so a game PC5 just installed
+starts, and restarts the title into it. If PC5's files are missing from
+the app, or it can't open the screen, the launcher is shown as before.
+
+In a game, with PW_PC5:
+- Wine gets LC_ALL from the PS5's language (Wine takes the Windows
+  language from it when setlocale has nothing), and RADV's shader cache
+  is kept in the game's own prefix (pc5-cache/radv);
+- PC5's loading screen replaces the spinner until the first picture;
+- the touchpad and Options held for two seconds close the game (Alt+F4,
+  ended after five seconds as before), with a short buzz;
+- PC5's settings apply (pc5_game.h): the game's rumble or none, the
+  light bar in the game's colour or the screen's, the triggers' rumble
+  or resistance, and the frame counter in a corner.
+
+libvulkan.prx (wine/ps5/pw_vulkan_radv.c, tools/link_radv_prx.sh): RADV's
+framebuffer registrations and flips are wrapped too. Each flip counts
+towards the frame counter, which VideoOut's second hardware cursor shows
+(pw_pc5_hud, drawn from the title's loop by pw_pc5_hud_tick: RADV flips
+with its output's lock held); the shown framebuffer's colour is read for
+the light bar (pw_pc5_screen_color: texels spread over it, whose tiling
+only reorders them). wine/ps5/pw_pc5_hud.h draws the counter for both.
+
+For any build: the library holds 128 games (PW_WINE_LIBRARY_MAX,
+PW_PROFILE_CATALOG_MAX); PW_TITLE_ID and PW_WINE64_ROOT_DATA can be set;
+the sandbox instance holding the runtime is looked for once /data is
+granted (the console counts _000, _001, ... up when one is left behind),
+for the runtime and for restarting the title; and
+tools/build_native.sh takes PW_TITLE_ID, PW_LAPY_DIR (a Lapy helper built
+for that title), PW_EXTRA_SOURCES, PW_EXTRA_CFLAGS and PW_EXTRA_LIBS.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
+---
+ native/pw_wine_library.h  |   2 +-
+ native/wine64_main.c      | 294 ++++++++++++++++++++++++++++++++++++--
+ src/pw_profile_catalog.h  |   4 +-
+ tools/build_native.sh     |  34 ++++-
+ tools/link_radv_prx.sh    |   8 +-
+ wine/ps5/pw_pc5_hud.h     |  98 +++++++++++++
+ wine/ps5/pw_vulkan_radv.c | 219 ++++++++++++++++++++++++++++
+ 7 files changed, 636 insertions(+), 23 deletions(-)
+ create mode 100644 wine/ps5/pw_pc5_hud.h
+
+diff --git a/native/pw_wine_library.h b/native/pw_wine_library.h
+index d958561..e9b08be 100644
+--- a/native/pw_wine_library.h
++++ b/native/pw_wine_library.h
+@@ -20,7 +20,7 @@
+ #include "../src/pw_game_profile.h"
+ 
+ enum {
+-    PW_WINE_LIBRARY_MAX = 32, PW_WINE_LIBRARY_NAME = 64, PW_WINE_LIBRARY_PATH = 256,
++    PW_WINE_LIBRARY_MAX = 128, PW_WINE_LIBRARY_NAME = 64, PW_WINE_LIBRARY_PATH = 256,
+     PW_WINE_LIBRARY_SCANNED = 1, PW_WINE_LIBRARY_INDEXED = 2,
+ };
+ 
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+index 65a2111..7e5e081 100644
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -43,6 +43,11 @@
+ #include "../src/pw_tsc_calibrate.h"
+ #include "pw_wine_display.h"
+ #include "../include/prospero_win.h"
++#ifdef PW_PC5
++#include "pc5_console.h"
++#include "pc5_game.h"
++#include "../wine/ps5/pw_pc5_hud.h"
++#endif
+ 
+ #include <pthread.h>
+ #include <signal.h>
+@@ -56,7 +61,11 @@
+ #include <time.h>
+ #include <unistd.h>
+ 
++/* The title's id; a build for another title sets its own (build_native.sh,
++ * PW_TITLE_ID). Its sandbox view of app0 and its Lapy helper follow it. */
++#ifndef PW_TITLE_ID
+ #define PW_TITLE_ID "PPSA99995"
++#endif
+ #define PW_APP_NAME "prospero-win-wine64"
+ 
+ /* Where the title's Wine runtime can be seen: /app0 inside the sandbox;
+@@ -66,9 +75,15 @@
+ /* Its 64-bit PE modules, among them the WoW64 CPU backends. */
+ #define PW_WINE64_PE_RUNTIME "/win/wine/lib/wine/x86_64-windows"
+ #define PW_SANDBOX_APP0 "/mnt/sandbox/" PW_TITLE_ID "_000/app0"
+-static const char *const runtime_roots[] = { "/app0", PW_SANDBOX_APP0 };
++/* The console counts the sandbox instance up (_001, ...) when an earlier one
++ * was left behind, so once /data is granted the one that holds the runtime
++ * is looked for (find_sandbox_app0); _000 until then. */
++static char sandbox_app0[64] = PW_SANDBOX_APP0;
++static const char *const runtime_roots[] = { "/app0", sandbox_app0 };
+ /* The title's data: profiles/, input/, prefix/ and prefixes/<name>. */
++#ifndef PW_WINE64_ROOT_DATA
+ #define PW_WINE64_ROOT_DATA "/data/prospero-win"            /* when /data is granted */
++#endif
+ #define PW_WINE64_ROOT_SANDBOX "/download0/prospero-win"    /* sandbox fallback */
+ #ifndef PW_WINE64_DEBUG
+ /* No +seh: WoW64 callback returns unwind with 80000026 many times a second
+@@ -226,13 +241,30 @@ static const char *library_root = PW_WINE64_ROOT_SANDBOX;
+ enum { PW_WINE64_MAX_FRAME = 1920 * 1200 * 4, PW_WINE64_TICK_US = 16000,
+        PW_WINE64_TICKS_PER_S = 60, PW_WINE64_CLOSE_WAIT_S = 5 };
+ 
++#ifdef PW_PC5
++/* PC5: a game closes with the touchpad and Options held for two seconds. */
+ enum { PAD_CREATE = 0x1u, PAD_OPTIONS = 0x8u, PAD_UP = 0x10u, PAD_RIGHT = 0x20u,
+        PAD_DOWN = 0x40u, PAD_LEFT = 0x80u, PAD_L1 = 0x400u, PAD_R1 = 0x800u,
+-       PAD_CROSS = 0x4000u, PAD_SQUARE = 0x8000u, PAD_CLOSE = PAD_OPTIONS | PAD_CREATE };
++       PAD_CROSS = 0x4000u, PAD_SQUARE = 0x8000u, PAD_TOUCH = 0x100000u, PAD_CLOSE = PAD_OPTIONS | PAD_TOUCH,
++       PW_WINE64_CLOSE_HOLD_TICKS = 2 * PW_WINE64_TICKS_PER_S };
++#else
++enum { PAD_CREATE = 0x1u, PAD_OPTIONS = 0x8u, PAD_UP = 0x10u, PAD_RIGHT = 0x20u,
++       PAD_DOWN = 0x40u, PAD_LEFT = 0x80u, PAD_L1 = 0x400u, PAD_R1 = 0x800u,
++       PAD_CROSS = 0x4000u, PAD_SQUARE = 0x8000u, PAD_CLOSE = PAD_OPTIONS | PAD_CREATE,
++       PW_WINE64_CLOSE_HOLD_TICKS = PW_WINE64_TICKS_PER_S };
++#endif
+ /* The pad core needs a key map to open; the title reads raw edges and maps
+  * them with the game's bindings (pw_game_profile). */
+ static const PwPadKeyMap pad_open_map[] = { { PAD_CROSS, 0x20, 0, 0, "cross" } };
+ 
++#ifdef PW_PC5
++/* PC5's settings in the game: the loading screen, the controller and the
++ * frame counter (pc5_game.h, title/ of the PC5 repo). */
++static Pc5GameSession pc5_game;
++static int pc5_game_on;
++void pc5_game_ps5_ops(Pc5GameOps *ops, void (*log)(const char *line));
++#endif
++
+ 
+ int sceSystemServiceLoadExec(const char *path, char *const argv[]);
+ int32_t sceKernelLoadStartModule(const char *path, size_t argc, const void *argv,
+@@ -457,6 +489,9 @@ static void loading_done(Loading *loading, const char *by)
+ {
+     if (loading->content) return;
+     loading->content = 1;
++#ifdef PW_PC5
++    if (pc5_game_on) pc5_game_loading_done(&pc5_game);
++#endif
+     PS5LOG_LOG("PW_WINE64 loading done by=%s spinner_steps=%u", by, loading->step);
+ }
+ 
+@@ -464,6 +499,20 @@ static void loading_done(Loading *loading, const char *by)
+ static const PwPresentFrame *loading_frame(Loading *loading, uint64_t now, uint64_t started,
+                                            PwPresentFrame *frame)
+ {
++#ifdef PW_PC5
++    /* PC5's loading screen in place of the spinner, unless it can't be drawn. */
++    if (pc5_game_on && !pc5_game.matrix_failed) {
++        if (loading->content || now - started < PW_WINE64_SPINNER_DELAY_MS * 1000000ull) return NULL;
++        const uint32_t *pixels = pc5_game_loading(&pc5_game, now / 1000000u);
++        if (pixels) {
++            loading->step++;
++            *frame = (PwPresentFrame){ (const uint8_t *)pixels, PC5_MATRIX_WIDTH, PC5_MATRIX_HEIGHT,
++                                       PC5_MATRIX_WIDTH * 4, PW_PRESENT_BGRX8 };
++            return frame;
++        }
++        if (!pc5_game.matrix_failed) return NULL;
++    }
++#endif
+     if (loading->content || now - started < PW_WINE64_SPINNER_DELAY_MS * 1000000ull ||
+         now < loading->next_ns)
+         return NULL;
+@@ -607,10 +656,12 @@ static PwWineLaunch launch;
+  * sandbox's view of the same eboot is tried next. Returns only on failure. */
+ static void restart_title(const PwWineApp *app, uint32_t cycle, const char *reason)
+ {
+-    static const char *const eboots[] = { "/app0/eboot.bin", PW_SANDBOX_APP0 "/eboot.bin" };
++    static char sandbox_eboot[sizeof(sandbox_app0) + 16];
++    const char *const eboots[] = { "/app0/eboot.bin", sandbox_eboot };
+     static char storage[2 * PW_WINE_LAUNCH_PATH_MAX + 64];
+     char *next[PW_WINE_LAUNCH_ARGS];
+ 
++    snprintf(sandbox_eboot, sizeof(sandbox_eboot), "%s/eboot.bin", sandbox_app0);
+     if (!pw_wine_launch_argv(app, cycle, storage, sizeof(storage), next, PW_WINE_LAUNCH_ARGS)) {
+         PS5LOG_LOG("PW_WINE64 restart refused: arguments do not fit");
+         return;
+@@ -634,8 +685,28 @@ static void on_exit_report(void)
+     pw_diagnostics_close("wine64-exit");
+ }
+ 
++/* The sandbox instance whose app0 holds the runtime, once /data is granted. */
++static void find_sandbox_app0(void)
++{
++    for (unsigned i = 0; i < 16; i++) {
++        char candidate[sizeof(sandbox_app0)], ntdll[sizeof(sandbox_app0) + 64];
++        struct stat st;
++
++        snprintf(candidate, sizeof(candidate), "/mnt/sandbox/" PW_TITLE_ID "_%03u/app0", i);
++        snprintf(ntdll, sizeof(ntdll), "%s" PW_WINE64_RUNTIME "/ntdll.prx", candidate);
++        if (stat(ntdll, &st) == 0) {
++            if (strcmp(candidate, sandbox_app0)) PS5LOG_LOG("PW_WINE64 sandbox app0=%s", candidate);
++            memcpy(sandbox_app0, candidate, sizeof(sandbox_app0));
++            return;
++        }
++    }
++}
++
++
+ /* ---- library ------------------------------------------------------------ */
+ 
++static void load_catalog(void);
++
+ /* Complete the one-shot helper exchange before loading profiles or starting
+  * Wine. A failed or incomplete request closes this process to Home. */
+ static int open_library(void)
+@@ -651,7 +722,16 @@ static int open_library(void)
+                mount.helper_errno, mount.data_after, mount.elevated_after, mount.waited_ms,
+                mount.settled_ms, status == 0 ? library_root : "unavailable");
+     if (status != 0) return -1;
+-    status = pw_wine_library_load(&library, library_root);
++    find_sandbox_app0();
++    load_catalog();
++    return 0;
++}
++
++/* The games: every valid profile under the library root. Read again when PC5
++ * starts a game, which may be one it installed since this process began. */
++static void load_catalog(void)
++{
++    int status = pw_wine_library_load(&library, library_root);
+     catalog_count = 0;
+     for (uint32_t i = 0; i < library.count; i++) {
+         const PwWineLibraryEntry *entry = &library.entries[i];
+@@ -679,7 +759,6 @@ static int open_library(void)
+     PS5LOG_LOG("PW_WINE64 library status=%s listed_by=%d scan_errno=%d entries=%u games=%u "
+                    "root=%s", pw_result_name(status), library.listed_by, library.scan_error,
+                (unsigned)library.count, (unsigned)catalog_count, library_root);
+-    return 0;
+ }
+ 
+ /* The USB keyboard and mouse's log lines. */
+@@ -813,6 +892,147 @@ static void run_launcher(void)
+     _exit(1);
+ }
+ 
++#ifdef PW_PC5
++/* ---- PC5: its screens in place of the launcher (title/ of the PC5 repo) ---- */
++
++static void pc5_log(const char *line)
++{
++    PS5LOG_LOG("%s", line);
++}
++
++/* Starts the game PC5 chose. The profiles are read again first: PC5 may
++ * have installed the game, or written its profile again, since this process
++ * began. Returns only when the title could not be restarted. */
++static void pc5_play(const char *id)
++{
++    load_catalog();
++    for (size_t i = 0; i < catalog_count; i++)
++        if (!strcmp(catalog[i].id, id)) {
++            restart_title(&catalog[i], launch.cycle, "pc5");
++            break;
++        }
++    PS5LOG_LOG("PW_WINE64 pc5 play failed id=%s", id);
++}
++
++/* The app's folder with PC5's files in it (pc5/fonts.bin), or NULL. */
++static const char *pc5_app_root(void)
++{
++    for (size_t i = 0; i < sizeof(runtime_roots) / sizeof(runtime_roots[0]); i++) {
++        char fonts[160];
++        struct stat st;
++        snprintf(fonts, sizeof(fonts), "%s/pc5/fonts.bin", runtime_roots[i]);
++        if (stat(fonts, &st) == 0) return runtime_roots[i];
++    }
++    return NULL;
++}
++
++/* Returns only when PC5 can't show its screens (its files missing, or no
++ * screen): prospero-win's own launcher is shown then. */
++static void pc5_launcher(void)
++{
++    const char *app = pc5_app_root();
++
++    if (!app) {
++        PS5LOG_LOG("PW_WINE64 pc5 files missing from the app");
++        return;
++    }
++    const Pc5Console console = { library_root, app, launch.cycle, pc5_play, pc5_log };
++    pc5_console_run(&console);
++}
++
++/* In a game: PC5's settings, the game's colour, the loading screen. */
++static void pc5_game_start(const PwGameProfile *game, const char *executable)
++{
++    Pc5GameOps ops;
++    const char *app = pc5_app_root();
++
++    pc5_game_ps5_ops(&ops, pc5_log);
++    pc5_game_begin(&pc5_game, &ops, library_root, app ? app : "", game ? game->app.prefix : "",
++                   game && game->app.name[0] ? game->app.name : executable);
++    pc5_game_on = 1;
++}
++
++/* libvulkan.prx's frame counter and screen colour (wine/ps5/pw_vulkan_radv.c),
++ * looked for once Vulkan has the display, every second until found. */
++static struct {
++    void (*hud)(int on, int corner);
++    void (*hud_tick)(void);
++    uint32_t (*screen_color)(void);
++    int hud_set;
++    uint64_t looked_at;
++} pc5_vulkan;
++static uint32_t pc5_gdi_color;
++static uint64_t pc5_light_at, pc5_gdi_at, pc5_pulse_until;
++
++static void pc5_vulkan_find(const PwPrxDescriptor *ntdll, uint64_t ms)
++{
++    void *(*wine_dlsym)(void *, const char *);
++
++    if (pc5_vulkan.hud || (pc5_vulkan.looked_at && ms - pc5_vulkan.looked_at < 1000)) return;
++    pc5_vulkan.looked_at = ms;
++    wine_dlsym = (void *(*)(void *, const char *))(uintptr_t)pw_prx_lookup(ntdll, "dlsym");
++    if (!wine_dlsym) return;
++    pc5_vulkan.hud = (void (*)(int, int))(uintptr_t)wine_dlsym(NULL, "pw_pc5_hud");
++    pc5_vulkan.hud_tick = (void (*)(void))(uintptr_t)wine_dlsym(NULL, "pw_pc5_hud_tick");
++    pc5_vulkan.screen_color = (uint32_t (*)(void))(uintptr_t)wine_dlsym(NULL, "pw_pc5_screen_color");
++    if (pc5_vulkan.hud)
++        PS5LOG_LOG("PW_WINE64 pc5 vulkan hud=%d tick=%d color=%d", pc5_vulkan.hud != NULL, pc5_vulkan.hud_tick != NULL,
++                   pc5_vulkan.screen_color != NULL);
++}
++
++/* Every tick of the game's loop: the controller, and the frame counter once
++ * the game shows something (over Vulkan's frames by libvulkan, over the
++ * title's own by the title). */
++static void pc5_game_tick(const PwPrxDescriptor *ntdll, PwPadPs5 *pad, int pad_ok, PwVideoOutPs5 *video,
++                          int video_ok, uint64_t shown, int content, uint64_t now)
++{
++    uint64_t ms = now / 1000000u;
++    int vulkan = __atomic_load_n(&display_closed, __ATOMIC_ACQUIRE);
++
++    if (!pc5_game_on) return;
++    if (vulkan) pc5_vulkan_find(ntdll, ms);
++    if (pad_ok) {
++        uint32_t screen = 0;
++        if (pc5_game.settings.light_bar == PC5_LIGHT_SCREEN && ms - pc5_light_at >= 100) {
++            pc5_light_at = ms;
++            screen = vulkan ? (pc5_vulkan.screen_color ? pc5_vulkan.screen_color() : 0) : pc5_gdi_color;
++        }
++        pc5_game_pad(&pc5_game, pad->pad_handle, ms, screen);
++        if (pc5_pulse_until && ms >= pc5_pulse_until) {
++            pc5_pulse_until = 0;
++            (void)pw_pad_ps5_vibrate(pad, 0, 0);
++        }
++    }
++    if (!content) return;
++    if (vulkan) {
++        if (pc5_vulkan.hud && !pc5_vulkan.hud_set) {
++            pc5_vulkan.hud(pc5_game.settings.fps, (int)pc5_game.settings.fps_corner);
++            pc5_vulkan.hud_set = 1;
++        }
++        if (pc5_vulkan.hud_tick && pc5_game.settings.fps) pc5_vulkan.hud_tick();
++    } else if (video_ok) {
++        pc5_game_hud(&pc5_game, video->handle, shown, ms);
++    }
++}
++
++/* A frame the title shows itself: its colour, for the light bar, ten times a second. */
++static void pc5_game_frame(const PwPresentView *view, uint64_t now)
++{
++    uint64_t ms = now / 1000000u;
++    uint32_t samples[32 * 32];
++
++    if (!pc5_game_on || pc5_game.settings.light_bar != PC5_LIGHT_SCREEN || ms - pc5_gdi_at < 100 || !view->width ||
++        !view->height)
++        return;
++    pc5_gdi_at = ms;
++    for (uint32_t y = 0; y < 32; y++)
++        for (uint32_t x = 0; x < 32; x++)
++            memcpy(&samples[y * 32 + x], view->pixels + (size_t)(view->height * (2 * y + 1) / 64) * view->stride +
++                                             (size_t)(view->width * (2 * x + 1) / 64) * 4, 4);
++    pc5_gdi_color = pw_pc5_screen_tint(samples, 32 * 32, 1);
++}
++#endif
++
+ /* ---- early fault report ------------------------------------------------ */
+ 
+ /* Until Wine installs its own handlers, a fault inside ntdll would end the
+@@ -894,8 +1114,16 @@ static int start_thread(void (*entry)(void *), void *arg, size_t stack_bytes)
+ int main(int argc, char **argv)
+ {
+     static char prefix[PW_WINE_LIBRARY_PATH + PW_APP_ID_CAPACITY], desktop[24], view[8] = "window";
++#ifdef PW_PC5
++    /* The game's Windows language is the PS5's: Wine takes it from LC_ALL. */
++    static char pc5_locale[32] = "en_US.UTF-8";
++    static char radv_cache[PW_WINE_LIBRARY_PATH + PW_APP_ID_CAPACITY + 32];
++    enum { PC5_FIXED_ENV = 1 };
++#else
+     static char radv_cache[PW_WINE_LIBRARY_PATH + 16];
+-    enum { WINE64_FIXED_ENV_COUNT = 7,
++    enum { PC5_FIXED_ENV = 0 };
++#endif
++    enum { WINE64_FIXED_ENV_COUNT = 7 + PC5_FIXED_ENV,
+            WINE64_PROFILE_ENV_CAPACITY = 3 + PW_GAME_GRAPHICS_ENV_MAX + PW_GAME_RUNTIME_ENV_MAX + PW_GAME_CPU_ENV_MAX +
+                                          PW_GAME_CLOCK_ENV_MAX + PW_GAME_DEBUG_ENV_MAX };
+     static PwWineStartEnv extra[WINE64_FIXED_ENV_COUNT + WINE64_PROFILE_ENV_CAPACITY] = {
+@@ -914,6 +1142,9 @@ int main(int argc, char **argv)
+          * driver keeps the first value, so this must be set before it
+          * starts; a profile's [debug] env line still overrides it. */
+         { "MESA_SHADER_CACHE_DIR", radv_cache },
++#ifdef PW_PC5
++        { "LC_ALL", pc5_locale },
++#endif
+         { NULL, NULL }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL }, /* profile-specific environment */
+     };
+     _Static_assert(sizeof(extra) / sizeof(extra[0]) ==
+@@ -971,7 +1202,12 @@ int main(int argc, char **argv)
+     PS5LOG_LOG("PW_WINE64 args argc=%d mode=%s profile=%s cycle=%u refused=%u", argc,
+                launch.mode == PW_WINE_LAUNCH_GAME ? "game" : "launcher",
+                launch.app ? launch.app->id : "-", (unsigned)launch.cycle, launch.refused);
+-    if (launch.mode != PW_WINE_LAUNCH_GAME) run_launcher();
++    if (launch.mode != PW_WINE_LAUNCH_GAME) {
++#ifdef PW_PC5
++        pc5_launcher();
++#endif
++        run_launcher();
++    }
+     wine_argv[1] = launch.executable;
+     /* The game's profile: its prefix, desktop, scaling and input. A bare
+      * path= runs in the default prefix with nothing bound. */
+@@ -981,7 +1217,18 @@ int main(int argc, char **argv)
+         snprintf(prefix, sizeof(prefix), "%s/prefixes/%s", library_root, game->app.prefix);
+     else
+         snprintf(prefix, sizeof(prefix), "%s/prefix", library_root);
++#ifdef PW_PC5
++    /* Each game keeps its shaders in its own folder: they last between
++     * launches and go when the game is uninstalled. */
++    snprintf(radv_cache, sizeof(radv_cache), "%s/pc5-cache/radv", prefix);
++    {
++        const char *locale = pc5_console_locale();
++        if (locale) snprintf(pc5_locale, sizeof(pc5_locale), "%s", locale);
++        PS5LOG_LOG("PW_WINE64 pc5 locale=%s shader_cache=%s", pc5_locale, radv_cache);
++    }
++#else
+     snprintf(radv_cache, sizeof(radv_cache), "%s/cache/radv", library_root);
++#endif
+     if (game) {
+         int input_status = pw_wine_library_input(game, library_root, &game_input);
+         scaling = (int)game->display.scaling;
+@@ -1182,6 +1429,9 @@ int main(int argc, char **argv)
+             }
+             hid_status = pw_hid_ps5_open(&hid, pw_hid_ps5_system_ops(hid_log), user);
+         }
++#ifdef PW_PC5
++        pc5_game_start(game, launch.executable);
++#endif
+         {
+             uint8_t *storage = mmap(NULL, 2u * PW_WINE64_MAX_FRAME, PROT_READ | PROT_WRITE,
+                                     MAP_PRIVATE | MAP_ANON, -1, 0);
+@@ -1338,7 +1588,12 @@ int main(int argc, char **argv)
+              * DualSense's large one, speeds 0..65535 become 0..255. */
+             uint32_t left, right;
+             if (rumble && rumble(&left, &right) == 1) {
+-                int vibrate = pw_pad_ps5_vibrate(&pad, (uint8_t)(left >> 8), (uint8_t)(right >> 8));
++                uint8_t large = (uint8_t)(left >> 8), small = (uint8_t)(right >> 8);
++#ifdef PW_PC5
++                /* PC5's Vibration setting, and the triggers that follow the rumble. */
++                if (pc5_game_on) pc5_game_rumble(&pc5_game, pad.pad_handle, left, right, &large, &small);
++#endif
++                int vibrate = pw_pad_ps5_vibrate(&pad, large, small);
+                 if (!vibrations++ || vibrate != PW_OK)
+                     PS5LOG_LOG("PW_WINE64 rumble left=%u right=%u status=%s rc=%d", (unsigned)left,
+                                (unsigned)right, pw_result_name(vibrate), pad.vibration_rc);
+@@ -1361,6 +1616,9 @@ int main(int argc, char **argv)
+                 if (show_scaled(&video, &view, scaling) == PW_OK) {
+                     shown++;          /* present waits for the vblank */
+                     presented = 1;
++#ifdef PW_PC5
++                    pc5_game_frame(&view, now);
++#endif
+                 }
+             } else if ((next = loading_frame(&loading, now, started, &spinner)) &&
+                        pw_videoout_ps5_present_scaled(&video, next, PW_PRESENT_SCALE_FIT, 0) == PW_OK) {
+@@ -1370,24 +1628,36 @@ int main(int argc, char **argv)
+             if (!vulkan_frames.resolved) vulkan_frames_resolve(&vulkan_frames, start.descriptor);
+             (void)vulkan_frames_show(&vulkan_frames, &shown_sequence, scaling, &loading, now, started);
+         }
++#ifdef PW_PC5
++        pc5_game_tick(start.descriptor, &pad, pad_status == PW_OK, &video, video_status == PW_OK, shown, loading.content,
++                      now);
++#endif
+         if (!presented) usleep(PW_WINE64_TICK_US);
+ 
+-        /* Closing: Options+Create held for a second, or the deadline, asks
+-         * the game to close with Alt+F4; Wine's exit then restarts the
+-         * title (on_exit_report). A game that does not close is left. */
++        /* Closing: Options+Create held for a second (with PC5: the touchpad
++         * and Options for two), or the deadline, asks the game to close with
++         * Alt+F4; Wine's exit then restarts the title (on_exit_report). A
++         * game that does not close is left. */
+         if (pad_status == PW_OK && (pad.core.pressed_edges & PAD_CREATE) &&
+             !(pad.core.previous_buttons & PAD_OPTIONS))
+             PS5LOG_LOG("PW_WINE64 marker by=player tick=%llu", (unsigned long long)tick);
+         combo_ticks = pad_status == PW_OK && (pad.core.previous_buttons & PAD_CLOSE) == PAD_CLOSE ?
+                       combo_ticks + 1 : 0;
+         if (!close_requested &&
+-            (combo_ticks >= PW_WINE64_TICKS_PER_S ||
++            (combo_ticks >= PW_WINE64_CLOSE_HOLD_TICKS ||
+              (PW_WINE64_SECONDS && now - started >= (uint64_t)PW_WINE64_SECONDS * 1000000000u))) {
+             static const PwWineInput alt_f4[] = {
+                 { PW_WINE_INPUT_KEY, 0x12, 0, 0, 1 }, { PW_WINE_INPUT_KEY, 0x73, 0, 0, 1 },
+                 { PW_WINE_INPUT_KEY, 0x73, 0, 0, 0 }, { PW_WINE_INPUT_KEY, 0x12, 0, 0, 0 },
+             };
+             close_requested = now;
++#ifdef PW_PC5
++            /* A short buzz says the hold was taken. */
++            if (pad_status == PW_OK && combo_ticks) {
++                (void)pw_pad_ps5_vibrate(&pad, 150, 150);
++                pc5_pulse_until = now / 1000000u + 250;
++            } else
++#endif
+             if (rumble && pad_status == PW_OK) (void)pw_pad_ps5_vibrate(&pad, 0, 0);
+             for (size_t i = 0; post_input && i < sizeof(alt_f4) / sizeof(alt_f4[0]); i++)
+                 (void)post_input(&alt_f4[i]);
+diff --git a/src/pw_profile_catalog.h b/src/pw_profile_catalog.h
+index 69ed058..186daf9 100644
+--- a/src/pw_profile_catalog.h
++++ b/src/pw_profile_catalog.h
+@@ -7,8 +7,8 @@
+  * name per line; '#' and ';' start comments and blank lines are ignored.
+  * The index replaces a directory scan, which the application image does
+  * not support on this firmware. */
+-/* The library holds PW_WINE_LIBRARY_MAX (32) games; the launcher shows six tiles a page. */
+-enum { PW_PROFILE_CATALOG_MAX=32,PW_PROFILE_CATALOG_NAME=64 };
++/* The library holds PW_WINE_LIBRARY_MAX (128) games; the launcher shows six tiles a page. */
++enum { PW_PROFILE_CATALOG_MAX=128,PW_PROFILE_CATALOG_NAME=64 };
+ typedef struct PwProfileCatalog {
+     uint32_t count;
+     char names[PW_PROFILE_CATALOG_MAX][PW_PROFILE_CATALOG_NAME];
+diff --git a/tools/build_native.sh b/tools/build_native.sh
+index fc4edc8..38af2b0 100755
+--- a/tools/build_native.sh
++++ b/tools/build_native.sh
+@@ -21,6 +21,16 @@
+ #                          two seconds, for diagnosing stalls (default 0)
+ #   Lapy helper             fetched from the GitHub release pinned below
+ #                          (lapy_release, lapy_elf_sha256)
++# A build for another title (a game's own app):
++#   PW_TITLE_ID            its title id (default PPSA99995)
++#   PW_LAPY_DIR            a Lapy helper built for that title: lapy.elf,
++#                          lapy-manifest.json and release.json, checked like
++#                          the fetched one (a published helper only serves
++#                          PPSA99995)
++#   PW_EXTRA_SOURCES       more C sources to build into the title, relative
++#                          to the checkout
++#   PW_EXTRA_CFLAGS        more compiler flags (defines) for every source
++#   PW_EXTRA_LIBS          static libraries (.a, built for the console) to link
+ set -euo pipefail
+ 
+ root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+@@ -40,6 +50,11 @@ wine64_seconds=${PW_WINE64_SECONDS:-0}
+ wine64_cycles=${PW_WINE64_SCRIPT_CYCLES:-2}
+ wine64_watchdog=${PW_WINE64_WAIT_WATCHDOG:-0}
+ title_id=PPSA99995
++title_id=${PW_TITLE_ID:-$title_id}
++read -r -a extra_sources <<< "${PW_EXTRA_SOURCES:-}"
++read -r -a extra_cflags <<< "${PW_EXTRA_CFLAGS:-}"
++read -r -a extra_libs <<< "${PW_EXTRA_LIBS:-}"
++[[ $title_id =~ ^[A-Z]{4}[0-9]{5}$ ]] || { echo "PW_TITLE_ID must look like PPSA12345" >&2; exit 2; }
+ 
+ [[ $native_mode == wine64 ]] || {
+     echo "PW_NATIVE_MODE must be wine64: the direct Win32 runtime was removed" >&2; exit 2; }
+@@ -55,9 +70,16 @@ title_id=PPSA99995
+ }
+ helper_download=$(mktemp -d "${TMPDIR:-/tmp}/prospero-lapy-helper.XXXXXX")
+ trap 'rm -rf -- "$helper_download"' EXIT
+-python3 "$root/tools/fetch_lapy_helper.py" \
+-    --repo mpereiraesaa/PS5-Lapy-JB-Daemon --tag "$lapy_release" \
+-    --sha256 "$lapy_elf_sha256" --out "$helper_download"
++if [[ -n ${PW_LAPY_DIR:-} ]]; then
++    for file in lapy.elf lapy-manifest.json release.json; do
++        [[ -f $PW_LAPY_DIR/$file ]] || { echo "PW_LAPY_DIR has no $file" >&2; exit 2; }
++        cp "$PW_LAPY_DIR/$file" "$helper_download/$file"
++    done
++else
++    python3 "$root/tools/fetch_lapy_helper.py" \
++        --repo mpereiraesaa/PS5-Lapy-JB-Daemon --tag "$lapy_release" \
++        --sha256 "$lapy_elf_sha256" --out "$helper_download"
++fi
+ lapy_helper_elf="$helper_download/lapy.elf"
+ helper_magic=$(od -An -tx1 -N4 "$lapy_helper_elf" | tr -d ' \n')
+ [[ $helper_magic == 7f454c46 ]] || {
+@@ -150,7 +172,8 @@ common=(-DPW_BUILD_ID=\""$build_id"\" -O2 -Wall -Wextra -Werror -ffunction-secti
+         -I"$root/include" -I"$root/src" -I"$root/native"
+         -I"$root/native/ps5log"
+         -DPW_WINE64_SCRIPT="$wine64_script" -DPW_WINE64_SECONDS="$wine64_seconds"
+-        -DPW_WINE64_SCRIPT_CYCLES="$wine64_cycles" -DPW_WINE64_WAIT_WATCHDOG="$wine64_watchdog")
++        -DPW_WINE64_SCRIPT_CYCLES="$wine64_cycles" -DPW_WINE64_WAIT_WATCHDOG="$wine64_watchdog"
++        -DPW_TITLE_ID=\""$title_id"\" ${extra_cflags[@]+"${extra_cflags[@]}"})
+ 
+ sources=(
+     native/wine64_main.c native/pw_diagnostics.c native/pw_audio_ps5.c native/pw_pad_ps5.c native/pw_agc_ps5.c
+@@ -161,6 +184,7 @@ sources=(
+     src/pw_app_profile.c src/pw_profile_catalog.c src/pw_launcher_render.c src/pw_present.c
+     src/pw_pad.c src/pw_hid.c src/pw_spinner.c src/pw_script_input.c src/pw_tsc_calibrate.c
+     wine/ps5/pw_wine_prx.c
++    ${extra_sources[@]+"${extra_sources[@]}"}
+ )
+ objects=()
+ for source in "${sources[@]}"; do
+@@ -190,7 +214,7 @@ objects+=("$build/obj/ps5log.o" "$build/obj/ps5log_ps5_net.o")
+     -o "$build/import-stubs/libSceAgcDriver.so" "$build/obj/agc-driver-import.o"
+ 
+ "$sdk/bin/prospero-lld" -T "$layout" --eh-frame-hdr -e _start \
+-    -o "$build/llvm-pie.elf" "$build/obj/app_crt.o" "${objects[@]}" \
++    -o "$build/llvm-pie.elf" "$build/obj/app_crt.o" "${objects[@]}" ${extra_libs[@]+"${extra_libs[@]}"} \
+     --as-needed "$sdk"/target/lib/*.so "$build/import-stubs/libSceAgc.so" \
+     "$build/import-stubs/libSceAgcDriver.so"
+ "$tool" link --in "$build/llvm-pie.elf" --out "$build/eboot.elf" \
+diff --git a/tools/link_radv_prx.sh b/tools/link_radv_prx.sh
+index 04ba740..3d84b71 100755
+--- a/tools/link_radv_prx.sh
++++ b/tools/link_radv_prx.sh
+@@ -9,7 +9,8 @@
+ # two entry points. It writes PRX/libvulkan.shared.elf, the link log
+ # PRX/libvulkan.link.log and PRX/sce_module/libvulkan.prx, and prints the
+ # PS5_Mesa revision it linked. RADV's sceVideoOutOpen is wrapped so
+-# pw_vulkan_radv.c learns the output's handle for the hardware cursor.
++# pw_vulkan_radv.c learns the output's handle for the hardware cursor, and
++# its framebuffer registrations and flips for PC5's frame counter and light bar.
+ #
+ # Usage: tools/link_radv_prx.sh RADV_CHECKOUT PRX_DIR NATIVE_TOOL PIE_SCRIPT
+ set -euo pipefail
+@@ -55,13 +56,14 @@ for unit in pw_vk_radv_profile pw_vk_radv_profile_wrap; do
+ done
+ python3 "$root/tools/gen_prx_descriptor.py" "$work/obj/libvulkan_desc.c" \
+     vkGetInstanceProcAddr vkGetDeviceProcAddr pw_videoout_idle pw_videoout_show_tiled pw_videoout_cursor \
+-    pw_vk_radv_profile_set_frame_hook
++    pw_vk_radv_profile_set_frame_hook pw_pc5_hud pw_pc5_hud_tick pw_pc5_screen_color
+ "$sdk/bin/prospero-clang" -std=c11 -O2 -Wall -Wextra -Werror -fPIC -I"$root/wine/ps5" \
+     -c "$work/obj/libvulkan_desc.c" -o "$work/obj/libvulkan_desc.o"
+ 
+ "$sdk/bin/prospero-lld" --shared -Bsymbolic -T "$pie" -T "$root/wine/ps5/prx_eh_frame.ld" \
+     --eh-frame-hdr -T "$work/build/mesa_optional_zero.ld" -soname libvulkan.prx -z defs \
+-    --wrap=sceVideoOutOpen \
++    --wrap=sceVideoOutOpen --wrap=sceVideoOutSetBufferAttribute2 --wrap=sceVideoOutRegisterBuffers2 \
++    --wrap=sceVideoOutUnregisterBuffers --wrap=sceVideoOutSubmitFlip \
+     --warn-unresolved-symbols -o "$prx/libvulkan.shared.elf" \
+     "$work/obj/pw_vulkan_radv.o" "$work/obj/pw_vk_radv_profile.o" "$work/obj/pw_vk_radv_profile_wrap.o" \
+     "$work/obj/libvulkan_desc.o" \
+diff --git a/wine/ps5/pw_pc5_hud.h b/wine/ps5/pw_pc5_hud.h
+new file mode 100644
+index 0000000..4bf1af2
+--- /dev/null
++++ b/wine/ps5/pw_pc5_hud.h
+@@ -0,0 +1,98 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/* PC5's frame counter (PW_PC5): a 64x64 straight-alpha ARGB image for
++ * VideoOut's second hardware cursor, which the display composes over
++ * whatever it shows, so the counter looks the same over every game,
++ * whatever it draws with, and costs the game nothing. Drawn by
++ * pw_vulkan_radv.c over a swapchain's frames and by the title over the
++ * frames it shows itself. */
++#ifndef PW_PC5_HUD_H
++#define PW_PC5_HUD_H
++#include <stdint.h>
++#include <string.h>
++
++enum { PW_PC5_HUD_SIDE = 64, PW_PC5_HUD_BOX_HEIGHT = 40, PW_PC5_HUD_MARGIN = 24 };
++/* Corners, as PC5's settings number them (pc5_settings.h). */
++enum { PW_PC5_HUD_TOP_LEFT, PW_PC5_HUD_TOP_RIGHT, PW_PC5_HUD_BOTTOM_LEFT, PW_PC5_HUD_BOTTOM_RIGHT };
++
++/* 5x7 glyphs, a row a byte (bit 4 the left column): 0-9, F, P, S. */
++static const uint8_t pw_pc5_hud_glyphs[13][7] = {
++    { 0x0e, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0e }, { 0x04, 0x0c, 0x04, 0x04, 0x04, 0x04, 0x0e },
++    { 0x0e, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1f }, { 0x1e, 0x01, 0x01, 0x0e, 0x01, 0x01, 0x1e },
++    { 0x02, 0x06, 0x0a, 0x12, 0x1f, 0x02, 0x02 }, { 0x1f, 0x10, 0x1e, 0x01, 0x01, 0x11, 0x0e },
++    { 0x06, 0x08, 0x10, 0x1e, 0x11, 0x11, 0x0e }, { 0x1f, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08 },
++    { 0x0e, 0x11, 0x11, 0x0e, 0x11, 0x11, 0x0e }, { 0x0e, 0x11, 0x11, 0x0f, 0x01, 0x02, 0x0c },
++    { 0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x10 }, { 0x1e, 0x11, 0x11, 0x1e, 0x10, 0x10, 0x10 },
++    { 0x0f, 0x10, 0x10, 0x0e, 0x01, 0x01, 0x1e },
++};
++
++static inline void pw_pc5_hud_glyph(uint32_t *image, int x, int y, int glyph, int scale, uint32_t color)
++{
++    for (int row = 0; row < 7; row++)
++        for (int column = 0; column < 5; column++)
++            if (pw_pc5_hud_glyphs[glyph][row] & (0x10 >> column))
++                for (int dy = 0; dy < scale; dy++)
++                    for (int dx = 0; dx < scale; dx++) {
++                        int px = x + column * scale + dx, py = y + row * scale + dy;
++                        if (px >= 0 && px < PW_PC5_HUD_SIDE && py >= 0 && py < PW_PC5_HUD_SIDE)
++                            image[py * PW_PC5_HUD_SIDE + px] = color;
++                    }
++}
++
++/* fps (0 to 999) in large digits over "FPS", on a dark rounded box at the
++ * top of the image. */
++static inline void pw_pc5_hud_draw(uint32_t *image, unsigned fps)
++{
++    char digits[4];
++    int count = 0, width;
++
++    memset(image, 0, PW_PC5_HUD_SIDE * PW_PC5_HUD_SIDE * 4);
++    for (int y = 0; y < PW_PC5_HUD_BOX_HEIGHT; y++)
++        for (int x = 0; x < PW_PC5_HUD_SIDE; x++) {
++            /* corners rounded to a radius of 8 */
++            int cx = x < 8 ? 8 - x : x > PW_PC5_HUD_SIDE - 9 ? x - (PW_PC5_HUD_SIDE - 9) : 0;
++            int cy = y < 8 ? 8 - y : y > PW_PC5_HUD_BOX_HEIGHT - 9 ? y - (PW_PC5_HUD_BOX_HEIGHT - 9) : 0;
++            if (cx * cx + cy * cy <= 64) image[y * PW_PC5_HUD_SIDE + x] = 0xc0101216u;
++        }
++    if (fps > 999) fps = 999;
++    do { digits[count++] = (char)(fps % 10); fps /= 10; } while (fps && count < 3);
++    width = count * 15 + (count - 1) * 3;
++    for (int i = 0; i < count; i++)
++        pw_pc5_hud_glyph(image, (PW_PC5_HUD_SIDE - width) / 2 + i * 18, 4, digits[count - 1 - i], 3, 0xffffffffu);
++    for (int i = 0; i < 3; i++)
++        pw_pc5_hud_glyph(image, (PW_PC5_HUD_SIDE - 17) / 2 + i * 6, 29, 10 + i, 1, 0xff9aa3afu);
++}
++
++/* The image's top-left corner in a frame_width x frame_height frame. */
++static inline void pw_pc5_hud_place(int corner, uint32_t frame_width, uint32_t frame_height, uint32_t *x, uint32_t *y)
++{
++    int right = corner == PW_PC5_HUD_TOP_RIGHT || corner == PW_PC5_HUD_BOTTOM_RIGHT;
++    int bottom = corner == PW_PC5_HUD_BOTTOM_LEFT || corner == PW_PC5_HUD_BOTTOM_RIGHT;
++    *x = right && frame_width > PW_PC5_HUD_SIDE + PW_PC5_HUD_MARGIN ? frame_width - PW_PC5_HUD_SIDE - PW_PC5_HUD_MARGIN
++                                                                    : PW_PC5_HUD_MARGIN;
++    *y = bottom && frame_height > PW_PC5_HUD_BOX_HEIGHT + PW_PC5_HUD_MARGIN
++             ? frame_height - PW_PC5_HUD_BOX_HEIGHT - PW_PC5_HUD_MARGIN : PW_PC5_HUD_MARGIN;
++}
++
++/* The colour of a frame for the controller's light bar, from B,G,R,X
++ * texels: their average, the saturated ones weighing more, brought to a
++ * light bar's brightness. Black stays black. */
++static inline uint32_t pw_pc5_screen_tint(const uint32_t *texels, unsigned count, unsigned step)
++{
++    uint64_t r = 0, g = 0, b = 0, weight = 0;
++    for (unsigned i = 0; i < count; i++) {
++        uint32_t c = texels[(uint64_t)i * step];
++        unsigned cr = (c >> 16) & 255, cg = (c >> 8) & 255, cb = c & 255;
++        unsigned hi = cr > cg ? (cr > cb ? cr : cb) : (cg > cb ? cg : cb);
++        unsigned lo = cr < cg ? (cr < cb ? cr : cb) : (cg < cb ? cg : cb);
++        unsigned w = 8 + (hi - lo);          /* saturation weighs */
++        r += (uint64_t)cr * w; g += (uint64_t)cg * w; b += (uint64_t)cb * w; weight += w;
++    }
++    if (!weight) return 0;
++    r /= weight; g /= weight; b /= weight;
++    uint64_t hi = r > g ? (r > b ? r : b) : (g > b ? g : b);
++    if (hi < 12) return 0;
++    /* the strongest channel to 230, the others alike */
++    r = r * 230 / hi; g = g * 230 / hi; b = b * 230 / hi;
++    return 0xff000000u | (uint32_t)r << 16 | (uint32_t)g << 8 | (uint32_t)b;
++}
++#endif
+diff --git a/wine/ps5/pw_vulkan_radv.c b/wine/ps5/pw_vulkan_radv.c
+index 44a5fe2..f5bf3b9 100644
+--- a/wine/ps5/pw_vulkan_radv.c
++++ b/wine/ps5/pw_vulkan_radv.c
+@@ -20,6 +20,8 @@
+ #include <x86intrin.h>
+ #endif
+ #include "pw_vk_radv_profile_wrap.h"
++#include "pw_pc5_hud.h"
++#include <time.h>
+ 
+ PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char *name);
+ PFN_vkVoidFunction VKAPI_CALL vk_common_GetDeviceProcAddr(VkDevice device, const char *name);
+@@ -212,6 +214,223 @@ int pw_videoout_show_tiled(const void *tiled, uint64_t bytes, uint32_t width, ui
+     return result;
+ }
+ 
++/* --- PC5: the frame counter and the screen's colour --------------------------
++ * RADV's VideoOut calls are wrapped too (tools/link_radv_prx.sh). Each flip
++ * counts towards the frame counter, which the display's second hardware
++ * cursor shows, updated once a second, while PC5 asks for it (pw_pc5_hud).
++ * The framebuffers RADV registers are remembered, so the colour of the one
++ * on screen can be read for the controller's light bar (pw_pc5_screen_color):
++ * texels spread over it, which the display's tiling only puts in another
++ * order, so their average is the picture's. */
++struct pc5_videoout_buffer {
++    void *data;
++    void *metadata;
++    void *reserved[2];
++};
++extern void __real_sceVideoOutSetBufferAttribute2(void *attribute, uint64_t pixel_format, uint32_t tiling,
++                                                  uint32_t width, uint32_t height, uint64_t reserved1,
++                                                  uint32_t reserved2, uint64_t reserved3);
++extern int __real_sceVideoOutRegisterBuffers2(int32_t handle, int32_t set, int32_t start,
++                                              struct pc5_videoout_buffer *buffers, int32_t count, void *attribute,
++                                              int32_t reserved, void *option);
++extern int __real_sceVideoOutUnregisterBuffers(int32_t handle, int32_t set);
++extern int __real_sceVideoOutSubmitFlip(int32_t handle, int32_t buffer_index, uint32_t mode, int64_t argument);
++
++enum { PC5_BUFFERS = 64, PC5_SAMPLES = 1024, PC5_HUD_IMAGE = 2 };
++
++static struct {
++    int lock;
++    uint32_t width, height;                 /* the attribute being registered */
++    struct { const uint32_t *texels; uint32_t width, height; int set; } buffer[PC5_BUFFERS];
++    int shown;                              /* the buffer flipped last; -1 none */
++    int hud_on, hud_corner, hud_enabled, hud_current;
++    uint64_t flips, second_flips, second_at;
++} pc5 = { .shown = -1 };
++
++static void pc5_lock(void)
++{
++    while (__atomic_exchange_n(&pc5.lock, 1, __ATOMIC_ACQUIRE)) __builtin_ia32_pause();
++}
++
++static void pc5_unlock(void)
++{
++    __atomic_store_n(&pc5.lock, 0, __ATOMIC_RELEASE);
++}
++
++static uint64_t pc5_now_ns(void)
++{
++    struct timespec now;
++    clock_gettime(CLOCK_MONOTONIC, &now);
++    return (uint64_t)now.tv_sec * 1000000000u + (uint64_t)now.tv_nsec;
++}
++
++void __wrap_sceVideoOutSetBufferAttribute2(void *attribute, uint64_t pixel_format, uint32_t tiling, uint32_t width,
++                                           uint32_t height, uint64_t reserved1, uint32_t reserved2, uint64_t reserved3);
++void __wrap_sceVideoOutSetBufferAttribute2(void *attribute, uint64_t pixel_format, uint32_t tiling, uint32_t width,
++                                           uint32_t height, uint64_t reserved1, uint32_t reserved2, uint64_t reserved3)
++{
++    pc5_lock();
++    pc5.width = width;
++    pc5.height = height;
++    pc5_unlock();
++    __real_sceVideoOutSetBufferAttribute2(attribute, pixel_format, tiling, width, height, reserved1, reserved2,
++                                          reserved3);
++}
++
++int __wrap_sceVideoOutRegisterBuffers2(int32_t handle, int32_t set, int32_t start, struct pc5_videoout_buffer *buffers,
++                                       int32_t count, void *attribute, int32_t reserved, void *option);
++int __wrap_sceVideoOutRegisterBuffers2(int32_t handle, int32_t set, int32_t start, struct pc5_videoout_buffer *buffers,
++                                       int32_t count, void *attribute, int32_t reserved, void *option)
++{
++    int result = __real_sceVideoOutRegisterBuffers2(handle, set, start, buffers, count, attribute, reserved, option);
++
++    if (result == 0) {
++        pc5_lock();
++        for (int32_t i = 0; i < count; i++)
++            if (start + i >= 0 && start + i < PC5_BUFFERS) {
++                pc5.buffer[start + i].texels = buffers[i].data;
++                pc5.buffer[start + i].width = pc5.width;
++                pc5.buffer[start + i].height = pc5.height;
++                pc5.buffer[start + i].set = set;
++            }
++        pc5_unlock();
++    }
++    return result;
++}
++
++/* Forgotten before the memory can go. */
++int __wrap_sceVideoOutUnregisterBuffers(int32_t handle, int32_t set);
++int __wrap_sceVideoOutUnregisterBuffers(int32_t handle, int32_t set)
++{
++    pc5_lock();
++    for (int i = 0; i < PC5_BUFFERS; i++)
++        if (pc5.buffer[i].texels && pc5.buffer[i].set == set) {
++            pc5.buffer[i].texels = NULL;
++            if (pc5.shown == i) pc5.shown = -1;
++        }
++    pc5_unlock();
++    return __real_sceVideoOutUnregisterBuffers(handle, set);
++}
++
++/* Under the cursor's lock: the counter's image, shown or moved. */
++static void pc5_hud_show_locked(int handle, unsigned fps)
++{
++    uint32_t image[PW_PC5_HUD_SIDE * PW_PC5_HUD_SIDE], x, y;
++    uint32_t *next;
++    VkRect2D rect;
++    VkExtent2D frame = { 1920, 1080 };
++    int rc;
++
++    if (cursor_setup()) return;
++    pw_pc5_hud_draw(image, fps);
++    /* Images 2 and 3 of the cursor's memory, in turn (0 and 1 are the game's cursor's). */
++    next = cursor.images + (PC5_HUD_IMAGE + (pc5.hud_enabled ? (pc5.hud_current ^ 1) : pc5.hud_current)) * CURSOR_PIXELS;
++    memcpy(next, image, sizeof(image));
++#if defined(__PROSPERO__)
++    for (size_t at = 0; at < sizeof(image); at += 64) _mm_clflush((const uint8_t *)next + at);
++    _mm_mfence();
++#endif
++    rc = pc5.hud_enabled ? sceVideoOutCursorSetImageAddress(handle, 1, next) : sceVideoOutCursorEnable(handle, 1, next);
++    if (rc != 0) return;
++    pc5.hud_current = (int)((next - cursor.images) / CURSOR_PIXELS) - PC5_HUD_IMAGE;
++    pc5.hud_enabled = 1;
++    if (!wsi_videoout_present_rect(&rect, &frame) || !frame.width || !frame.height) frame = (VkExtent2D){ 1920, 1080 };
++    pw_pc5_hud_place(pc5.hud_corner, frame.width, frame.height, &x, &y);
++    sceVideoOutCursorSetPosition(handle, 1, x, y);
++}
++
++/* RADV flips with its output's lock held, so only the count is kept here:
++ * the counter is drawn from the title's loop (pw_pc5_hud_tick), which takes
++ * the cursor's lock before RADV's, as pw_videoout_cursor does. */
++int __wrap_sceVideoOutSubmitFlip(int32_t handle, int32_t buffer_index, uint32_t mode, int64_t argument);
++int __wrap_sceVideoOutSubmitFlip(int32_t handle, int32_t buffer_index, uint32_t mode, int64_t argument)
++{
++    int result = __real_sceVideoOutSubmitFlip(handle, buffer_index, mode, argument);
++
++    if (result == 0) {
++        pc5_lock();
++        pc5.shown = buffer_index;
++        pc5.flips++;
++        pc5_unlock();
++    }
++    return result;
++}
++
++/* PC5 turns the counter on, in a corner (pw_pc5_hud.h), or off. */
++void pw_pc5_hud(int on, int corner);
++void pw_pc5_hud(int on, int corner)
++{
++    int handle = __atomic_load_n(&videoout_handle, __ATOMIC_ACQUIRE);
++
++    pc5_lock();
++    pc5.hud_corner = corner;
++    pc5.second_at = 0;
++    pc5.hud_on = on;
++    pc5_unlock();
++    if (!on && handle >= 0) {
++        cursor_lock();
++        if (pc5.hud_enabled) sceVideoOutCursorDisable(handle, 1);
++        pc5.hud_enabled = 0;
++        cursor_unlock();
++    }
++}
++
++/* From the title's loop: the counter, once a second, with the frames shown
++ * since. */
++void pw_pc5_hud_tick(void);
++void pw_pc5_hud_tick(void)
++{
++    int handle = __atomic_load_n(&videoout_handle, __ATOMIC_ACQUIRE), show = 0;
++    unsigned fps = 0;
++    uint64_t now = pc5_now_ns();
++
++    if (handle < 0) return;
++    pc5_lock();
++    if (pc5.hud_on) {
++        if (!pc5.second_at) {
++            pc5.second_at = now;
++            pc5.second_flips = pc5.flips;
++            show = !pc5.hud_enabled;
++        } else if (now - pc5.second_at >= 1000000000u) {
++            fps = (unsigned)(((pc5.flips - pc5.second_flips) * 1000000000u + (now - pc5.second_at) / 2) /
++                             (now - pc5.second_at));
++            pc5.second_at = now;
++            pc5.second_flips = pc5.flips;
++            show = 1;
++        }
++    }
++    pc5_unlock();
++    if (show) {
++        cursor_lock();
++        pc5_hud_show_locked(handle, fps);
++        cursor_unlock();
++    }
++}
++
++/* The colour of the frame on screen as 0xffRRGGBB for the light bar, or 0
++ * when there is none to read. */
++uint32_t pw_pc5_screen_color(void);
++uint32_t pw_pc5_screen_color(void)
++{
++    uint32_t color = 0;
++
++    pc5_lock();
++    if (pc5.shown >= 0 && pc5.shown < PC5_BUFFERS && pc5.buffer[pc5.shown].texels) {
++        const uint32_t *texels = pc5.buffer[pc5.shown].texels;
++        uint64_t count = (uint64_t)pc5.buffer[pc5.shown].width * pc5.buffer[pc5.shown].height;
++        unsigned step = count >= PC5_SAMPLES ? (unsigned)(count / PC5_SAMPLES) : 1;
++        unsigned samples = count >= PC5_SAMPLES ? PC5_SAMPLES : (unsigned)count;
++#if defined(__PROSPERO__)
++        /* The GPU wrote them to memory: no stale lines from the CPU's cache. */
++        for (unsigned i = 0; i < samples; i++) _mm_clflush(texels + (uint64_t)i * step);
++        _mm_mfence();
++#endif
++        color = pw_pc5_screen_tint(texels, samples, step);
++    }
++    pc5_unlock();
++    return color;
++}
++
+ /* Mesa's GPU description reads /proc/self/fd links, which a title does not
+  * have; the libc readlink is only in libkernel_sys, which a title does not
+  * get. Answer as a missing link would. */
+-- 
+2.43.0
+

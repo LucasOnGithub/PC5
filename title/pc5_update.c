@@ -1,0 +1,109 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+/* PC5: the update check (pc5_update.h). */
+#include "pc5_update.h"
+#include "pc5_json.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int pc5_version_compare(const char *a, const char *b)
+{
+    if (*a == 'v' || *a == 'V') a++;
+    if (*b == 'v' || *b == 'V') b++;
+    for (int part = 0; part < 4; part++) {
+        char *end_a, *end_b;
+        long x = strtol(a, &end_a, 10), y = strtol(b, &end_b, 10);
+        if (end_a == a) x = 0;
+        if (end_b == b) y = 0;
+        if (x != y) return x < y ? -1 : 1;
+        a = *end_a == '.' ? end_a + 1 : end_a;
+        b = *end_b == '.' ? end_b + 1 : end_b;
+    }
+    return 0;
+}
+
+void pc5_update_check(const Pc5Http *http, const char *current, Pc5Update *update)
+{
+    Pc5Buf body = { 0 };
+    Pc5Json json = { 0 };
+    int status = 0;
+    char tag[64];
+
+    memset(update, 0, sizeof(*update));
+    update->state = PC5_UPDATE_FAILED;
+    if (!http || !http->get || http->get(http->context, PC5_RELEASES_API, &body, 256 * 1024, &status)) goto out;
+    if (status == 404) { update->state = PC5_UPDATE_NONE; goto out; }
+    if (status != 200 || pc5_buf_terminate(&body) ||
+        pc5_json_parse(&json, (const char *)body.data, body.len, 8192) ||
+        pc5_json_text(&json, pc5_json_get(&json, 0, "tag_name"), tag, sizeof(tag)) || !tag[0])
+        goto out;
+    pc5_copy(update->version, sizeof(update->version), tag[0] == 'v' || tag[0] == 'V' ? tag + 1 : tag);
+    if (pc5_json_text(&json, pc5_json_get(&json, 0, "name"), update->name, sizeof(update->name)))
+        update->name[0] = 0;
+    if (pc5_json_text(&json, pc5_json_get(&json, 0, "html_url"), update->url, sizeof(update->url)) ||
+        strncmp(update->url, "https://github.com/", 19))
+        pc5_copy(update->url, sizeof(update->url), PC5_RELEASES_PAGE);
+    update->state = pc5_version_compare(update->version, current) > 0 ? PC5_UPDATE_AVAILABLE : PC5_UPDATE_CURRENT;
+out:
+    pc5_json_free(&json);
+    pc5_buf_free(&body);
+}
+
+void pc5_update_text(const Pc5Update *update, char *out, size_t size)
+{
+    switch (update->state) {
+    case PC5_UPDATE_AVAILABLE: snprintf(out, size, "PC5 %s is available on GitHub", update->version); break;
+    case PC5_UPDATE_CURRENT: snprintf(out, size, "You have the newest PC5 (%s)", PC5_VERSION); break;
+    case PC5_UPDATE_NONE: snprintf(out, size, "No PC5 release is published on GitHub yet"); break;
+    case PC5_UPDATE_FAILED: snprintf(out, size, "GitHub didn't answer: is the console online?"); break;
+    default: snprintf(out, size, "Not checked yet"); break;
+    }
+}
+
+static const char *const state_names[] = { "unknown", "failed", "none", "current", "available" };
+
+void pc5_update_load(const char *root, Pc5UpdateMemory *memory)
+{
+    char path[PC5_PATH];
+    Pc5Buf text = { 0 };
+
+    memset(memory, 0, sizeof(*memory));
+    if (pc5_format(path, sizeof(path), "%s/pc5/update.txt", root) || pc5_read_file(path, &text, 4096)) {
+        pc5_buf_free(&text);
+        return;
+    }
+    for (char *line = (char *)text.data, *next; line && *line; line = next) {
+        char name[16], value[256];
+        next = strchr(line, '\n');
+        if (next) *next++ = 0;
+        if (sscanf(line, " %15[a-z] = %255s", name, value) != 2) continue;
+        if (!strcmp(value, "-")) value[0] = 0;
+        if (!strcmp(name, "checked")) memory->checked = strtoll(value, NULL, 10);
+        else if (!strcmp(name, "told")) pc5_copy(memory->told, sizeof(memory->told), value);
+        else if (!strcmp(name, "latest")) pc5_copy(memory->last.version, sizeof(memory->last.version), value);
+        else if (!strcmp(name, "url")) pc5_copy(memory->last.url, sizeof(memory->last.url), value);
+        else if (!strcmp(name, "state"))
+            for (int i = 0; i < 5; i++)
+                if (!strcmp(value, state_names[i])) memory->last.state = (Pc5UpdateState)i;
+    }
+    /* An answer about an older PC5 than this one says nothing now. */
+    if (memory->last.state == PC5_UPDATE_AVAILABLE && pc5_version_compare(memory->last.version, PC5_VERSION) <= 0)
+        memory->last.state = PC5_UPDATE_CURRENT;
+    pc5_buf_free(&text);
+}
+
+int pc5_update_save(const char *root, const Pc5UpdateMemory *memory)
+{
+    char path[PC5_PATH], text[700];
+    int length;
+
+    if (pc5_format(path, sizeof(path), "%s/pc5", root) || pc5_mkdirs(path) ||
+        pc5_format(path, sizeof(path), "%s/pc5/update.txt", root))
+        return -1;
+    length = snprintf(text, sizeof(text), "checked = %lld\ntold = %s\nstate = %s\nlatest = %s\nurl = %s\n",
+                      (long long)memory->checked, memory->told[0] ? memory->told : "-",
+                      state_names[memory->last.state % 5], memory->last.version[0] ? memory->last.version : "-",
+                      memory->last.url[0] ? memory->last.url : "-");
+    return pc5_write_file(path, text, (size_t)length);
+}

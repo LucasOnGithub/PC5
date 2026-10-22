@@ -1,0 +1,55 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later */
+/* PC5's settings, kept in <root>/pc5/settings.txt as "name = value" lines.
+ * PC5 writes them from its Settings; the game's process reads them when a
+ * game starts (the FPS counter, the controller). A missing file, or a line
+ * PC5 doesn't know, gives the default. */
+#ifndef PC5_SETTINGS_H
+#define PC5_SETTINGS_H
+#include "pc5.h"
+
+typedef enum Pc5Corner {
+    PC5_CORNER_TOP_LEFT, PC5_CORNER_TOP_RIGHT, PC5_CORNER_BOTTOM_LEFT, PC5_CORNER_BOTTOM_RIGHT, PC5_CORNERS
+} Pc5Corner;
+
+typedef enum Pc5Light {
+    PC5_LIGHT_GAME,       /* the colour of the game's cover */
+    PC5_LIGHT_SCREEN,     /* the colour of what is on screen */
+    PC5_LIGHT_CONSOLE,    /* the console's own colour: PC5 leaves it */
+    PC5_LIGHTS
+} Pc5Light;
+
+typedef enum Pc5Triggers {
+    PC5_TRIGGERS_OFF,
+    PC5_TRIGGERS_RUMBLE,      /* L2 and R2 vibrate with the game's rumble */
+    PC5_TRIGGERS_RESISTANCE,  /* L2 and R2 push back */
+    PC5_TRIGGERS_BOTH,        /* they push back, and vibrate instead while the game rumbles (a trigger
+                               * runs one effect at a time) */
+    PC5_TRIGGERS_COUNT
+} Pc5Triggers;
+
+typedef struct Pc5Settings {
+    int fps;                  /* the counter in games */
+    Pc5Corner fps_corner;
+    int vibration;            /* how strong the game's rumble is on the controller: 0 (off), 25, 50, 75, 100 % */
+    Pc5Light light_bar;
+    Pc5Triggers triggers;
+    int trigger_rumble;       /* the triggers' rumble: 25, 50, 75, 100 % */
+    int trigger_resistance;   /* how firmly they push back: 25, 50, 75, 100 % */
+    int check_updates;        /* when PC5 opens */
+    int keep_logs;            /* every session's log, not only those with a problem */
+} Pc5Settings;
+
+void pc5_settings_default(Pc5Settings *settings);
+/* Always fills settings (defaults where the file says nothing). 0 when the
+ * file was read, -1 when there was none. */
+int pc5_settings_load(const char *root, Pc5Settings *settings);
+int pc5_settings_save(const char *root, const Pc5Settings *settings);
+
+const char *pc5_corner_name(Pc5Corner corner);      /* "Top right" */
+const char *pc5_light_name(Pc5Light light);         /* "Game's colour" */
+const char *pc5_triggers_name(Pc5Triggers triggers);
+/* The next step of a strength in percent: up (step 1) or down (-1), from
+ * lowest (0 for Vibration's Off, else 25) to 100, round. */
+int pc5_strength_next(int percent, int lowest, int step);
+
+#endif
