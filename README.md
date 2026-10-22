@@ -3,7 +3,7 @@
 A launcher for your own PC games on a PS5 that runs homebrew. PC5 shows your games as a row
 of covers, installs games from a USB drive in one copy each, and uninstalls them with their
 saves. It runs the games with [prospero-win](https://github.com/mpereiraesaa/prospero-win)
-(Wine on the PS5). The app is `PPSA11018`, its tile is called **PC5**. This is version 1.0.0.
+(Wine on the PS5). 
 
 No game is part of PC5, and PC5 downloads none: you install the games you own.
 
@@ -76,7 +76,7 @@ Only a game whose program draws with Direct3D 12 gets VKD3D-Proton; every other 
 Wine's own Direct3D 12, as prospero-win's tested profiles have it (a library that only tries
 Direct3D 12, as GTA IV's does, stops there instead of going further and crashing).
 
-What won't run: games that need Steam, Epic, EA or Ubisoft's launcher running, online DRM
+What won't run: games that need a launcher to run, online DRM
 or anti-cheat; .NET Framework games (prospero-win has no .NET yet); programs that aren't
 Windows programs. Whether a game runs is only known by trying it: PC5 makes no promise
 about any game. When a game closes before showing anything, or crashes, PC5 says so the
@@ -118,33 +118,6 @@ session that went well has its log deleted, and one that went wrong keeps it as
 Games already in `/data/prospero-win` (installed some other way) show up in PC5 too, and get
 a cover the first time PC5 opens. An install or uninstall cut short (the console switched
 off) is finished, by deleting, the next time PC5 starts.
-
-## Building
-
-On **Debian 13 or Ubuntu 24.04** (x86-64), as root:
-
-```sh
-apt-get install -y $(cat tools/packages.txt)
-tools/build.sh
-```
-
-The app is `release/PPSA11018/` and `release/PPSA11018.zip`, with the source of everything in
-it as `release/PPSA11018-sources.tar.xz`; or all three in the folder `PC5_RELEASE` names
-(`PC5_RELEASE=/mnt/media/builder/releases/PC5 tools/build.sh`). Everything else the build
-makes stays in the repo's `.build/`. Each step prints one line and writes
-`.build/logs/<step>.log`; run one step again with `tools/build.sh <step>`. Elsewhere the
-script runs itself in Docker (`tools/Dockerfile`). A first build takes a few hours, most of
-it Wine; Zink's link wants about 8 GB of memory per job (`PC5_ZINK_JOBS`, default 2).
-
-`tests/test.sh` runs the host checks (after `tools/build.sh sources`); `tests/test.sh
---shots` also draws every screen into `.build/tests/shots/` with made-up games.
-`tests/PS5-CHECKLIST.md` is what to try on a console.
-
-**Releasing**: the update check reads the newest release of
-<https://github.com/bornaradusin/PC5>, by its tag (`v1.0.0`, `v1.1.0`, …). Publish each
-version as a GitHub release with that tag, with `PPSA11018.zip` and
-`PPSA11018-sources.tar.xz` attached, and raise `PC5_VERSION` in `title/pc5.h` and
-`contentVersion` in `sce_sys/param.json` with it.
 
 ## How it is made
 
