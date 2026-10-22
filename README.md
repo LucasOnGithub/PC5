@@ -1,4 +1,5 @@
 # PC5
+<p align="center"><img src="art/icon0.png" width="200" alt="PC5's icon"></p>
 
 A launcher for your own PC games on a PS5 that runs homebrew. PC5 shows your games as a row
 of covers, installs games from a USB drive in one copy each, and uninstalls them with their
