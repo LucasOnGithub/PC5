@@ -1,0 +1,363 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bornaradusin <bornaradusin@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 19:47:37 +0100
+Subject: [PATCH] PC5: the sticks' directions as keys, and a dualsense input
+ mode
+
+A keyboard-mode profile binds keys to the sticks' directions as to buttons
+(left_stick_up = w, ... right_stick_right = right): each is down while
+its stick is pushed that way past the middle of its travel, and up again
+once the stick is back inside a little less (pw_wine_stick_buttons), so
+W A S D can follow a stick; the stick the pointer follows sends none.
+They take bits scePadRead never sets, after the 17 buttons.
+
+mode = dualsense is accepted (PW_GAME_INPUT_DUALSENSE): the game is to
+find the DualSense as Windows does a plugged-in one instead of an Xbox
+controller.
+
+The catalog test follows the library's size (128 since PC5's first patch).
+---
+ docs/CONTROLS.md                |  6 ++++
+ native/pw_wine_display.c        | 27 +++++++++++++++
+ native/pw_wine_display.h        | 12 +++++++
+ native/wine64_main.c            | 11 ++++--
+ src/pw_game_profile.c           |  5 +++
+ src/pw_game_profile.h           | 31 +++++++++++++----
+ tests/test_pw_game_profile.c    | 18 ++++++++++
+ tests/test_pw_profile_catalog.c |  7 ++--
+ tests/test_pw_wine_display.c    | 61 ++++++++++++++++++++++++++++++++-
+ 9 files changed, 165 insertions(+), 13 deletions(-)
+
+diff --git a/docs/CONTROLS.md b/docs/CONTROLS.md
+index ee903b4..74199b9 100644
+--- a/docs/CONTROLS.md
++++ b/docs/CONTROLS.md
+@@ -63,6 +63,12 @@ touchpad = space
+   - `mouse_left`, `mouse_right` or `mouse_middle`;
+   - `none`.
+ - **`mouse`:** `left_stick`, `right_stick` or `none`.
++- **The sticks' directions:** `left_stick_up`, `left_stick_down`,
++  `left_stick_left`, `left_stick_right`, and the same for `right_stick_`,
++  take keys like buttons. A direction is down while its stick is pushed
++  that way past the middle of its travel, and comes up when the stick
++  is back inside a little less than that, so W A S D can follow a stick;
++  a diagonal holds both. The stick `mouse` names sends no keys.
+ 
+ `mouse.input` is a starting point for games played with the mouse alone.
+ 
+diff --git a/native/pw_wine_display.c b/native/pw_wine_display.c
+index f279b74..d10241e 100644
+--- a/native/pw_wine_display.c
++++ b/native/pw_wine_display.c
+@@ -146,6 +146,33 @@ int pw_wine_script_pad(PwWinePad *pad, int connected, const PwScriptPad *script,
+     return 1;
+ }
+ 
++/* One axis's two directions: low is 0 (up, left), high 255 (down, right). */
++static uint32_t axis_buttons(uint8_t raw, uint32_t low, uint32_t high, uint32_t previous)
++{
++    int32_t d = (int32_t)raw - 0x80;
++    uint32_t out = 0;
++
++    if (d <= -PW_WINE_STICK_PRESS || (d <= -PW_WINE_STICK_RELEASE && (previous & low))) out |= low;
++    if (d >= PW_WINE_STICK_PRESS || (d >= PW_WINE_STICK_RELEASE && (previous & high))) out |= high;
++    return out;
++}
++
++uint32_t pw_wine_stick_buttons(const PwPadPs5 *pad, PwGameStick mouse, uint32_t previous)
++{
++    uint32_t out = 0;
++
++    if (!pad || !pad->core.connected) return 0;
++    if (mouse != PW_GAME_STICK_LEFT) {
++        out |= axis_buttons(pad->left_stick.x, PW_GAME_LEFT_STICK_LEFT, PW_GAME_LEFT_STICK_RIGHT, previous);
++        out |= axis_buttons(pad->left_stick.y, PW_GAME_LEFT_STICK_UP, PW_GAME_LEFT_STICK_DOWN, previous);
++    }
++    if (mouse != PW_GAME_STICK_RIGHT) {
++        out |= axis_buttons(pad->right_stick.x, PW_GAME_RIGHT_STICK_LEFT, PW_GAME_RIGHT_STICK_RIGHT, previous);
++        out |= axis_buttons(pad->right_stick.y, PW_GAME_RIGHT_STICK_UP, PW_GAME_RIGHT_STICK_DOWN, previous);
++    }
++    return out;
++}
++
+ /* Signed 1/65536-pixel travel of one axis. */
+ static int64_t travel(uint8_t stick, uint32_t speed, uint32_t elapsed_us)
+ {
+diff --git a/native/pw_wine_display.h b/native/pw_wine_display.h
+index 644fb83..24fa94d 100644
+--- a/native/pw_wine_display.h
++++ b/native/pw_wine_display.h
+@@ -86,4 +86,16 @@ enum { PW_WINE_POINTER_DEADZONE = 20 };   /* of 128, stick noise at rest */
+  * else 0. */
+ int pw_wine_pointer_step(PwWinePointer *pointer, uint8_t stick_x, uint8_t stick_y,
+                          uint32_t speed, uint32_t elapsed_us, PwWineInput *out);
++
++/* How far a stick goes (of 128) before its direction counts as pressed, and
++ * how far back it must come to count as released, so a stick held near the
++ * edge does not chatter. */
++enum { PW_WINE_STICK_PRESS = 64, PW_WINE_STICK_RELEASE = 48 };
++
++/* The sticks' directions as the PW_GAME_*_STICK_* bits a keyboard-mode
++ * profile binds keys to: each is down while its stick is pushed that way,
++ * diagonals both. previous is the last result, for the release threshold.
++ * The stick the pointer follows (mouse) gives none, nor does a pad that is
++ * not connected. */
++uint32_t pw_wine_stick_buttons(const PwPadPs5 *pad, PwGameStick mouse, uint32_t previous);
+ #endif
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+index 7e5e081..215b637 100644
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -1174,6 +1174,7 @@ int main(int argc, char **argv)
+     const PwGameProfile *game = NULL;
+     int scaling = PW_PRESENT_SCALE_FIT;
+     PwWinePointer pointer = { 0, 0 };
++    uint32_t stick_buttons = 0;     /* the sticks' directions held, for keyboard bindings */
+     int (*post_input)(const PwWineInput *) = NULL;
+     void (*set_pad)(const PwWinePad *) = NULL;
+     int (*rumble)(uint32_t *, uint32_t *) = NULL;
+@@ -1352,7 +1353,7 @@ int main(int argc, char **argv)
+                    desktop[0] ? desktop : "default",
+                    scaling, view, game->display.show_fps, pw_result_name(input_status),
+                    game->input.preset[0] ? game->input.preset : "-",
+-                   game_input.mode == PW_GAME_INPUT_XINPUT ? "xinput" : "keyboard", (int)game_input.mouse,
++                   game_input.mode == PW_GAME_INPUT_XINPUT ? "xinput" : game_input.mode == PW_GAME_INPUT_DUALSENSE ? "dualsense" : "keyboard", (int)game_input.mouse,
+                    effective_dll_overrides[0] ? effective_dll_overrides : "-");
+         /* What Wine gives the game as NumberOfProcessors. */
+         PS5LOG_LOG("PW_WINE64 cpus online=%ld", sysconf(_SC_NPROCESSORS_ONLN));
+@@ -1570,8 +1571,12 @@ int main(int argc, char **argv)
+             if (pad_read || scripted) set_pad(connected ? &state : NULL);
+         }
+         if (pad_read) {
+-            size_t count = pw_wine_game_inputs(&game_input, pad.core.pressed_edges,
+-                                               pad.core.released_edges, events,
++            /* The sticks' directions, for the keys a profile binds to them. */
++            uint32_t sticks = pw_wine_stick_buttons(&pad, game_input.mouse, stick_buttons);
++            uint32_t stick_pressed = sticks & ~stick_buttons, stick_released = stick_buttons & ~sticks;
++            stick_buttons = sticks;
++            size_t count = pw_wine_game_inputs(&game_input, pad.core.pressed_edges | stick_pressed,
++                                               pad.core.released_edges | stick_released, events,
+                                                sizeof(events) / sizeof(events[0]) - 1);
+             if (game_input.mouse != PW_GAME_STICK_NONE) {
+                 const PwPadPs5Stick *stick = game_input.mouse == PW_GAME_STICK_LEFT ?
+diff --git a/src/pw_game_profile.c b/src/pw_game_profile.c
+index 3fb6a3a..8bf102b 100644
+--- a/src/pw_game_profile.c
++++ b/src/pw_game_profile.c
+@@ -11,6 +11,10 @@ static const struct { const char *name; uint32_t mask; } buttons[PW_GAME_BUTTON_
+     { "l3", 0x2u }, { "r3", 0x4u }, { "up", 0x10u }, { "down", 0x40u },
+     { "left", 0x80u }, { "right", 0x20u }, { "options", 0x8u }, { "create", 0x1u },
+     { "touchpad", 0x100000u },
++    { "left_stick_up", PW_GAME_LEFT_STICK_UP }, { "left_stick_down", PW_GAME_LEFT_STICK_DOWN },
++    { "left_stick_left", PW_GAME_LEFT_STICK_LEFT }, { "left_stick_right", PW_GAME_LEFT_STICK_RIGHT },
++    { "right_stick_up", PW_GAME_RIGHT_STICK_UP }, { "right_stick_down", PW_GAME_RIGHT_STICK_DOWN },
++    { "right_stick_left", PW_GAME_RIGHT_STICK_LEFT }, { "right_stick_right", PW_GAME_RIGHT_STICK_RIGHT },
+ };
+ 
+ /* Windows virtual keys by name. */
+@@ -117,6 +121,7 @@ static int input_field(PwGameInput *input, const uint8_t *key, size_t key_length
+         if (input->set & SET_MODE) return PW_ERR_MALFORMED;
+         if (is(v, n, "keyboard")) input->mode = PW_GAME_INPUT_KEYBOARD;
+         else if (is(v, n, "xinput")) input->mode = PW_GAME_INPUT_XINPUT;
++        else if (is(v, n, "dualsense")) input->mode = PW_GAME_INPUT_DUALSENSE;
+         else return PW_ERR_UNSUPPORTED;
+         input->set |= SET_MODE;
+         return PW_OK;
+diff --git a/src/pw_game_profile.h b/src/pw_game_profile.h
+index a140d82..99cf08f 100644
+--- a/src/pw_game_profile.h
++++ b/src/pw_game_profile.h
+@@ -16,13 +16,17 @@
+  *
+  *   [input]
+  *   preset = pinball       ; an input file shared between profiles
+- *   mode = keyboard        ; keyboard (buttons send keys/mouse) or xinput (also
+- *                          ; the game's XInput controller); default: xinput
+- *                          ; when nothing is bound, keyboard otherwise
++ *   mode = keyboard        ; keyboard (buttons send keys/mouse), xinput (also
++ *                          ; the game's XInput controller) or dualsense (also
++ *                          ; a DualSense the game finds as on a PC); default:
++ *                          ; xinput when nothing is bound, keyboard otherwise
+  *   mouse = right_stick    ; a stick moves the pointer: left_stick, right_stick, none
+  *   mouse_speed = 1200     ; pointer pixels per second at full tilt
+  *   cross = space          ; <button> = <key> | mouse_left | mouse_right |
+  *   r2 = mouse_left        ;            mouse_middle | vk:0xNN | none
++ *   left_stick_up = w      ; a stick's direction, bound like a button: down
++ *                          ; while the stick is pushed that way (the stick
++ *                          ; the pointer follows sends no keys)
+  *
+  *   [debug]
+  *   winedebug = +seh,+virtual   ; Wine's debug channels for this game (default:
+@@ -55,7 +59,9 @@
+  *                               ; when it is consistent; default false
+  *
+  * Buttons: cross circle square triangle l1 r1 l2 r2 l3 r3 up down left
+- * right options create touchpad. An input preset file holds only an [input]
++ * right options create touchpad, and the sticks' directions left_stick_up
++ * left_stick_down left_stick_left left_stick_right and the same for
++ * right_stick_. An input preset file holds only an [input]
+  * section; the profile's own [input] lines override it. Unknown sections,
+  * keys and values are refused, so a typo never plays with defaults.
+  */
+@@ -63,8 +69,19 @@
+ #include <stddef.h>
+ #include <stdint.h>
+ 
++/* The sticks' directions, bound like buttons: bits scePadRead never sets
++ * (its buttons are 0x1-0x100000, and 0x80000000 marks an intercepted
++ * sample). pw_wine_stick_buttons (native) sets them. */
+ enum {
+-    PW_GAME_BUTTON_COUNT = 17,
++    PW_GAME_LEFT_STICK_UP = 0x00200000, PW_GAME_LEFT_STICK_DOWN = 0x00400000,
++    PW_GAME_LEFT_STICK_LEFT = 0x00800000, PW_GAME_LEFT_STICK_RIGHT = 0x01000000,
++    PW_GAME_RIGHT_STICK_UP = 0x02000000, PW_GAME_RIGHT_STICK_DOWN = 0x04000000,
++    PW_GAME_RIGHT_STICK_LEFT = 0x08000000, PW_GAME_RIGHT_STICK_RIGHT = 0x10000000,
++    PW_GAME_LEFT_STICK_ALL = 0x01e00000, PW_GAME_RIGHT_STICK_ALL = 0x1e000000,
++};
++
++enum {
++    PW_GAME_BUTTON_COUNT = 25,
+     PW_GAME_DESKTOP_MIN_W = 320, PW_GAME_DESKTOP_MIN_H = 200,
+     PW_GAME_DESKTOP_MAX_W = 3840, PW_GAME_DESKTOP_MAX_H = 2160,
+     PW_GAME_MOUSE_SPEED_DEFAULT = 1200, PW_GAME_MOUSE_SPEED_MAX = 20000,
+@@ -75,7 +92,9 @@ enum {
+ typedef enum PwGameScaling { PW_GAME_SCALING_FIT = 0, PW_GAME_SCALING_INTEGER,
+                              PW_GAME_SCALING_STRETCH } PwGameScaling;
+ typedef enum PwGameView { PW_GAME_VIEW_WINDOW = 0, PW_GAME_VIEW_DESKTOP } PwGameView;
+-typedef enum PwGameInputMode { PW_GAME_INPUT_KEYBOARD = 0, PW_GAME_INPUT_XINPUT } PwGameInputMode;
++/* dualsense: the game sees the DualSense as Windows does a plugged-in one (a HID
++ * device), and no XInput controller; bindings still apply. */
++typedef enum PwGameInputMode { PW_GAME_INPUT_KEYBOARD = 0, PW_GAME_INPUT_XINPUT, PW_GAME_INPUT_DUALSENSE } PwGameInputMode;
+ typedef enum PwGameStick { PW_GAME_STICK_NONE = 0, PW_GAME_STICK_LEFT, PW_GAME_STICK_RIGHT } PwGameStick;
+ typedef enum PwGameBindKind { PW_GAME_BIND_UNSET = 0, PW_GAME_BIND_NONE, PW_GAME_BIND_KEY,
+                               PW_GAME_BIND_MOUSE } PwGameBindKind;
+diff --git a/tests/test_pw_game_profile.c b/tests/test_pw_game_profile.c
+index 9005b9e..de5a38d 100644
+--- a/tests/test_pw_game_profile.c
++++ b/tests/test_pw_game_profile.c
+@@ -342,7 +342,25 @@ static void test_presets(void)
+     pw_game_input_overlay(&input, NULL);
+ 
+     assert(pw_game_button_mask(CREATE) == 0x1u && pw_game_button_mask(TOUCHPAD) == 0x100000u);
++    pw_game_input_init(&input);
++    assert(preset("[input]\nmode = dualsense\n", &input) == PW_OK && input.mode == PW_GAME_INPUT_DUALSENSE);
++    assert(preset("[input]\nmode = dualshock\n", &input) == PW_ERR_UNSUPPORTED);
++    assert(pw_game_button_mask(TOUCHPAD + 1) == PW_GAME_LEFT_STICK_UP);
++    assert(pw_game_button_mask(PW_GAME_BUTTON_COUNT - 1) == PW_GAME_RIGHT_STICK_RIGHT);
+     assert(pw_game_button_mask(PW_GAME_BUTTON_COUNT) == 0);
++    /* The sticks' directions take keys like buttons, once each; none is a DualSense button. */
++    pw_game_input_init(&input);
++    assert(preset("[input]\nleft_stick_up = w\nleft_stick_down = s\nleft_stick_left = a\n"
++                  "left_stick_right = d\nright_stick_up = up\nright_stick_down = down\n"
++                  "right_stick_left = mouse_left\nright_stick_right = none\n", &input) == PW_OK);
++    assert(input.bindings[TOUCHPAD + 1].kind == PW_GAME_BIND_KEY && input.bindings[TOUCHPAD + 1].code == 'W');
++    assert(input.bindings[TOUCHPAD + 4].code == 'D' && input.bindings[TOUCHPAD + 6].code == 0x28);
++    assert(input.bindings[TOUCHPAD + 7].kind == PW_GAME_BIND_MOUSE && input.bindings[TOUCHPAD + 7].code == 0);
++    assert(input.bindings[TOUCHPAD + 8].kind == PW_GAME_BIND_NONE);
++    assert(preset("[input]\nleft_stick_up = w\nleft_stick_up = s\n", &input) == PW_ERR_MALFORMED);
++    assert(preset("[input]\nleft_stick_up = warp\n", &input) == PW_ERR_UNSUPPORTED);
++    for (size_t i = TOUCHPAD + 1; i < PW_GAME_BUTTON_COUNT; i++)
++        assert(!(pw_game_button_mask(i) & 0x801fffffu));
+ }
+ 
+ /* Nothing bound and no mode set: xinput, so the DualSense reaches games
+diff --git a/tests/test_pw_profile_catalog.c b/tests/test_pw_profile_catalog.c
+index 4fbebc0..37d3822 100644
+--- a/tests/test_pw_profile_catalog.c
++++ b/tests/test_pw_profile_catalog.c
+@@ -27,10 +27,11 @@ int main(void)
+     char long_name[80];memset(long_name,'a',sizeof(long_name));
+     memcpy(long_name+sizeof(long_name)-9,".profile",9);
+     assert(parse(long_name,&c)==PW_ERR_MALFORMED);
+-    char many[33*16+1];many[0]=0;
+-    for(unsigned i=0;i<33;i++){char line[16];line[0]=(char)('a'+i/2);line[1]=(char)('a'+i%2);memcpy(line+2,".profile\n",10);strcat(many,line);}
++    /* One more than the catalog holds, then exactly as many. */
++    char many[(PW_PROFILE_CATALOG_MAX+1)*11+1];many[0]=0;
++    for(unsigned i=0;i<PW_PROFILE_CATALOG_MAX+1;i++){char line[16];line[0]=(char)('a'+i/26);line[1]=(char)('a'+i%26);memcpy(line+2,".profile\n",10);strcat(many,line);}
+     assert(parse(many,&c)==PW_ERR_LIMIT);
+-    many[32*11]=0;assert(parse(many,&c)==PW_OK && c.count==32);
++    many[PW_PROFILE_CATALOG_MAX*11]=0;assert(parse(many,&c)==PW_OK && c.count==PW_PROFILE_CATALOG_MAX);
+     assert(pw_profile_catalog_parse(NULL,1,&c)==PW_ERR_PRECONDITION);
+     assert(pw_profile_catalog_parse((const uint8_t *)"",0,NULL)==PW_ERR_PRECONDITION);
+ 
+diff --git a/tests/test_pw_wine_display.c b/tests/test_pw_wine_display.c
+index 9f7287d..df6d74e 100644
+--- a/tests/test_pw_wine_display.c
++++ b/tests/test_pw_wine_display.c
+@@ -225,6 +225,64 @@ static void test_pad(void)
+     assert(xinput.thumb_lx == 64 * 32767 / 127 && xinput.thumb_ly == 64 * 32767 / 128);
+ }
+ 
++/* The sticks' directions as buttons, with a release threshold below the
++ * press one, the pointer's stick left out, and nothing while disconnected. */
++static void test_stick_buttons(void)
++{
++    PwPadPs5 pad;
++    uint32_t held;
++    PwGameInput input;
++    PwWineInput events[8];
++
++    memset(&pad, 0, sizeof(pad));
++    pad.left_stick = pad.right_stick = (PwPadPs5Stick){ 0x80, 0x80 };
++    pad.left_stick.x = 0x00;
++    assert(pw_wine_stick_buttons(&pad, PW_GAME_STICK_NONE, 0) == 0);          /* disconnected */
++    pad.core.connected = 1;
++    assert(pw_wine_stick_buttons(NULL, PW_GAME_STICK_NONE, 0) == 0);
++    /* Centred: none; just short of the press threshold: none. */
++    pad.left_stick = (PwPadPs5Stick){ 0x80, 0x80 };
++    assert(pw_wine_stick_buttons(&pad, PW_GAME_STICK_NONE, 0) == 0);
++    pad.left_stick.x = 0x80 + PW_WINE_STICK_PRESS - 1;
++    assert(pw_wine_stick_buttons(&pad, PW_GAME_STICK_NONE, 0) == 0);
++    /* At the threshold: right; it stays down back to the release threshold, then goes. */
++    pad.left_stick.x = 0x80 + PW_WINE_STICK_PRESS;
++    held = pw_wine_stick_buttons(&pad, PW_GAME_STICK_NONE, 0);
++    assert(held == PW_GAME_LEFT_STICK_RIGHT);
++    pad.left_stick.x = 0x80 + PW_WINE_STICK_RELEASE;
++    assert(pw_wine_stick_buttons(&pad, PW_GAME_STICK_NONE, held) == PW_GAME_LEFT_STICK_RIGHT);
++    assert(pw_wine_stick_buttons(&pad, PW_GAME_STICK_NONE, 0) == 0);          /* not held: not pressed */
++    pad.left_stick.x = 0x80 + PW_WINE_STICK_RELEASE - 1;
++    assert(pw_wine_stick_buttons(&pad, PW_GAME_STICK_NONE, held) == 0);
++    /* Each direction of both sticks, and a diagonal. */
++    pad.left_stick = (PwPadPs5Stick){ 0x00, 0xff };      /* left, down */
++    pad.right_stick = (PwPadPs5Stick){ 0xff, 0x00 };     /* right, up */
++    held = pw_wine_stick_buttons(&pad, PW_GAME_STICK_NONE, 0);
++    assert(held == (PW_GAME_LEFT_STICK_LEFT | PW_GAME_LEFT_STICK_DOWN | PW_GAME_RIGHT_STICK_RIGHT |
++                    PW_GAME_RIGHT_STICK_UP));
++    pad.left_stick = (PwPadPs5Stick){ 0xff, 0x00 };
++    pad.right_stick = (PwPadPs5Stick){ 0x00, 0xff };
++    assert(pw_wine_stick_buttons(&pad, PW_GAME_STICK_NONE, held) ==
++           (PW_GAME_LEFT_STICK_RIGHT | PW_GAME_LEFT_STICK_UP | PW_GAME_RIGHT_STICK_LEFT | PW_GAME_RIGHT_STICK_DOWN));
++    /* The pointer's stick sends no directions. */
++    assert(pw_wine_stick_buttons(&pad, PW_GAME_STICK_RIGHT, 0) == (PW_GAME_LEFT_STICK_RIGHT | PW_GAME_LEFT_STICK_UP));
++    assert(pw_wine_stick_buttons(&pad, PW_GAME_STICK_LEFT, 0) == (PW_GAME_RIGHT_STICK_LEFT | PW_GAME_RIGHT_STICK_DOWN));
++    pad.core.connected = 0;
++    assert(pw_wine_stick_buttons(&pad, PW_GAME_STICK_NONE, held) == 0);       /* unplugged: all released */
++
++    /* Bound in a keyboard profile, a direction is a key like a button. */
++    static const char text[] = "[input]\nmode = keyboard\nleft_stick_up = w\nleft_stick_left = a\n"
++                               "right_stick_down = down\n";
++    pw_game_input_init(&input);
++    assert(pw_game_input_parse((const uint8_t *)text, sizeof(text) - 1, &input) == PW_OK);
++    assert(pw_wine_game_inputs(&input, PW_GAME_LEFT_STICK_UP | PW_GAME_LEFT_STICK_LEFT, 0, events, 8) == 2);
++    assert(events[0].type == PW_WINE_INPUT_KEY && events[0].down == 1);
++    assert((events[0].code == 'W' && events[1].code == 'A') || (events[0].code == 'A' && events[1].code == 'W'));
++    assert(pw_wine_game_inputs(&input, PW_GAME_RIGHT_STICK_DOWN, PW_GAME_LEFT_STICK_UP, events, 8) == 2);
++    assert(events[0].code == 'W' && events[0].down == 0 && events[1].code == 0x28 && events[1].down == 1);
++    assert(pw_wine_game_inputs(&input, PW_GAME_RIGHT_STICK_UP, 0, events, 8) == 0);   /* unbound */
++}
++
+ /* A script build's controller added to the DualSense's. */
+ static void test_script_pad(void)
+ {
+@@ -307,9 +365,10 @@ int main(void)
+     test_pointer();
+     test_pointer_fraction();
+     test_pad();
++    test_stick_buttons();
+     test_script_pad();
+     printf("wine display passed: frame box copy, newest frame, refusals, concurrent put/take, "
+            "profile bindings to keys and mouse buttons, stick pointer, resized frames, "
+-           "DualSense as XInput, scripted controller added to it\n");
++           "DualSense as XInput, stick directions as keys, scripted controller added to it\n");
+     return 0;
+ }

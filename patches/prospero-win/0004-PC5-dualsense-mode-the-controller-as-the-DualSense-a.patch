@@ -1,0 +1,2925 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bornaradusin <bornaradusin@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 20:53:49 +0100
+Subject: [PATCH] PC5: dualsense mode, the controller as the DualSense a PC
+ finds
+
+With [input] mode = dualsense the game finds the title's controller as
+the USB DualSense (054c:0ce6) Windows finds, through SetupAPI and HID,
+DirectInput or raw input, with its touchpad, motion sensors, rumble,
+light bar and adaptive triggers.
+
+- wine/ps5/input/pw_dualsense.h: the DualSense's USB reports (input 1,
+  output 2, the feature reports SDL and games ask for), its report
+  descriptor, and its trigger effects in libScePad's terms.
+- The sink keeps the whole controller (pw_wine_set_dualsense,
+  pw_wine_dualsense) and the game's output reports
+  (pw_wine_dualsense_report, pw_wine_dualsense_output); ntdll.prx
+  exports them.
+- Patch 0475: xinput1_3 makes the device in the game's process (a
+  device manager, the device's HID interface and instance in volatile
+  registry keys, a thread answering its I/O as hidclass.sys does);
+  0476: ntdll loads xinput1_3 at the start in this mode; 0474:
+  wow64win converts the INPUT of a hardware message, without which a
+  32-bit game's raw input arrived as message 0. Both Wine builds stage
+  pw_dualsense.h beside xinput's Unix library; wow64win joins the
+  patched PE modules.
+- The title sets PW_DUALSENSE=1, turns the motion sensors on, publishes
+  the pad with its touchpad, motion and time (pw_wine_dualsense_state)
+  and applies what the game sends: the motors, and with PC5 the light
+  bar and the triggers' effects.
+
+Tested on the PC's Wine with the title's side stood in for: SetupAPI,
+cfgmgr32, HID attributes, strings, preparsed data and caps, feature
+and input reports, queued, waiting and cancelled reads, writes and
+output reports, raw input devices and 250 reports a second, DirectInput
+enumeration, in 64- and 32-bit processes, and nothing without the mode.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
+---
+ Makefile                                      |    3 +-
+ PUBLICATION_ALLOWLIST.txt                     |    5 +
+ docs/CONTROLS.md                              |   32 +-
+ docs/WINE_PS5_BUILD.md                        |   43 +
+ native/pw_pad_ps5.c                           |   19 +-
+ native/pw_pad_ps5.h                           |   11 +-
+ native/pw_wine_display.c                      |   26 +
+ native/pw_wine_display.h                      |    7 +
+ native/wine64_main.c                          |   70 +-
+ tests/test_build_wine_ps5.py                  |   10 +-
+ tests/test_pw_dualsense.c                     |  269 ++++
+ tests/test_pw_pad_ps5.c                       |   31 +-
+ tests/test_pw_wine_display.c                  |   42 +
+ tests/test_pw_wine_sink.c                     |   83 ++
+ tools/build_host_wine.sh                      |    2 +
+ tools/build_wine_ps5.sh                       |   20 +-
+ ...vert-the-input-of-a-hardware-message.patch |   62 +
+ ...-the-title-controller-as-a-dualsense.patch | 1162 +++++++++++++++++
+ ...-ntdll-load-xinput-for-the-dualsense.patch |   63 +
+ wine/ps5/input/pw_dualsense.h                 |  384 ++++++
+ wine/ps5/pw_wine_sink.c                       |   62 +
+ wine/ps5/pw_wine_sink.h                       |   15 +
+ 22 files changed, 2400 insertions(+), 21 deletions(-)
+ create mode 100644 tests/test_pw_dualsense.c
+ create mode 100644 wine/patches/0474-wow64win-convert-the-input-of-a-hardware-message.patch
+ create mode 100644 wine/patches/0475-xinput-ps5-the-title-controller-as-a-dualsense.patch
+ create mode 100644 wine/patches/0476-ntdll-load-xinput-for-the-dualsense.patch
+ create mode 100644 wine/ps5/input/pw_dualsense.h
+
+diff --git a/Makefile b/Makefile
+index 9dcc796..71a3d75 100644
+--- a/Makefile
++++ b/Makefile
+@@ -50,6 +50,7 @@ $(eval $(call test_rule,test_pw_wine_dmem_ps5,tests/test_pw_wine_dmem_ps5.c wine
+ $(eval $(call test_rule,test_pw_wine_prx,tests/test_pw_wine_prx.c wine/ps5/pw_wine_prx.c,-I.))
+ $(eval $(call test_rule,test_pw_wine_threads,tests/test_pw_wine_threads.c wine/ps5/pw_wine_threads.c,-pthread))
+ $(eval $(call test_rule,test_pw_wine_sink,tests/test_pw_wine_sink.c wine/ps5/pw_wine_sink.c,-pthread))
++$(eval $(call test_rule,test_pw_dualsense,tests/test_pw_dualsense.c,))
+ $(eval $(call test_rule,test_pw_wine_start,tests/test_pw_wine_start.c src/pw_wine_start.c wine/ps5/pw_wine_prx.c,-I.))
+ $(eval $(call test_rule,test_pw_wine_launch,tests/test_pw_wine_launch.c src/pw_wine_launch.c,))
+ $(eval $(call test_rule,test_pw_script_input,tests/test_pw_script_input.c src/pw_script_input.c,))
+@@ -144,7 +145,7 @@ $(eval $(call test_rule,test_pw_key_shared,tests/test_pw_key_shared.c,))
+ 
+ TESTS := test_pw_qpc_clock test_pw_key_shared test_pw_diagnostics test_pw_x86_hostexec test_pw_app_profile test_pw_profile_catalog test_pw_present \
+ 	test_pw_wine_heap test_pw_wine_dmem test_pw_wine_dmem_ps5 test_pw_wine_prx test_pw_wine_start test_pw_wine_launch test_pw_script_input test_pw_game_profile test_pw_prefix_temp test_pw_tsc_calibrate test_pw_wine_prefix_cpu test_vk_command_stream test_vk_spsc test_vk_replay test_vk_wire test_vk_codec \
+-	test_pw_wine_library test_pw_wine_display test_pw_hid test_pw_hid_ps5 test_pw_spinner test_pw_wine_dl test_pw_wine_sink \
++	test_pw_wine_library test_pw_wine_display test_pw_hid test_pw_hid_ps5 test_pw_spinner test_pw_wine_dl test_pw_wine_sink test_pw_dualsense \
+ 	test_pw_wine_threads test_pw_wine_compat test_pw_wine_cwd test_pw_wine_cwd_listing test_pw_ws2_32_libc test_pw_launcher_render test_pw_pad \
+ 	test_pw_guest_fp test_pw_vm test_pw_x86_block test_pw_x86_flat test_pw_x86_cache test_pw_x86_code_pages test_pw_wow_smc_pages test_pw_wow_thread_budget test_pw_wow_tsc_clock test_pw_wow_call_top \
+ 	test_pw_x86_engine test_pw_x86_chaining test_pw_x86_residency test_pw_x86_global_residency test_pw_x86_reencode test_pw_x86_smc test_pw_x86_fault_markers test_pw_x86_lazyflags \
+diff --git a/PUBLICATION_ALLOWLIST.txt b/PUBLICATION_ALLOWLIST.txt
+index 49093d2..6172cb2 100644
+--- a/PUBLICATION_ALLOWLIST.txt
++++ b/PUBLICATION_ALLOWLIST.txt
+@@ -210,6 +210,9 @@ wine/patches/0456-win32u-vulkan-keep-swapchain-chain-when-scaling.patch
+ wine/patches/0457-win32u-vulkan-placed-map-properties-khr.patch
+ wine/patches/0460-win32u-ps5-driver-vulkan-display-plane.patch
+ wine/patches/0470-xinput-ps5-title-controller.patch
++wine/patches/0474-wow64win-convert-the-input-of-a-hardware-message.patch
++wine/patches/0475-xinput-ps5-the-title-controller-as-a-dualsense.patch
++wine/patches/0476-ntdll-load-xinput-for-the-dualsense.patch
+ wine/patches/0480-xaudio2-keep-an-effect-alive-while-a-voice-holds-it.patch
+ wine/patches/0560-ntdll-stderr-output-sink.patch
+ wine/patches/0570-ntdll-ps5-reserve-virtual-range.patch
+@@ -253,6 +256,7 @@ wine/ps5/pw_wine_dl.c
+ wine/ps5/pw_wine_dl.h
+ wine/ps5/pw_wine_dl_libc.c
+ tests/test_pw_wine_sink.c
++tests/test_pw_dualsense.c
+ wine/ps5/pw_wine_sink.c
+ wine/ps5/pw_wine_sink.h
+ tests/test_pw_wine_threads.c
+@@ -487,6 +491,7 @@ wine/patches/0901-win32u-ps5-shared-key-state-fastpath.patch
+ wine/patches/0902-win32u-ps5-send-extended-keys-as-extended.patch
+ wine/patches/0903-ntdll-ps5-keep-the-fs-base-of-a-resumed-64-bit-thread.patch
+ wine/ps5/input/pw_key_shared.h
++wine/ps5/input/pw_dualsense.h
+ tests/lab/pw_qpc_bridge.c
+ tests/lab/pw_key_bridge.c
+ tools/test_wine_qpc_bridge.py
+diff --git a/docs/CONTROLS.md b/docs/CONTROLS.md
+index 74199b9..5917979 100644
+--- a/docs/CONTROLS.md
++++ b/docs/CONTROLS.md
+@@ -101,13 +101,37 @@ DualSense as an XInput controller. On the console, XInput reports both
+ sticks over their full range, the triggers and the buttons, and Half-Life's
+ SDL2 opens it as a game controller.
+ 
++### DualSense games
++
++With `mode = dualsense` the game finds the DualSense the way Windows finds
++one plugged in by USB (Sony's `054c:0ce6`, "DualSense Wireless
++Controller"), instead of an Xbox controller. Use it for games that know the
++DualSense, or that look for controllers some other way than XInput:
++
++- games and libraries that read a DualSense themselves (SDL's, Unity's,
++  Sony's own PC ports) get every button, both sticks, the triggers, the
++  touchpad and its two fingers, and the motion sensors;
++- DirectInput games see it as a joystick;
++- raw input sees it as a HID game pad.
++
++What the game sends back reaches the controller: rumble, the light bar's
++colour and the adaptive triggers' effects (resistance, weapon, vibration).
++XInput sees no Xbox controller in this mode, as on a PC with only a
++DualSense. Button lines still add keys, as in an XInput preset.
++
++```ini
++[input]
++mode = dualsense
++```
++
+ ### DirectInput
+ 
+ Games that read a controller through DirectInput (many games from before
+-2005 or so) don't see the DualSense yet. Play them with a keyboard-and-mouse
+-preset instead. Keyboard and mouse input through DirectInput should work,
+-since it comes from the same place as normal Windows input, but it hasn't
+-been tested.
++2005 or so) find the DualSense as a joystick in `mode = dualsense`; in
++`mode = xinput` they don't see it. Otherwise play them with a
++keyboard-and-mouse preset. Keyboard and mouse input through DirectInput
++should work, since it comes from the same place as normal Windows input, but
++it hasn't been tested.
+ 
+ ## Closing a game
+ 
+diff --git a/docs/WINE_PS5_BUILD.md b/docs/WINE_PS5_BUILD.md
+index d667382..d0a0914 100644
+--- a/docs/WINE_PS5_BUILD.md
++++ b/docs/WINE_PS5_BUILD.md
+@@ -84,6 +84,9 @@ before evaluating a candidate built from that cache.
+ | 0457 | `win32u`: the WoW64 placed-map check reads its properties through `vkGetPhysicalDeviceProperties2KHR`; the core entry point is NULL on win32u's Vulkan 1.0 instances, so a host with `VK_EXT_map_memory_placed` (RADV) crashed every 32-bit process |
+ | 0460 | `win32u`: the PS5 user driver's Vulkan driver: a win32 surface becomes a host display-plane surface in the display's native mode, after the title releases its video output (before the first display query); installing the driver from Vulkan's initialisation does not refresh the display cache, which would wait on that initialisation |
+ | 0470 | `xinput`: controller 0 is the PS5 title's, read through a Unix library (`xinput1_3.so`) from the title's sink; elsewhere xinput uses HID as before; see [XInput controller](#xinput-controller) |
++| 0474 | `wow64win`: `NtUserSendHardwareInput`'s `INPUT` is converted for 64-bit code (its union is 8-byte aligned there); a 32-bit process's hardware messages arrived as message 0, so the DualSense's raw input never reached a 32-bit game |
++| 0475 | `xinput`: dualsense mode (`PW_DUALSENSE=1`): the title's controller as the USB DualSense a game finds through SetupAPI, HID, DirectInput or raw input, made in the game's process; see [DualSense](#dualsense) |
++| 0476 | `ntdll`: in dualsense mode, xinput1_3 is loaded from the system directory once the main module's dependencies are attached, so the DualSense is there before the game looks |
+ | 0480 | `xaudio2`: FAudio's effect reference count (`FAPOBase`) changes atomically, so an effect shared by voices made and destroyed on several threads is not freed while a voice holds it (Samurai Warriors 4 DX); a voice that failed to be created no longer keeps the effect chain it freed |
+ | 0500 | `ntdll`: signal context at `ucontext`+64 (measured); GS = TEB through `sysarch`; FS stays the libc TLS base, so the syscall dispatcher never switches it; no LDT for WoW64 threads |
+ | 0501 | `ntdll`: a signal's FP state is read at `ucontext`+320, where the PS5 kernel keeps its FXSAVE image (32 bytes past the SDK's `mc_fpstate`), with the XSAVE header and YMM upper halves after it (measured); a handled exception's `CONTEXT` used to carry MXCSR 0 and shifted XMM registers |
+@@ -568,6 +571,46 @@ the title's DualSense instead:
+   `.deps/wine-ps5/pe/<arch>-windows`. `report.json` lists them under `pe`
+   with their hashes.
+ 
++## DualSense
++
++A profile's `[input] mode = dualsense` makes the controller the DualSense a
++PC finds plugged in by USB (`054c:0ce6`). The title sets `PW_DUALSENSE=1`,
++publishes the whole controller to its sink (`pw_wine_set_dualsense`: buttons,
++sticks, triggers, the touchpad's fingers, motion, the sample's time) and
++applies what comes back (`pw_wine_dualsense_output`: motors, light bar, the
++triggers' effects, which libScePad's `scePadSetTriggerEffect` takes).
++
++A Windows driver would make the device in `winedevice.exe`, which a title
++cannot start. Patch 0475 makes it in the game's own process instead, in
++xinput1_3 (`dualsense.c`), which ntdll loads at the start in this mode (0476):
++
++- It creates a device manager and a device (`\Device\PwDualSense`) in the
++  server, the symbolic link of its HID interface, and the registry keys plug
++  and play leaves for a HID collection: the instance under
++  `Enum\HID\VID_054C&PID_0CE6&MI_03` and the interface under
++  `DeviceClasses\{4d1e55b2-...}`, enabled. They are volatile and go when the
++  process ends.
++- A thread answers the device's I/O the way ntoskrnl and hidclass.sys do:
++  `get_next_device_request` takes each call, and reads that wait are
++  completed later with `set_irp_result`. Each open file has a queue of input
++  reports (32, resizable), which the thread fills 250 times a second. It
++  answers the HID ioctls hidclass.sys does (attributes, strings, preparsed
++  data, the queue, feature, input and output reports, Wine's raw input
++  handle), and also sends each report on as raw input.
++- The preparsed data is hidparse.sys's own (`dualsense_hid.c` builds its code
++  with the heap in place of the pool).
++- The reports are the Unix library's: `wine/ps5/input/pw_dualsense.h`,
++  staged beside `unixlib.c` by both Wine builds, makes input report 1 from
++  the sink's state (`pw_wine_dualsense`), passes output report 2 to the sink
++  (`pw_wine_dualsense_report`) and answers the feature reports SDL and games
++  ask for (calibration, pairing, firmware). `pw_dualsense_trigger` turns an
++  output report's trigger effects into libScePad's.
++- XInput sees no controller in this mode; without `PW_DUALSENSE=1`, or
++  outside a title, nothing changes.
++
++A 32-bit game's raw input needs patch 0474, so `wow64win` is among the
++patched PE modules (x86_64 only).
++
+ To use it on the console:
+ - stage `xinput1_3.prx` beside `ntdll.prx`;
+ - replace the runtime's xinput DLLs in `lib/wine/i386-windows` and
+diff --git a/native/pw_pad_ps5.c b/native/pw_pad_ps5.c
+index db5ca3e..316989c 100644
+--- a/native/pw_pad_ps5.c
++++ b/native/pw_pad_ps5.c
+@@ -19,6 +19,7 @@ extern int scePadOpen(int32_t,int32_t,int32_t,const void *);
+ extern int scePadRead(int32_t,PwPadPs5Data *,int32_t);
+ extern int scePadClose(int32_t);
+ extern int scePadSetVibration(int32_t,const uint8_t *);
++extern int scePadSetMotionSensorState(int32_t,_Bool);
+ static int platform_user_initialize(const void *p){return sceUserServiceInitialize(p);}
+ static int platform_foreground_user(int32_t *u){return sceUserServiceGetForegroundUser(u);}
+ static int platform_user_terminate(void){return sceUserServiceTerminate();}
+@@ -29,6 +30,7 @@ static int platform_pad_read(int32_t h,PwPadPs5Data *s,int32_t n)
+ {return scePadRead(h,s,n);}
+ static int platform_pad_close(int32_t h){return scePadClose(h);}
+ static int platform_pad_set_vibration(int32_t h,const uint8_t m[2]){return scePadSetVibration(h,m);}
++static int platform_pad_set_motion(int32_t h,int32_t on){return scePadSetMotionSensorState(h,on!=0);}
+ #endif
+ 
+ int pw_pad_ps5_platform_ops(PwPadPs5Ops *ops)
+@@ -39,7 +41,7 @@ int pw_pad_ps5_platform_ops(PwPadPs5Ops *ops)
+ #else
+     *ops=(PwPadPs5Ops){platform_user_initialize,platform_foreground_user,
+         platform_user_terminate,platform_pad_init,platform_pad_open,
+-        platform_pad_read,platform_pad_close,platform_pad_set_vibration};return PW_OK;
++        platform_pad_read,platform_pad_close,platform_pad_set_vibration,platform_pad_set_motion};return PW_OK;
+ #endif
+ }
+ 
+@@ -52,6 +54,9 @@ static int valid_ops(const PwPadPs5Ops *ops)
+ static void centre_analog(PwPadPs5 *pad)
+ {
+     pad->left_stick=pad->right_stick=(PwPadPs5Stick){0x80,0x80};pad->l2=pad->r2=0;
++    memset(&pad->touch,0,sizeof(pad->touch));
++    memset(pad->angular_velocity,0,sizeof(pad->angular_velocity));
++    memset(pad->acceleration,0,sizeof(pad->acceleration));
+ }
+ 
+ int pw_pad_ps5_open(PwPadPs5 *pad,const PwPadPs5Ops *ops,
+@@ -100,6 +105,10 @@ static int read_batch(PwPadPs5 *pad,PwPadSample samples[PW_PAD_PS5_BATCH])
+             pad->connected_samples++;
+             pad->left_stick=raw[i].left_stick;pad->right_stick=raw[i].right_stick;
+             pad->l2=raw[i].l2;pad->r2=raw[i].r2;
++            pad->touch=raw[i].touch_data;pad->timestamp=raw[i].timestamp;
++            if(pad->touch.fingers>2)pad->touch.fingers=2;
++            memcpy(pad->angular_velocity,raw[i].angular_velocity,sizeof(pad->angular_velocity));
++            memcpy(pad->acceleration,raw[i].acceleration,sizeof(pad->acceleration));
+         }
+         else{pad->disconnected_samples++;centre_analog(pad);}
+     }
+@@ -141,3 +150,11 @@ int pw_pad_ps5_vibrate(PwPadPs5 *pad,uint8_t large,uint8_t small)
+     pad->vibration_rc=pad->ops.pad_set_vibration(pad->pad_handle,motors);
+     return pad->vibration_rc<0?PW_ERR_STATE:PW_OK;
+ }
++
++int pw_pad_ps5_motion(PwPadPs5 *pad,int on)
++{
++    if(!pad || !pad->opened)return PW_ERR_PRECONDITION;
++    if(!pad->ops.pad_set_motion)return PW_ERR_UNSUPPORTED;
++    pad->motion_rc=pad->ops.pad_set_motion(pad->pad_handle,on?1:0);
++    return pad->motion_rc<0?PW_ERR_STATE:PW_OK;
++}
+diff --git a/native/pw_pad_ps5.h b/native/pw_pad_ps5.h
+index f6f95e8..60a605c 100644
+--- a/native/pw_pad_ps5.h
++++ b/native/pw_pad_ps5.h
+@@ -27,12 +27,14 @@ typedef struct PwPadPs5Ops {
+     int (*pad_close)(int32_t);
+     /* Optional: scePadSetVibration(handle, {large, small}), NULL if none. */
+     int (*pad_set_vibration)(int32_t,const uint8_t motors[2]);
++    /* Optional: scePadSetMotionSensorState(handle, on), NULL if none. */
++    int (*pad_set_motion)(int32_t,int32_t);
+ } PwPadPs5Ops;
+ 
+ typedef struct PwPadPs5 {
+     PwPad core;PwPadPs5Ops ops;int32_t user_id,pad_handle;
+     int user_initialize_rc,pad_init_rc,close_rc,terminate_rc,last_read_rc;
+-    int vibration_rc;
++    int vibration_rc,motion_rc;
+     uint64_t polls,empty_reads,read_errors,connected_samples,disconnected_samples,
+              intercepted_samples,generation_changes;
+     uint8_t last_generation;
+@@ -40,6 +42,9 @@ typedef struct PwPadPs5 {
+     /* The newest connected sample's sticks (0..255, 0x80 centred) and
+      * triggers; centred and released while disconnected or intercepted. */
+     PwPadPs5Stick left_stick,right_stick;uint8_t l2,r2;
++    /* The same sample's touchpad (no fingers while disconnected or
++     * intercepted), motion (radians a second, g; 0 then) and time (us). */
++    PwPadPs5TouchData touch;float angular_velocity[3],acceleration[3];uint64_t timestamp;
+ } PwPadPs5;
+ 
+ int pw_pad_ps5_platform_ops(PwPadPs5Ops *);
+@@ -52,5 +57,9 @@ int pw_pad_ps5_close(PwPadPs5 *);
+  * vibration op, PW_ERR_PRECONDITION when the pad is not open, PW_ERR_STATE
+  * when the call fails (its result is kept in vibration_rc). */
+ int pw_pad_ps5_vibrate(PwPadPs5 *,uint8_t large,uint8_t small);
++/* The motion sensors on (1) or off (0), for games that read them. PW_OK,
++ * PW_ERR_UNSUPPORTED with no motion op, PW_ERR_PRECONDITION when the pad is
++ * not open, PW_ERR_STATE when the call fails (motion_rc keeps its result). */
++int pw_pad_ps5_motion(PwPadPs5 *,int on);
+ 
+ #endif
+diff --git a/native/pw_wine_display.c b/native/pw_wine_display.c
+index d10241e..6113ac6 100644
+--- a/native/pw_wine_display.c
++++ b/native/pw_wine_display.c
+@@ -128,6 +128,32 @@ int pw_wine_game_pad(const PwPadPs5 *pad, PwWinePad *out)
+     return 1;
+ }
+ 
++int pw_wine_dualsense_state(const PwPadPs5 *pad, PwDualSenseState *out)
++{
++    if (!out) return 0;
++    memset(out, 0, sizeof(*out));
++    out->lx = out->ly = out->rx = out->ry = 0x80;
++    if (!pad || !pad->core.connected) return 0;
++    out->connected = 1;
++    out->buttons = pad->core.previous_buttons;
++    out->lx = pad->left_stick.x;
++    out->ly = pad->left_stick.y;
++    out->rx = pad->right_stick.x;
++    out->ry = pad->right_stick.y;
++    out->l2 = pad->l2;
++    out->r2 = pad->r2;
++    out->touches = pad->touch.fingers > 2 ? 2 : pad->touch.fingers;
++    for (unsigned i = 0; i < out->touches; i++) {
++        out->touch_x[i] = pad->touch.touch[i].x;
++        out->touch_y[i] = pad->touch.touch[i].y;
++        out->touch_id[i] = pad->touch.touch[i].finger;
++    }
++    memcpy(out->gyro, pad->angular_velocity, sizeof(out->gyro));
++    memcpy(out->accel, pad->acceleration, sizeof(out->accel));
++    out->timestamp_us = pad->timestamp;
++    return 1;
++}
++
+ int pw_wine_script_pad(PwWinePad *pad, int connected, const PwScriptPad *script, int scripted)
+ {
+     if (!pad) return 0;
+diff --git a/native/pw_wine_display.h b/native/pw_wine_display.h
+index 24fa94d..d2aa275 100644
+--- a/native/pw_wine_display.h
++++ b/native/pw_wine_display.h
+@@ -60,6 +60,13 @@ size_t pw_wine_game_inputs(const PwGameInput *input, uint32_t pressed, uint32_t
+  * packets. */
+ int pw_wine_game_pad(const PwPadPs5 *pad, PwWinePad *out);
+ 
++/* dualsense mode: the controller in full, for the DualSense a game finds
++ * (wine/ps5/input/pw_dualsense.h): its held buttons as scePadRead has them,
++ * the sticks and triggers as they are, the touchpad's fingers, motion and
++ * the sample's time. 1 and the state in out while the pad is connected; 0
++ * and a neutral state otherwise. */
++int pw_wine_dualsense_state(const PwPadPs5 *pad, PwDualSenseState *out);
++
+ /* A script build's scripted controller (src/pw_script_input.h) added to
+  * the real one in pad, which pw_wine_game_pad filled (connected says
+  * whether it is): the scripted buttons join the held ones, and each stick
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+index 215b637..4073603 100644
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -1111,6 +1111,39 @@ static int start_thread(void (*entry)(void *), void *arg, size_t stack_bytes)
+     return status;
+ }
+ 
++/* dualsense mode: what the game asked of its DualSense (patch 0475). The
++ * motors always; with PC5, at its Vibration strength, and the light bar and
++ * the triggers' effects, which once the game sets them replace PC5's own. */
++static void dualsense_effects(PwPadPs5 *pad, const PwDualSenseOutput *out, uint64_t *count)
++{
++    uint8_t large = out->motor_large, small = out->motor_small;
++#ifdef PW_PC5
++    if (pc5_game_on) {
++        Pc5PadOutput pc5;
++        memset(&pc5, 0, sizeof(pc5));
++        pc5.set = (out->set & PW_DUALSENSE_MOTORS ? PC5_OUTPUT_MOTORS : 0u) |
++                  (out->set & PW_DUALSENSE_LIGHT ? PC5_OUTPUT_LIGHT : 0u) |
++                  (out->set & (PW_DUALSENSE_LEFT_TRIGGER | PW_DUALSENSE_RIGHT_TRIGGER) ? PC5_OUTPUT_TRIGGERS : 0u);
++        pc5.large = large;
++        pc5.small = small;
++        pc5.light = (uint32_t)out->light[0] << 16 | (uint32_t)out->light[1] << 8 | out->light[2];
++        for (int i = 0; i < 2; i++) {
++            PwDualSenseTrigger trigger;
++            pw_dualsense_trigger(out->trigger[i], &trigger);
++            pc5.trigger[i].mode = trigger.mode != PW_DS_TRIGGER_OFF ? PC5_TRIGGER_GAME : PC5_TRIGGER_OFF;
++            pc5.trigger[i].effect = (uint8_t)trigger.mode;
++            memcpy(pc5.trigger[i].data, trigger.data, sizeof(pc5.trigger[i].data));
++        }
++        pc5_game_output(&pc5_game, pad->pad_handle, &pc5, &large, &small);
++    }
++#endif
++    int vibrate = pw_pad_ps5_vibrate(pad, large, small);
++    if (!(*count)++ || vibrate != PW_OK)
++        PS5LOG_LOG("PW_WINE64 dualsense output set=%#x motors=%u/%u light=%02x%02x%02x triggers=%#x/%#x "
++                   "status=%s rc=%d", (unsigned)out->set, large, small, out->light[0], out->light[1], out->light[2],
++                   out->trigger[0][0], out->trigger[1][0], pw_result_name(vibrate), pad->vibration_rc);
++}
++
+ int main(int argc, char **argv)
+ {
+     static char prefix[PW_WINE_LIBRARY_PATH + PW_APP_ID_CAPACITY], desktop[24], view[8] = "window";
+@@ -1179,6 +1212,9 @@ int main(int argc, char **argv)
+     void (*set_pad)(const PwWinePad *) = NULL;
+     int (*rumble)(uint32_t *, uint32_t *) = NULL;
+     uint64_t vibrations = 0;
++    void (*set_dualsense)(const PwDualSenseState *) = NULL;
++    int (*dualsense_output)(PwDualSenseOutput *) = NULL;
++    uint64_t dualsense_outputs = 0;
+     uint64_t shown_sequence = 0, shown = 0, posted = 0, refused = 0;
+     VulkanFrames vulkan_frames = { 0 };
+     Loading loading = { 0 };
+@@ -1275,6 +1311,10 @@ int main(int argc, char **argv)
+          * XInput; this hint makes them read controller 0 through XInput. */
+         if (game_input.mode == PW_GAME_INPUT_XINPUT)
+             extra[config.extra_env_count++] = (PwWineStartEnv){ "SDL_JOYSTICK_RAWINPUT", "0" };
++        /* dualsense mode: Wine's xinput makes the DualSense a game finds
++         * (patch 0475), which ntdll loads it for at the start (0476). */
++        else if (game_input.mode == PW_GAME_INPUT_DUALSENSE)
++            extra[config.extra_env_count++] = (PwWineStartEnv){ "PW_DUALSENSE", "1" };
+         /* [runtime]: opt-in runtime settings for this game. */
+         {
+             PwGameEnv runtime_env[PW_GAME_RUNTIME_ENV_MAX];
+@@ -1416,11 +1456,25 @@ int main(int argc, char **argv)
+             rumble = (int (*)(uint32_t *, uint32_t *))
+                 (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_rumble");
+         }
++        /* dualsense mode: the whole controller, touchpad and motion too,
++         * for the DualSense Wine's xinput makes (patch 0475), and what the
++         * game sends it: rumble, the light bar, the triggers' effects. */
++        if (game_input.mode == PW_GAME_INPUT_DUALSENSE) {
++            set_dualsense = (void (*)(const PwDualSenseState *))
++                (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_dualsense");
++            dualsense_output = (int (*)(PwDualSenseOutput *))
++                (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_dualsense_output");
++        }
+         video_status = pw_videoout_ps5_open(&video);
+         pad_status = pw_pad_ps5_platform_ops(&pad_ops);
+         if (pad_status == PW_OK)
+             pad_status = pw_pad_ps5_open(&pad, &pad_ops, pad_open_map,
+                                          sizeof(pad_open_map) / sizeof(pad_open_map[0]));
++        if (set_dualsense && pad_status == PW_OK) {
++            int motion = pw_pad_ps5_motion(&pad, 1);   /* for games that read the motion sensors */
++            PS5LOG_LOG("PW_WINE64 dualsense output=%d motion=%s rc=%d", dualsense_output != NULL,
++                       pw_result_name(motion), pad.motion_rc);
++        }
+         /* A USB keyboard and mouse, the foreground user's, as the pad's. */
+         if (post_input) {
+             int32_t user = pad_status == PW_OK ? pad.user_id : -1;
+@@ -1447,9 +1501,9 @@ int main(int argc, char **argv)
+                 (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_display_release");
+             if (set_release) set_release(wine_release_display, NULL);
+         }
+-        PS5LOG_LOG("PW_WINE64 display present_sink=%d frames=%d post_input=%d xinput=%d video=%s "
++        PS5LOG_LOG("PW_WINE64 display present_sink=%d frames=%d post_input=%d xinput=%d dualsense=%d video=%s "
+                    "pad=%s hid=%s", set_present != NULL, frame_shown != NULL, post_input != NULL,
+-                   set_pad != NULL,
++                   set_pad != NULL, set_dualsense != NULL,
+                    pw_result_name(video_status),
+                    pw_result_name(pad_status), pw_result_name(hid_status));
+         {
+@@ -1570,6 +1624,16 @@ int main(int argc, char **argv)
+ #endif
+             if (pad_read || scripted) set_pad(connected ? &state : NULL);
+         }
++        /* dualsense mode: the controller as the game's DualSense, and what
++         * the game sent it back. */
++        if (set_dualsense && pad_read) {
++            PwDualSenseState state;
++            set_dualsense(pw_wine_dualsense_state(&pad, &state) ? &state : NULL);
++        }
++        if (dualsense_output && pad_status == PW_OK) {
++            PwDualSenseOutput out;
++            if (dualsense_output(&out)) dualsense_effects(&pad, &out, &dualsense_outputs);
++        }
+         if (pad_read) {
+             /* The sticks' directions, for the keys a profile binds to them. */
+             uint32_t sticks = pw_wine_stick_buttons(&pad, game_input.mouse, stick_buttons);
+@@ -1663,7 +1727,7 @@ int main(int argc, char **argv)
+                 pc5_pulse_until = now / 1000000u + 250;
+             } else
+ #endif
+-            if (rumble && pad_status == PW_OK) (void)pw_pad_ps5_vibrate(&pad, 0, 0);
++            if ((rumble || dualsense_output) && pad_status == PW_OK) (void)pw_pad_ps5_vibrate(&pad, 0, 0);
+             for (size_t i = 0; post_input && i < sizeof(alt_f4) / sizeof(alt_f4[0]); i++)
+                 (void)post_input(&alt_f4[i]);
+             PS5LOG_LOG("PW_WINE64 close requested by=%s", combo_ticks ? "combo" : "deadline");
+diff --git a/tests/test_build_wine_ps5.py b/tests/test_build_wine_ps5.py
+index 69071b3..1c969da 100644
+--- a/tests/test_build_wine_ps5.py
++++ b/tests/test_build_wine_ps5.py
+@@ -123,14 +123,15 @@ def check_vk_runtime_staging() -> None:
+         source.mkdir()
+         headers = []
+         for family, module, name in [('time', 'ntdll', 'pw_qpc_clock.h'),
+-                                     ('input', 'win32u', 'pw_key_shared.h')]:
++                                     ('input', 'win32u', 'pw_key_shared.h'),
++                                     ('input', 'xinput1_3', 'pw_dualsense.h')]:
+             if f'wine/ps5/{family}/' not in block:
+                 continue
+             original = base / f'wine/ps5/{family}/{name}'
+-            original.parent.mkdir(parents=True)
+-            original.write_text(f'{family} shared ABI fixture\n')
++            original.parent.mkdir(parents=True, exist_ok=True)
++            original.write_text(f'{family} {name} fixture\n')
+             target = source / f'dlls/{module}/{name}'
+-            target.parent.mkdir(parents=True)
++            target.parent.mkdir(parents=True, exist_ok=True)
+             headers.append((original, target))
+         helper = base / 'tools/stage_vk_batch.py'
+         helper.write_text('import sys, pathlib\nassert sys.argv[1:] == ["--source", '
+@@ -153,6 +154,7 @@ def check_vk_runtime_staging() -> None:
+     assert '"$root/tools/generate_vk_codecs.py"' in stamp
+     assert '"$root"/wine/ps5/pw_vk_*.[ch]' in stamp
+     assert '"$root"/wine/ps5/vulkan/*.[ch]' in stamp
++    assert '"$root/wine/ps5/input/pw_dualsense.h"' in stamp
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/tests/test_pw_dualsense.c b/tests/test_pw_dualsense.c
+new file mode 100644
+index 0000000..cbbd20c
+--- /dev/null
++++ b/tests/test_pw_dualsense.c
+@@ -0,0 +1,269 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#include "../wine/ps5/input/pw_dualsense.h"
++#include <assert.h>
++#include <stdio.h>
++#include <string.h>
++
++/* The descriptor's report sizes in bits, walked item by item: by type
++ * (0 input, 1 output, 2 feature) and report id. */
++static unsigned bits[3][256];
++
++static void walk_descriptor(void)
++{
++    const uint8_t *d = pw_dualsense_descriptor;
++    size_t n = sizeof(pw_dualsense_descriptor), at = 0;
++    unsigned size = 0, count = 0, id = 0, depth = 0;
++
++    memset(bits, 0, sizeof(bits));
++    while (at < n) {
++        uint8_t prefix = d[at];
++        unsigned length = prefix & 3, value = 0;
++        if (length == 3) length = 4;
++        assert(at + 1 + length <= n);
++        for (unsigned i = 0; i < length; i++) value |= (unsigned)d[at + 1 + i] << (8 * i);
++        switch (prefix & 0xfc) {
++        case 0x74: size = value; break;              /* report size */
++        case 0x94: count = value; break;             /* report count */
++        case 0x84: id = value; break;                /* report id */
++        case 0x80: bits[0][id] += size * count; break;
++        case 0x90: bits[1][id] += size * count; break;
++        case 0xb0: bits[2][id] += size * count; break;
++        case 0xa0: depth++; break;
++        case 0xc0: assert(depth); depth--; break;
++        default: break;
++        }
++        at += 1 + length;
++    }
++    assert(at == n && depth == 0);
++}
++
++static void test_descriptor(void)
++{
++    walk_descriptor();
++    assert(bits[0][1] == (PW_DUALSENSE_INPUT_SIZE - 1) * 8);
++    assert(bits[1][2] == (PW_DUALSENSE_OUTPUT_SIZE - 1) * 8);
++    for (size_t i = 0; i < sizeof(pw_dualsense_features) / sizeof(pw_dualsense_features[0]); i++) {
++        uint8_t id = pw_dualsense_features[i].id;
++        assert(bits[2][id] == (pw_dualsense_features[i].length - 1u) * 8u);
++        assert(pw_dualsense_features[i].length <= PW_DUALSENSE_FEATURE_SIZE);
++        assert(pw_dualsense_feature(id, NULL, 0) == pw_dualsense_features[i].length);
++    }
++    for (unsigned id = 0; id < 256; id++) {
++        if (id != 1) assert(!bits[0][id]);
++        if (id != 2) assert(!bits[1][id]);
++    }
++}
++
++static PwDualSenseState centred(void)
++{
++    PwDualSenseState s;
++    memset(&s, 0, sizeof(s));
++    s.connected = 1;
++    s.lx = s.ly = s.rx = s.ry = 0x80;
++    return s;
++}
++
++static void test_input(void)
++{
++    uint8_t r[PW_DUALSENSE_INPUT_SIZE];
++    PwDualSenseState s = centred();
++
++    pw_dualsense_input(&s, 7, r);
++    assert(r[0] == 1 && r[1] == 0x80 && r[2] == 0x80 && r[3] == 0x80 && r[4] == 0x80 && !r[5] && !r[6] && r[7] == 7);
++    assert(r[8] == 8 && !r[9] && !r[10]);                     /* the hat at rest, nothing pressed */
++    assert(r[33] & 0x80 && r[37] & 0x80);                    /* no fingers on the touchpad */
++    assert(r[53] == 0x0a);
++    /* Sticks and triggers as they are. */
++    s.lx = 0; s.ly = 255; s.rx = 10; s.ry = 200; s.l2 = 33; s.r2 = 255;
++    pw_dualsense_input(&s, 0, r);
++    assert(r[1] == 0 && r[2] == 255 && r[3] == 10 && r[4] == 200 && r[5] == 33 && r[6] == 255);
++    /* Each button where a DualSense puts it. */
++    static const struct { uint32_t pad; int byte; uint8_t bit; } buttons[] = {
++        { PW_DS_PAD_SQUARE, 8, 0x10 }, { PW_DS_PAD_CROSS, 8, 0x20 }, { PW_DS_PAD_CIRCLE, 8, 0x40 },
++        { PW_DS_PAD_TRIANGLE, 8, 0x80 }, { PW_DS_PAD_L1, 9, 0x01 }, { PW_DS_PAD_R1, 9, 0x02 },
++        { PW_DS_PAD_L2, 9, 0x04 }, { PW_DS_PAD_R2, 9, 0x08 }, { PW_DS_PAD_CREATE, 9, 0x10 },
++        { PW_DS_PAD_OPTIONS, 9, 0x20 }, { PW_DS_PAD_L3, 9, 0x40 }, { PW_DS_PAD_R3, 9, 0x80 },
++        { PW_DS_PAD_TOUCHPAD, 10, 0x02 },
++    };
++    for (size_t i = 0; i < sizeof(buttons) / sizeof(buttons[0]); i++) {
++        s = centred();
++        s.buttons = buttons[i].pad;
++        pw_dualsense_input(&s, 0, r);
++        assert(r[buttons[i].byte] == (buttons[i].byte == 8 ? (uint8_t)(buttons[i].bit | 8) : buttons[i].bit));
++        for (int b = 9; b <= 11; b++) if (b != buttons[i].byte) assert(!r[b]);
++    }
++    /* The d-pad as the hat, diagonals too; opposite directions cancel. */
++    static const struct { uint32_t pad; uint8_t hat; } hats[] = {
++        { PW_DS_PAD_UP, 0 }, { PW_DS_PAD_UP | PW_DS_PAD_RIGHT, 1 }, { PW_DS_PAD_RIGHT, 2 },
++        { PW_DS_PAD_DOWN | PW_DS_PAD_RIGHT, 3 }, { PW_DS_PAD_DOWN, 4 }, { PW_DS_PAD_DOWN | PW_DS_PAD_LEFT, 5 },
++        { PW_DS_PAD_LEFT, 6 }, { PW_DS_PAD_UP | PW_DS_PAD_LEFT, 7 }, { PW_DS_PAD_UP | PW_DS_PAD_DOWN, 8 },
++        { PW_DS_PAD_LEFT | PW_DS_PAD_RIGHT | PW_DS_PAD_UP, 0 },
++    };
++    for (size_t i = 0; i < sizeof(hats) / sizeof(hats[0]); i++) assert(pw_dualsense_hat(hats[i].pad) == hats[i].hat);
++    /* Motion: 16 to a degree a second, 8192 to a g, clamped. */
++    s = centred();
++    s.gyro[0] = 1.0f;                 /* 57.3 degrees a second */
++    s.gyro[1] = -0.5f;
++    s.gyro[2] = 100.0f;               /* beyond the range */
++    s.accel[0] = 0.0f; s.accel[1] = -1.0f; s.accel[2] = 0.5f;
++    s.timestamp_us = 1000;
++    pw_dualsense_input(&s, 0, r);
++    assert((int16_t)(r[16] | r[17] << 8) == 917 && (int16_t)(r[18] | r[19] << 8) == -458);
++    assert((int16_t)(r[20] | r[21] << 8) == 32767);
++    assert((int16_t)(r[22] | r[23] << 8) == 0 && (int16_t)(r[24] | r[25] << 8) == -8192 &&
++           (int16_t)(r[26] | r[27] << 8) == 4096);
++    assert((uint32_t)(r[28] | r[29] << 8 | r[30] << 16 | (uint32_t)r[31] << 24) == 3000);
++    /* Two fingers: each one's number, x and y in 12 bits; past the edge, clamped. */
++    s = centred();
++    s.touches = 2;
++    s.touch_id[0] = 5; s.touch_x[0] = 1919; s.touch_y[0] = 1079;
++    s.touch_id[1] = 0x86; s.touch_x[1] = 3000; s.touch_y[1] = 0x123;
++    pw_dualsense_input(&s, 0, r);
++    assert(r[33] == 5 && r[34] == 0x7f && r[35] == (0x07 | 0x70) && r[36] == 0x43);
++    assert(r[37] == 0x06 && r[38] == 0x7f && r[39] == (0x07 | 0x30) && r[40] == 0x12);
++    s.touches = 1;
++    pw_dualsense_input(&s, 0, r);
++    assert(!(r[33] & 0x80) && (r[37] & 0x80));
++    /* Disconnected: neutral, whatever the state says. */
++    s = centred();
++    s.connected = 0; s.buttons = PW_DS_PAD_CROSS; s.lx = 0; s.r2 = 200; s.touches = 2;
++    pw_dualsense_input(&s, 0, r);
++    assert(r[1] == 0x80 && !r[6] && r[8] == 8 && (r[33] & 0x80) && (r[37] & 0x80));
++    assert((int16_t)(r[24] | r[25] << 8) == 8192);
++}
++
++static void test_output(void)
++{
++    uint8_t r[PW_DUALSENSE_OUTPUT_SIZE];
++    PwDualSenseOutput out;
++
++    memset(&out, 0, sizeof(out));
++    memset(r, 0, sizeof(r));
++    r[0] = 2;
++    assert(!pw_dualsense_parse_output(r, sizeof(r), &out) && out.sequence == 0);   /* asks nothing */
++    /* Rumble, as SDL sends it. */
++    r[1] = 0x03; r[3] = 40; r[4] = 200;
++    assert(pw_dualsense_parse_output(r, sizeof(r), &out) == 1);
++    assert(out.motor_small == 40 && out.motor_large == 200 && out.set == PW_DUALSENSE_MOTORS && out.sequence == 1);
++    /* The triggers and the light bar. */
++    memset(r, 0, sizeof(r));
++    r[0] = 2; r[1] = 0x0c; r[2] = 0x14;
++    r[11] = 0x21; r[12] = 0xff;            /* R2 */
++    r[22] = 0x01; r[23] = 0x80; r[24] = 0xff;   /* L2 */
++    r[44] = 0x04; r[45] = 255; r[46] = 64; r[47] = 1;
++    assert(pw_dualsense_parse_output(r, sizeof(r), &out) == 1 && out.sequence == 2);
++    assert(out.trigger[1][0] == 0x21 && out.trigger[1][1] == 0xff && out.trigger[0][0] == 0x01 && out.trigger[0][2] == 0xff);
++    assert(out.light[0] == 255 && out.light[1] == 64 && out.light[2] == 1 && out.player_leds == 0x04);
++    assert(out.set == (PW_DUALSENSE_MOTORS | PW_DUALSENSE_LIGHT | PW_DUALSENSE_LEFT_TRIGGER | PW_DUALSENSE_RIGHT_TRIGGER |
++                       PW_DUALSENSE_PLAYER_LEDS));
++    assert(out.motor_large == 200);        /* kept: not asked this time */
++    /* Another report, a short one, or nothing: refused. */
++    r[0] = 0x31;
++    assert(!pw_dualsense_parse_output(r, sizeof(r), &out));
++    assert(!pw_dualsense_parse_output(NULL, 48, &out) && !pw_dualsense_parse_output(r, 2, &out));
++    /* A short report 2 reads as zeros past its end. */
++    uint8_t shortr[5] = { 2, 0x01, 0, 9, 8 };
++    assert(pw_dualsense_parse_output(shortr, sizeof(shortr), &out) && out.motor_small == 9 && out.motor_large == 8);
++    assert(out.sequence == 3);
++}
++
++static void test_features(void)
++{
++    uint8_t r[PW_DUALSENSE_FEATURE_SIZE];
++
++    memset(r, 0x5a, sizeof(r));
++    assert(pw_dualsense_feature(0x05, r, sizeof(r)) == 41 && r[0] == 0x05);
++    assert((int16_t)(r[7] | r[8] << 8) == 32000 && (int16_t)(r[9] | r[10] << 8) == -32000);
++    assert((int16_t)(r[19] | r[20] << 8) == 2000 && (int16_t)(r[21] | r[22] << 8) == 2000);
++    assert((int16_t)(r[23] | r[24] << 8) == 8192 && (int16_t)(r[33] | r[34] << 8) == -8192);
++    assert(!r[1] && !r[3] && !r[5] && r[41] == 0x5a);   /* biases 0; nothing written past its length */
++    /* With the units above, a reading means what the input report says: a
++     * gyro step is (2000 + 2000) / (32000 + 32000) = 1/16 degree a second. */
++    assert(2 * 2000 * PW_DUALSENSE_GYRO_PER_DEGREE == 2 * 32000);
++    assert(pw_dualsense_feature(0x09, r, sizeof(r)) == 20 && r[0] == 0x09 && r[1] == 0x35 && r[6] == 0x7c);
++    assert(pw_dualsense_feature(0x20, r, sizeof(r)) == 64 && !memcmp(r + 1, "Jun 10 2024", 11) &&
++           (r[44] | r[45] << 8) == 0x0630);
++    assert(pw_dualsense_feature(0x08, r, sizeof(r)) == 48 && r[0] == 0x08 && !r[1] && !r[47]);
++    assert(pw_dualsense_feature(0x33, r, sizeof(r)) == 0 && pw_dualsense_feature(0x01, r, sizeof(r)) == 0);
++    /* Into a smaller buffer: what fits. */
++    memset(r, 0x5a, sizeof(r));
++    assert(pw_dualsense_feature(0x20, r, 10) == 64 && r[0] == 0x20 && r[10] == 0x5a);
++}
++
++static void test_triggers(void)
++{
++    uint8_t e[11];
++    PwDualSenseTrigger t;
++
++    memset(e, 0, sizeof(e));
++    pw_dualsense_trigger(e, &t);
++    assert(t.mode == PW_DS_TRIGGER_OFF);
++    e[0] = 0x05;
++    pw_dualsense_trigger(e, &t);
++    assert(t.mode == PW_DS_TRIGGER_OFF);
++    /* Resistance from a point. */
++    memset(e, 0, sizeof(e)); e[0] = 0x01; e[1] = 0x80; e[2] = 0xff;
++    pw_dualsense_trigger(e, &t);
++    assert(t.mode == PW_DS_TRIGGER_FEEDBACK && t.data[0] == 5 && t.data[1] == 8);
++    e[2] = 0;
++    pw_dualsense_trigger(e, &t);
++    assert(t.mode == PW_DS_TRIGGER_OFF);
++    /* Between two points. */
++    memset(e, 0, sizeof(e)); e[0] = 0x02; e[1] = 0x00; e[2] = 0x00; e[3] = 0x80;
++    pw_dualsense_trigger(e, &t);
++    assert(t.mode == PW_DS_TRIGGER_WEAPON && t.data[0] == 2 && t.data[1] == 3 && t.data[2] == 4);
++    /* A vibration. */
++    memset(e, 0, sizeof(e)); e[0] = 0x06; e[1] = 30; e[2] = 0xff; e[3] = 0;
++    pw_dualsense_trigger(e, &t);
++    assert(t.mode == PW_DS_TRIGGER_VIBRATION && t.data[0] == 0 && t.data[1] == 8 && t.data[2] == 30);
++    /* Zone by zone: zones 0, 2 and 9, firmness 1, 3 and 8. */
++    memset(e, 0, sizeof(e)); e[0] = 0x21;
++    e[1] = 0x05; e[2] = 0x02;
++    {
++        uint32_t packed = 0u << 0 | 2u << 6 | 7u << 27;
++        e[3] = (uint8_t)packed; e[4] = (uint8_t)(packed >> 8); e[5] = (uint8_t)(packed >> 16); e[6] = (uint8_t)(packed >> 24);
++    }
++    pw_dualsense_trigger(e, &t);
++    assert(t.mode == PW_DS_TRIGGER_MULTIPLE_FEEDBACK && t.data[0] == 1 && t.data[1] == 0 && t.data[2] == 3 && t.data[9] == 8);
++    /* A weapon from zone 3 to 6, firmness 5. */
++    memset(e, 0, sizeof(e)); e[0] = 0x25; e[1] = (1 << 3) | (1 << 6); e[3] = 4;
++    pw_dualsense_trigger(e, &t);
++    assert(t.mode == PW_DS_TRIGGER_WEAPON && t.data[0] == 3 && t.data[1] == 6 && t.data[2] == 5);
++    e[1] = 1 << 3;                                       /* one zone: not a weapon */
++    pw_dualsense_trigger(e, &t);
++    assert(t.mode == PW_DS_TRIGGER_OFF);
++    /* A vibration zone by zone at 40 Hz. */
++    memset(e, 0, sizeof(e)); e[0] = 0x26; e[1] = 0xff; e[2] = 0x03; e[9] = 40;
++    {
++        uint32_t packed = 0;
++        for (int i = 0; i < 10; i++) packed |= (uint32_t)(i % 8) << (3 * i);
++        e[3] = (uint8_t)packed; e[4] = (uint8_t)(packed >> 8); e[5] = (uint8_t)(packed >> 16); e[6] = (uint8_t)(packed >> 24);
++    }
++    pw_dualsense_trigger(e, &t);
++    assert(t.mode == PW_DS_TRIGGER_MULTIPLE_VIBRATION && t.data[0] == 40 && t.data[1] == 1 && t.data[8] == 8 &&
++           t.data[9] == 1 && t.data[10] == 2);
++    e[9] = 0;
++    pw_dualsense_trigger(e, &t);
++    assert(t.mode == PW_DS_TRIGGER_OFF);
++    /* A machine between zones 1 and 8. */
++    memset(e, 0, sizeof(e)); e[0] = 0x27; e[1] = 0x02; e[2] = 0x01; e[3] = 2; e[4] = 25;
++    pw_dualsense_trigger(e, &t);
++    assert(t.mode == PW_DS_TRIGGER_VIBRATION && t.data[0] == 1 && t.data[1] == 3 && t.data[2] == 25);
++    /* Anything else: off. */
++    memset(e, 0, sizeof(e)); e[0] = 0x7f; e[1] = 0xff;
++    pw_dualsense_trigger(e, &t);
++    assert(t.mode == PW_DS_TRIGGER_OFF);
++}
++
++int main(void)
++{
++    test_descriptor();
++    test_input();
++    test_output();
++    test_features();
++    test_triggers();
++    printf("dualsense passed: the descriptor's report sizes, input report 1 (sticks, triggers, every button, the hat, "
++           "motion, the touchpad, disconnected), output report 2 (motors, triggers, light bar), feature reports, "
++           "trigger effects as libScePad's\n");
++    return 0;
++}
+diff --git a/tests/test_pw_pad_ps5.c b/tests/test_pw_pad_ps5.c
+index 4ab3ada..e4ed5d8 100644
+--- a/tests/test_pw_pad_ps5.c
++++ b/tests/test_pw_pad_ps5.c
+@@ -18,8 +18,10 @@ static int pad_close(int32_t h){assert(h==7);close_calls++;return 0;}
+ static int vibration_calls,vibration_rc;static uint8_t motors_seen[2];
+ static int pad_set_vibration(int32_t h,const uint8_t m[2])
+ {assert(h==7);vibration_calls++;memcpy(motors_seen,m,2);return vibration_rc;}
++static int motion_calls,motion_rc,motion_seen=-1;
++static int pad_set_motion(int32_t h,int32_t on){assert(h==7);motion_calls++;motion_seen=on;return motion_rc;}
+ static const PwPadPs5Ops ops={user_initialize,foreground,terminate,pad_init,pad_open,pad_read,pad_close,
+-                              pad_set_vibration};
++                              pad_set_vibration,pad_set_motion};
+ enum { CREATE=0x1,L1=0x400 };
+ static const PwPadKeyMap map[]={{L1,'Z',0,0,"left-flipper"}};
+ 
+@@ -64,6 +66,33 @@ int main(void)
+                       pad.core.released_edges==CREATE && !pad.core.previous_buttons &&
+                       pad.right_stick.x==0x80);
+     read_rc=0;
++    /* The newest connected sample's touchpad, motion and time; none of
++     * them while disconnected. */
++    memset(fixture,0,sizeof(fixture));
++    for(int i=0;i<2;i++) {
++        fixture[i].connected=1;fixture[i].connected_count=1;fixture[i].timestamp=1000u+(uint64_t)i;
++        fixture[i].left_stick=fixture[i].right_stick=(PwPadPs5Stick){0x80,0x80};
++        fixture[i].touch_data.fingers=(uint8_t)(i+1);
++        fixture[i].touch_data.touch[0]=(PwPadPs5Touch){(uint16_t)(100+i),200,5,{0}};
++        fixture[i].touch_data.touch[1]=(PwPadPs5Touch){1900,1000,6,{0}};
++        fixture[i].angular_velocity[1]=0.5f*(float)(i+1);fixture[i].acceleration[1]=1.0f;
++    }
++    fixture_count=2;assert(pw_pad_ps5_read(&pad)==PW_OK);
++    assert(pad.touch.fingers==2 && pad.touch.touch[0].x==101 && pad.touch.touch[1].finger==6 && pad.timestamp==1001);
++    assert(pad.angular_velocity[1]==1.0f && pad.acceleration[1]==1.0f);
++    fixture[0].touch_data.fingers=7;fixture_count=1;
++    assert(pw_pad_ps5_read(&pad)==PW_OK && pad.touch.fingers==2 && pad.timestamp==1000);  /* at most two */
++    fixture[0].connected=0;
++    assert(pw_pad_ps5_read(&pad)==PW_OK && !pad.touch.fingers && !pad.angular_velocity[1] && !pad.acceleration[1]);
++    fixture_count=0;
++    /* The motion sensors: on and off as asked, a failure kept. */
++    assert(pw_pad_ps5_motion(&pad,5)==PW_OK && motion_calls==1 && motion_seen==1 && !pad.motion_rc);
++    motion_rc=-3;assert(pw_pad_ps5_motion(&pad,0)==PW_ERR_STATE && motion_seen==0 && pad.motion_rc==-3);
++    motion_rc=0;
++    pad.ops.pad_set_motion=NULL;
++    assert(pw_pad_ps5_motion(&pad,1)==PW_ERR_UNSUPPORTED && motion_calls==2);
++    pad.ops.pad_set_motion=pad_set_motion;
++    assert(pw_pad_ps5_motion(NULL,1)==PW_ERR_PRECONDITION);
+     /* Vibration: both motors in order, a failure kept, nothing without the op. */
+     assert(pw_pad_ps5_vibrate(&pad,200,10)==PW_OK && vibration_calls==1 &&
+            motors_seen[0]==200 && motors_seen[1]==10 && !pad.vibration_rc);
+diff --git a/tests/test_pw_wine_display.c b/tests/test_pw_wine_display.c
+index df6d74e..f195db0 100644
+--- a/tests/test_pw_wine_display.c
++++ b/tests/test_pw_wine_display.c
+@@ -227,6 +227,47 @@ static void test_pad(void)
+ 
+ /* The sticks' directions as buttons, with a release threshold below the
+  * press one, the pointer's stick left out, and nothing while disconnected. */
++/* dualsense mode: the pad in full. */
++static void test_dualsense_state(void)
++{
++    PwPadPs5 pad;
++    PwDualSenseState state;
++    uint8_t report[PW_DUALSENSE_INPUT_SIZE];
++
++    memset(&pad, 0, sizeof(pad));
++    pad.left_stick = pad.right_stick = (PwPadPs5Stick){ 0x80, 0x80 };
++    memset(&state, 0x5a, sizeof(state));
++    assert(pw_wine_dualsense_state(&pad, &state) == 0 && !state.connected && !state.buttons && !state.touches);
++    assert(state.lx == 0x80 && state.ry == 0x80 && !state.l2 && !state.gyro[0] && !state.timestamp_us);
++    assert(pw_wine_dualsense_state(NULL, &state) == 0 && pw_wine_dualsense_state(&pad, NULL) == 0);
++
++    pad.core.connected = 1;
++    pad.core.previous_buttons = 0x4000u | 0x100000u | 0x100u;   /* cross, the touchpad, L2 */
++    pad.left_stick = (PwPadPs5Stick){ 0x00, 0xff };
++    pad.right_stick = (PwPadPs5Stick){ 0x40, 0x41 };
++    pad.l2 = 128;
++    pad.r2 = 3;
++    pad.touch.fingers = 2;
++    pad.touch.touch[0] = (PwPadPs5Touch){ 960, 540, 7, { 0 } };
++    pad.touch.touch[1] = (PwPadPs5Touch){ 10, 20, 8, { 0 } };
++    pad.angular_velocity[2] = -0.25f;
++    pad.acceleration[1] = 1.0f;
++    pad.timestamp = 123456;
++    assert(pw_wine_dualsense_state(&pad, &state) == 1 && state.connected == 1 && !state.packet);
++    assert(state.buttons == (0x4000u | 0x100000u | 0x100u) && state.lx == 0 && state.ly == 0xff);
++    assert(state.rx == 0x40 && state.ry == 0x41 && state.l2 == 128 && state.r2 == 3);
++    assert(state.touches == 2 && state.touch_x[0] == 960 && state.touch_y[0] == 540 && state.touch_id[0] == 7);
++    assert(state.touch_x[1] == 10 && state.touch_id[1] == 8);
++    assert(state.gyro[2] == -0.25f && state.accel[1] == 1.0f && state.timestamp_us == 123456);
++    /* As the DualSense's report: cross, the touchpad, both fingers. */
++    pw_dualsense_input(&state, 0, report);
++    assert((report[8] & 0x20) && (report[10] & 0x02) && (report[9] & 0x04));
++    assert(report[33] == 7 && report[37] == 8 && report[5] == 128);
++    /* One finger: the second is not there. */
++    pad.touch.fingers = 1;
++    assert(pw_wine_dualsense_state(&pad, &state) == 1 && state.touches == 1 && !state.touch_x[1] && !state.touch_id[1]);
++}
++
+ static void test_stick_buttons(void)
+ {
+     PwPadPs5 pad;
+@@ -365,6 +406,7 @@ int main(void)
+     test_pointer();
+     test_pointer_fraction();
+     test_pad();
++    test_dualsense_state();
+     test_stick_buttons();
+     test_script_pad();
+     printf("wine display passed: frame box copy, newest frame, refusals, concurrent put/take, "
+diff --git a/tests/test_pw_wine_sink.c b/tests/test_pw_wine_sink.c
+index 33ec489..27df79f 100644
+--- a/tests/test_pw_wine_sink.c
++++ b/tests/test_pw_wine_sink.c
+@@ -175,6 +175,88 @@ static void *poster(void *arg)
+     return NULL;
+ }
+ 
++/* A frame the sink is slow with: held until released, two seconds at most. */
++static int present_held,present_release;
++static int holding_sink(void *context,const void *bgra,uint32_t w,uint32_t h,uint32_t stride)
++{
++    (void)context;(void)bgra;(void)w;(void)h;(void)stride;
++    __atomic_store_n(&present_held,1,__ATOMIC_RELEASE);
++    for(int waited=0;waited<2000 && !__atomic_load_n(&present_release,__ATOMIC_ACQUIRE);waited++)usleep(1000);
++    return 0;
++}
++static void *presenter(void *arg)
++{
++    uint32_t frame[4*3]={0};
++    (void)arg;
++    (void)pw_wine_present(frame,4,3,16);
++    return NULL;
++}
++static uint64_t now_ns(void)
++{
++    struct timespec t;
++    clock_gettime(CLOCK_MONOTONIC,&t);
++    return (uint64_t)t.tv_sec*1000000000u+(uint64_t)t.tv_nsec;
++}
++
++/* The DualSense: numbered like the pad, but time alone is not a change;
++ * a game's output reports are kept until the title reads them. */
++static void test_dualsense(void)
++{
++    PwDualSenseState state,got;
++    PwDualSenseOutput out;
++    memset(&got,0x5a,sizeof(got));
++    assert(!pw_wine_dualsense(&got) && !got.connected && !got.packet && !got.buttons && !got.touches);
++    assert(!pw_wine_dualsense(NULL));
++    memset(&state,0,sizeof(state));
++    state.lx=state.ly=state.rx=state.ry=0x80;state.buttons=PW_DS_PAD_CROSS;state.packet=99;
++    state.touches=1;state.touch_x[0]=100;state.touch_y[0]=200;state.gyro[1]=0.25f;state.timestamp_us=10;
++    pw_wine_set_dualsense(&state);
++    assert(pw_wine_dualsense(&got) && got.connected==1 && got.packet==1 && got.buttons==PW_DS_PAD_CROSS);
++    assert(got.touches==1 && got.touch_x[0]==100 && got.touch_y[0]==200 && got.gyro[1]==0.25f && got.timestamp_us==10);
++    state.timestamp_us=20;pw_wine_set_dualsense(&state);
++    assert(pw_wine_dualsense(&got) && got.packet==1 && got.timestamp_us==20);
++    PwDualSenseState changes[8];
++    for(int i=0;i<8;i++)changes[i]=state;
++    changes[0].buttons=PW_DS_PAD_TOUCHPAD;changes[1].lx=0;changes[2].r2=9;changes[3].touches=2;
++    changes[4].touch_x[1]=5;changes[5].touch_id[0]=3;changes[6].gyro[0]=1.0f;changes[7].accel[2]=1.0f;
++    for(uint32_t i=0;i<8;i++) {
++        pw_wine_set_dualsense(&changes[i]);
++        assert(pw_wine_dualsense(&got) && got.packet==2+i);
++    }
++    /* Disconnected: neutral, the packet kept; reconnecting is a new one. */
++    pw_wine_set_dualsense(NULL);
++    assert(!pw_wine_dualsense(&got) && !got.connected && got.packet==9 && !got.buttons && !got.touches);
++    pw_wine_set_dualsense(&changes[7]);
++    assert(pw_wine_dualsense(&got) && got.packet==10 && got.accel[2]==1.0f);
++    /* Output: nothing yet; a report that asks nothing changes nothing. */
++    assert(!pw_wine_dualsense_output(&out) && !out.set);
++    uint8_t report[PW_DUALSENSE_OUTPUT_SIZE]={2};
++    assert(!pw_wine_dualsense_report(report,sizeof(report)) && !pw_wine_dualsense_output(NULL));
++    assert(!pw_wine_dualsense_report(NULL,48));
++    report[1]=0x03;report[3]=10;report[4]=20;
++    assert(pw_wine_dualsense_report(report,sizeof(report))==1);
++    assert(pw_wine_dualsense_output(&out)==1 && out.motor_small==10 && out.motor_large==20);
++    assert(!pw_wine_dualsense_output(&out) && out.motor_large==20);   /* read once, kept */
++    report[1]=0;report[2]=0x04;report[45]=1;report[46]=2;report[47]=3;
++    assert(pw_wine_dualsense_report(report,sizeof(report))==1 && pw_wine_dualsense_output(&out)==1);
++    assert(out.light[0]==1 && out.light[2]==3 && out.motor_large==20 && (out.set&PW_DUALSENSE_LIGHT));
++    /* Wine's DualSense thread does not wait for a frame the title is slow with. */
++    int tag;
++    pthread_t thread;
++    pw_wine_set_present_sink(holding_sink,NULL);
++    assert(!pthread_create(&thread,NULL,presenter,NULL));
++    while(!__atomic_load_n(&present_held,__ATOMIC_ACQUIRE))usleep(100);
++    uint64_t started=now_ns();
++    assert(pw_wine_dualsense(&got) && got.packet==10);
++    report[2]=0;report[1]=0x03;report[3]=1;
++    assert(pw_wine_dualsense_report(report,sizeof(report))==1 && pw_wine_dualsense_output(&out)==1);
++    pw_wine_set_dualsense(&changes[0]);
++    assert(now_ns()-started<500000000u);
++    __atomic_store_n(&present_release,1,__ATOMIC_RELEASE);
++    assert(!pthread_join(thread,NULL));
++    pw_wine_set_present_sink(sink,&tag);
++}
++
+ int main(void)
+ {
+     uint32_t frame[4*3];
+@@ -266,6 +348,7 @@ int main(void)
+     pw_wine_set_rumble(1000,0xffff);assert(!pw_wine_rumble(NULL,NULL));  /* unchanged */
+     pw_wine_set_rumble(0x10000,0);assert(pw_wine_rumble(NULL,&right)==1 && right==0);
+     assert(!pw_wine_rumble(&left,NULL) && left==0xffff);
++    test_dualsense();
+     test_display_release();
+     return 0;
+ }
+diff --git a/tools/build_host_wine.sh b/tools/build_host_wine.sh
+index 7e95611..f1075f9 100755
+--- a/tools/build_host_wine.sh
++++ b/tools/build_host_wine.sh
+@@ -65,6 +65,8 @@ cp "$root/wine/ps5/time/pw_qpc_clock.h" "$tree/dlls/ntdll/pw_qpc_clock.h" ||
+     fail "cannot stage shared-clock ABI"
+ cp "$root/wine/ps5/input/pw_key_shared.h" "$tree/dlls/win32u/pw_key_shared.h" ||
+     fail "cannot stage shared-input ABI"
++cp "$root/wine/ps5/input/pw_dualsense.h" "$tree/dlls/xinput1_3/pw_dualsense.h" ||
++    fail "cannot stage the DualSense's reports"
+ 
+ configure_args="--prefix=/usr --enable-archs=i386,x86_64 --disable-tests"
+ stamp=$({ printf '%s\n' "$commit" "$configure_args"
+diff --git a/tools/build_wine_ps5.sh b/tools/build_wine_ps5.sh
+index d4efd88..9a9569d 100755
+--- a/tools/build_wine_ps5.sh
++++ b/tools/build_wine_ps5.sh
+@@ -88,8 +88,10 @@ FREETYPE_EXPORTS="FT_Activate_Size FT_Done_Face FT_Done_FreeType FT_Done_Glyph F
+ TARGETS="dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver dlls/winevulkan/winevulkan.so
+  dlls/opengl32/opengl32.so dlls/ws2_32/ws2_32.so dlls/crypt32/crypt32.so dlls/dwrite/dwrite.so"
+ # The PE modules the patches change: every xinput built from xinput1_3's
+-# source reads the title's controller (patch 0470); xinput9_1_0 forwards to
+-# xinput1_4. quartz: its renderers wait for a state change without the filter
++# source reads the title's controller (patch 0470), and xinput1_3 makes it a
++# DualSense in dualsense mode (0475), which ntdll loads it for (0476) and whose
++# raw input from a 32-bit game wow64win converts (0474, x86_64 only, as is
++# wow64); xinput9_1_0 forwards to xinput1_4. quartz: its renderers wait for a state change without the filter
+ # lock (patch 0700). winevulkan: emit its PE thunks alongside the Unix side so command-stream
+ # hooks and dispatch table capability checks come from the same source.
+ PE_MODULES="ntdll win32u xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan"
+@@ -253,6 +255,9 @@ cp "$root/wine/ps5/time/pw_qpc_clock.h" "$tree/dlls/ntdll/pw_qpc_clock.h" ||
+     fail "cannot stage shared-clock ABI"
+ cp "$root/wine/ps5/input/pw_key_shared.h" "$tree/dlls/win32u/pw_key_shared.h" ||
+     fail "cannot stage shared-input ABI"
++# The DualSense's reports, which xinput's Unix library makes (patch 0475).
++cp "$root/wine/ps5/input/pw_dualsense.h" "$tree/dlls/xinput1_3/pw_dualsense.h" ||
++    fail "cannot stage the DualSense's reports"
+ 
+ cflags=${CFLAGS:--g -O2}
+ 
+@@ -262,7 +267,8 @@ stamp=$(
+         "$cflags" "$gnutls_args" "${GNUTLS_LIBS:-}"
+       for patch in $ordered; do cat "$patches/$patch"; done
+       cat "$root/tools/stage_vk_batch.py" "$root/tools/generate_vk_codecs.py" "$root"/wine/ps5/pw_vk_*.[ch] \
+-          "$root"/wine/ps5/vulkan/*.[ch] "$root/wine/ps5/time/pw_qpc_clock.h" "$root/wine/ps5/input/pw_key_shared.h"; } | sha256sum | cut -c1-64)
++          "$root"/wine/ps5/vulkan/*.[ch] "$root/wine/ps5/time/pw_qpc_clock.h" "$root/wine/ps5/input/pw_key_shared.h" \
++          "$root/wine/ps5/input/pw_dualsense.h"; } | sha256sum | cut -c1-64)
+ build=$work/build
+ if [ ! -f "$build/Makefile" ] || [ "$(cat "$build/.prospero-stamp" 2>/dev/null)" != "$stamp" ]; then
+     rm -rf "$build"
+@@ -321,7 +327,7 @@ rm -rf "$work/pe"
+ for arch in i386 x86_64; do
+     mkdir -p "$work/pe/$arch-windows"
+     modules="$PE_MODULES"
+-    [ "$arch" != x86_64 ] || modules="$modules wow64"
++    [ "$arch" != x86_64 ] || modules="$modules wow64 wow64win"
+     for module in $modules; do
+         target=dlls/$module/$arch-windows/$module.dll
+         make -C "$build" -k -j"$jobs" "$target" >> "$work/make.log" 2>&1 || status=$?
+@@ -406,6 +412,7 @@ if [ "$prx_status" = 0 ]; then
+         pw_wine_set_present_sink pw_wine_post_input pw_wine_sink_stats \
+         pw_wine_present pw_wine_next_input pw_wine_input_fd \
+         pw_wine_set_pad pw_wine_rumble pw_wine_pad pw_wine_set_rumble \
++        pw_wine_set_dualsense pw_wine_dualsense_output pw_wine_dualsense pw_wine_dualsense_report \
+         pw_wine_set_audio_sink pw_wine_audio_available pw_wine_audio_output \
+         __wine_virtual_stats __wine_virtual_fault_top __wine_ps5_set_output_sink __wine_ps5_memory_stats pw_cwd_set \
+         __wine_ps5_set_segv_hook __wine_ps5_set_segv_unresolved_hook pw_wine_set_display_release pw_wine_release_display \
+@@ -494,8 +501,9 @@ if [ "$prx_status" = 0 ]; then
+         audio="$audio $object"
+     done
+     link_prx wineps5 - "$audio $prx/obj/wineps5_desc.o" "$prx/ntdll.shared.elf"
+-    # xinput's Unix library (patch 0470), which every xinput loads by name:
+-    # it reads the title's controller through ntdll's dlsym.
++    # xinput's Unix library (patches 0470 and 0475), which every xinput loads
++    # by name: it reads the title's controller through ntdll's dlsym, and
++    # makes and reads the DualSense's reports (pw_dualsense.h, staged above).
+     "$sdk/bin/prospero-clang" -std=gnu11 -O2 -Wall -Werror -fPIC -D__WINESRC__ -DWINE_UNIX_LIB \
+         -D_REENTRANT -I"$tree/dlls/xinput1_3" -I"$build/include" -I"$tree/include" \
+         -c "$tree/dlls/xinput1_3/unixlib.c" -o "$prx/obj/xinput_unixlib.o" ||
+diff --git a/wine/patches/0474-wow64win-convert-the-input-of-a-hardware-message.patch b/wine/patches/0474-wow64win-convert-the-input-of-a-hardware-message.patch
+new file mode 100644
+index 0000000..378c515
+--- /dev/null
++++ b/wine/patches/0474-wow64win-convert-the-input-of-a-hardware-message.patch
+@@ -0,0 +1,62 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: prospero-win <prospero-win@invalid>
++Date: Fri, 23 Oct 2026 20:40:00 +0200
++Subject: [PATCH] wow64win: Convert the input of a hardware message.
++
++NtUserSendHardwareInput passes an INPUT, whose union is 8-byte aligned
++in 64-bit code and 4-byte aligned in 32-bit code, but the thunk handed
++the 32-bit structure on as it was: the message read as 0 and the server
++queued a message the receiving thread could not process ("unknown
++message type 0"). The input is converted as NtUserSendInput's are.
++
++In a PS5 title the DualSense of dualsense mode (patch 0475) runs in the
++game's process, which for a 32-bit game is a WoW64 one; its raw input
++reaches the game only with this.
++---
++ dlls/wow64win/user.c |   28 +++++++++++++++++++++++++++-
++ 1 file changed, 27 insertions(+), 1 deletion(-)
++
++diff --git a/dlls/wow64win/user.c b/dlls/wow64win/user.c
++index 92c1877..bb82d52 100644
++--- a/dlls/wow64win/user.c
+++++ b/dlls/wow64win/user.c
++@@ -1745,10 +1745,36 @@ NTSTATUS WINAPI wow64_NtUserCallHwndParam( UINT *args )
++                 ULONG input;
++                 ULONG lparam;
++             } *params32 = UlongToPtr( param );
+++            const INPUT32 *input32 = UlongToPtr( params32->input );
++             struct send_hardware_input_params params;
+++            INPUT input;
++ 
+++            /* INPUT's union is 8-byte aligned in 64-bit code: lay it out anew */
+++            memset( &input, 0, sizeof(input) );
+++            input.type = input32->type;
+++            switch (input.type)
+++            {
+++            case INPUT_MOUSE:
+++                input.mi.dx          = input32->mi.dx;
+++                input.mi.dy          = input32->mi.dy;
+++                input.mi.mouseData   = input32->mi.mouseData;
+++                input.mi.dwFlags     = input32->mi.dwFlags;
+++                input.mi.time        = input32->mi.time;
+++                input.mi.dwExtraInfo = input32->mi.dwExtraInfo;
+++                break;
+++            case INPUT_KEYBOARD:
+++                input.ki.wVk         = input32->ki.wVk;
+++                input.ki.wScan       = input32->ki.wScan;
+++                input.ki.dwFlags     = input32->ki.dwFlags;
+++                input.ki.time        = input32->ki.time;
+++                input.ki.dwExtraInfo = input32->ki.dwExtraInfo;
+++                break;
+++            case INPUT_HARDWARE:
+++                input.hi = input32->hi;
+++                break;
+++            }
++             params.flags = params32->flags;
++-            params.input = UlongToPtr( params32->input );
+++            params.input = &input;
++             params.lparam = params32->lparam;
++             return NtUserCallHwndParam( hwnd, (UINT_PTR)&params, code );
++         }
++-- 
++2.43.0
+diff --git a/wine/patches/0475-xinput-ps5-the-title-controller-as-a-dualsense.patch b/wine/patches/0475-xinput-ps5-the-title-controller-as-a-dualsense.patch
+new file mode 100644
+index 0000000..0e31769
+--- /dev/null
++++ b/wine/patches/0475-xinput-ps5-the-title-controller-as-a-dualsense.patch
+@@ -0,0 +1,1162 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: prospero-win <prospero-win@invalid>
++Date: Fri, 23 Oct 2026 20:40:00 +0200
++Subject: [PATCH] xinput: Make the PS5 title's controller a DualSense.
++
++dualsense mode (PW_DUALSENSE=1, which a PS5 title sets for a game whose
++controller is set to DualSense): the game finds the title's controller
++as the DualSense a PC finds plugged in by USB (054c:0ce6), through
++SetupAPI or cfgmgr32 and HID, DirectInput or raw input. Games and
++libraries that know the DualSense (SDL's HIDAPI driver, Sony's PC ports)
++then read its touchpad and motion sensors and drive its rumble, light
++bar and adaptive triggers.
++
++A PS5 title cannot start winedevice, so no HID class driver is there to
++make the device. xinput1_3 (ntdll loads it at the start in this mode,
++patch 0476) makes it on a thread of the game's process, as ntoskrnl and
++hidclass.sys would in a driver process:
++- a device manager and a device in the server, and the symbolic link of
++  its interface;
++- the device instance (HID\VID_054C&PID_0CE6&MI_03\...) and its HID
++  interface, enabled, in volatile registry keys, which go with the
++  server, and are deleted when the process ends;
++- the device's I/O, answered through get_next_device_request and
++  set_irp_result: each open file has a queue of input reports, which
++  the thread fills 250 times a second as a DualSense sends them, and
++  reads wait for the next one; the HID ioctls hidclass.sys answers
++  (attributes, strings, preparsed data, the queue's size, feature and
++  input reports, output reports) and IOCTL_HID_GET_WINE_RAWINPUT_HANDLE;
++  cancelled reads end; each report is also sent on as raw input. A
++  request the server refuses is retried, as ntoskrnl's loop does; if
++  it keeps refusing, the device is removed, so nothing waits on it.
++The preparsed data comes from hidparse.sys's own code, built into
++xinput1_3 with its pool allocations on the heap (dualsense_hid.c).
++
++The reports themselves are the Unix library's: it builds input report 1
++from the title's state (pw_wine_dualsense in ntdll.prx's sink), passes
++the output reports a game sends to the title (pw_wine_dualsense_report),
++and answers the feature reports, all from pw_dualsense.h, which the build
++stages beside unixlib.c. Without a title, or without PW_DUALSENSE=1,
++nothing changes. The parameters hold no pointers, so the WoW64 calls are
++the same. XInput sees no Xbox controller in this mode, as on a PC with a
++DualSense.
++---
++ dlls/xinput1_3/Makefile.in     |    5 
++ dlls/xinput1_3/main.c          |   13 +
++ dlls/xinput1_3/unixlib.c       |   63 +++
++ dlls/xinput1_3/unixlib.h       |   37 ++
++ dlls/xinput1_3/dualsense.c     |  819 ++++++++++++++++++++++++++++++++++++++++
++ dlls/xinput1_3/dualsense.h     |   31 ++
++ dlls/xinput1_3/dualsense_hid.c |   42 ++
++ 7 files changed, 1009 insertions(+), 1 deletion(-)
++
++diff --git a/dlls/xinput1_3/Makefile.in b/dlls/xinput1_3/Makefile.in
++index 1a54949..17bec9c 100644
++--- a/dlls/xinput1_3/Makefile.in
+++++ b/dlls/xinput1_3/Makefile.in
++@@ -1,11 +1,14 @@
++ MODULE    = xinput1_3.dll
++ UNIXLIB   = xinput1_3.so
++ IMPORTLIB = xinput
++-IMPORTS   = hid setupapi advapi32 user32
+++IMPORTS   = hid setupapi advapi32 user32 win32u
+++EXTRADEFS = -DPW_DUALSENSE_HOST
++ 
++ VER_FILEDESCRIPTION_STR = "Wine Common Controller API"
++ VER_PRODUCTVERSION      = 9,15,779,0000
++ 
++ SOURCES = \
+++	dualsense.c \
+++	dualsense_hid.c \
++ 	main.c \
++ 	unixlib.c
++diff --git a/dlls/xinput1_3/main.c b/dlls/xinput1_3/main.c
++index 83cee15..6e8e5b9 100644
++--- a/dlls/xinput1_3/main.c
+++++ b/dlls/xinput1_3/main.c
++@@ -45,6 +45,9 @@
++ #include "wine/debug.h"
++ 
++ #include "unixlib.h"
+++#ifdef PW_DUALSENSE_HOST
+++#include "dualsense.h"
+++#endif
++ 
++ DEFINE_GUID(GUID_DEVINTERFACE_WINEXINPUT,0x6c53d5fd,0x6480,0x440f,0xb6,0x18,0x47,0x67,0x50,0xc5,0xe1,0xa6);
++ 
++@@ -875,7 +878,17 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
++     case DLL_PROCESS_ATTACH:
++         xinput_instance = inst;
++         DisableThreadLibraryCalls(inst);
+++#ifdef PW_DUALSENSE_HOST
+++        /* dualsense mode in a PS5 title: the controller is a DualSense,
+++         * which this xinput makes for the game (dualsense.c) */
+++        dualsense_start();
+++#endif
++         break;
+++#ifdef PW_DUALSENSE_HOST
+++    case DLL_PROCESS_DETACH:
+++        dualsense_stop();
+++        break;
+++#endif
++     }
++     return TRUE;
++ }
++diff --git a/dlls/xinput1_3/unixlib.c b/dlls/xinput1_3/unixlib.c
++index 54488c8..5afe7d5 100644
++--- a/dlls/xinput1_3/unixlib.c
+++++ b/dlls/xinput1_3/unixlib.c
++@@ -32,6 +32,7 @@
++ #include "winternl.h"
++ 
++ #include "unixlib.h"
+++#include "pw_dualsense.h"
++ 
++ /* A PS5 title runs Wine in its own process, with no winedevice to carry a
++  * HID stack. The title keeps its controller's state in its sink
++@@ -65,11 +66,68 @@ static NTSTATUS pad_rumble( void *args )
++     return STATUS_SUCCESS;
++ }
++ 
+++/* dualsense mode: the title's whole controller, touchpad and motion too
+++ * (pw_wine_dualsense), and the output reports a game sends it, which the
+++ * title reads back (pw_wine_dualsense_report). */
+++static int (*title_dualsense)( PwDualSenseState *state );
+++static int (*title_dualsense_report)( const uint8_t *report, uint32_t size );
+++
+++static NTSTATUS dualsense_init( void *args )
+++{
+++    title_dualsense = dlsym( RTLD_DEFAULT, "pw_wine_dualsense" );
+++    title_dualsense_report = dlsym( RTLD_DEFAULT, "pw_wine_dualsense_report" );
+++    return title_dualsense && title_dualsense_report ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
+++}
+++
+++static NTSTATUS dualsense_descriptor( void *args )
+++{
+++    struct xinput_dualsense_descriptor *params = args;
+++
+++    C_ASSERT( sizeof(pw_dualsense_descriptor) <= sizeof(params->data) );
+++    params->size = sizeof(pw_dualsense_descriptor);
+++    memcpy( params->data, pw_dualsense_descriptor, sizeof(pw_dualsense_descriptor) );
+++    return STATUS_SUCCESS;
+++}
+++
+++static NTSTATUS dualsense_feature( void *args )
+++{
+++    struct xinput_dualsense_feature *params = args;
+++
+++    params->size = pw_dualsense_feature( params->id, params->data, sizeof(params->data) );
+++    return STATUS_SUCCESS;
+++}
+++
+++static NTSTATUS dualsense_input( void *args )
+++{
+++    struct xinput_dualsense_input *params = args;
+++    PwDualSenseState state;
+++
+++    if (!title_dualsense) return STATUS_NOT_SUPPORTED;
+++    params->connected = title_dualsense( &state ) != 0;
+++    params->packet = state.packet;
+++    pw_dualsense_input( &state, params->counter, params->data );
+++    return STATUS_SUCCESS;
+++}
+++
+++static NTSTATUS dualsense_output( void *args )
+++{
+++    struct xinput_dualsense_output *params = args;
+++
+++    if (!title_dualsense_report) return STATUS_NOT_SUPPORTED;
+++    params->asked = title_dualsense_report( params->data, min( params->size, sizeof(params->data) ) ) == 1;
+++    return STATUS_SUCCESS;
+++}
+++
++ const unixlib_entry_t __wine_unix_call_funcs[] =
++ {
++     pad_init,
++     pad_state,
++     pad_rumble,
+++    dualsense_init,
+++    dualsense_descriptor,
+++    dualsense_feature,
+++    dualsense_input,
+++    dualsense_output,
++ };
++ 
++ C_ASSERT( ARRAYSIZE(__wine_unix_call_funcs) == unix_funcs_count );
++@@ -81,6 +139,11 @@ const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
++     pad_init,
++     pad_state,
++     pad_rumble,
+++    dualsense_init,
+++    dualsense_descriptor,
+++    dualsense_feature,
+++    dualsense_input,
+++    dualsense_output,
++ };
++ 
++ C_ASSERT( ARRAYSIZE(__wine_unix_call_wow64_funcs) == unix_funcs_count );
++diff --git a/dlls/xinput1_3/unixlib.h b/dlls/xinput1_3/unixlib.h
++index b47d9cb..13b80a6 100644
++--- a/dlls/xinput1_3/unixlib.h
+++++ b/dlls/xinput1_3/unixlib.h
++@@ -44,11 +44,48 @@ struct xinput_rumble_params
++     UINT32 right;
++ };
++ 
+++/* dualsense mode (PW_DUALSENSE=1): the title's controller as the DualSense
+++ * a game finds as on a PC (dualsense.c). The Unix library makes and reads
+++ * the DualSense's reports (pw_dualsense.h, staged beside this file); like
+++ * the pad's, the parameters hold no pointers. */
+++struct xinput_dualsense_descriptor
+++{
+++    UINT32 size;
+++    BYTE data[1024];
+++};
+++
+++struct xinput_dualsense_feature
+++{
+++    UINT32 id;                    /* in: the report's id */
+++    UINT32 size;                  /* out: its length with the id, 0 for none */
+++    BYTE data[64];
+++};
+++
+++struct xinput_dualsense_input
+++{
+++    UINT32 counter;               /* in: the report's counter */
+++    UINT32 connected;             /* out */
+++    UINT32 packet;                /* out: changes whenever the controller's state does */
+++    BYTE data[64];                /* out: input report 1 */
+++};
+++
+++struct xinput_dualsense_output
+++{
+++    UINT32 size;
+++    UINT32 asked;                 /* out: 1 when the report asked the controller anything */
+++    BYTE data[64];                /* in: output report 2 */
+++};
+++
++ enum xinput_unix_funcs
++ {
++     unix_pad_init,
++     unix_pad_state,
++     unix_pad_rumble,
+++    unix_dualsense_init,
+++    unix_dualsense_descriptor,
+++    unix_dualsense_feature,
+++    unix_dualsense_input,
+++    unix_dualsense_output,
++     unix_funcs_count,
++ };
++ 
++diff --git a/dlls/xinput1_3/dualsense.c b/dlls/xinput1_3/dualsense.c
++new file mode 100644
++index 0000000..1c966a3
++--- /dev/null
+++++ b/dlls/xinput1_3/dualsense.c
++@@ -0,0 +1,819 @@
+++/*
+++ * The PS5 title's controller as a DualSense
+++ *
+++ * Copyright 2026 prospero-win
+++ *
+++ * This library is free software; you can redistribute it and/or
+++ * modify it under the terms of the GNU Lesser General Public
+++ * License as published by the Free Software Foundation; either
+++ * version 2.1 of the License, or (at your option) any later version.
+++ *
+++ * This library is distributed in the hope that it will be useful,
+++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+++ * Lesser General Public License for more details.
+++ *
+++ * You should have received a copy of the GNU Lesser General Public
+++ * License along with this library; if not, write to the Free Software
+++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+++ */
+++
+++/* dualsense mode (PW_DUALSENSE=1, which a PS5 title sets): the game finds
+++ * the title's controller as the DualSense a PC finds plugged in by USB,
+++ * through SetupAPI and HID, DirectInput or raw input.
+++ *
+++ * A PS5 title runs Wine in its own process and cannot start winedevice, so
+++ * there is no HID class driver to make the device. xinput1_3, which ntdll
+++ * loads at the start in this mode, makes it on a thread of the game's
+++ * process instead: a device manager and a device in the server, a symbolic
+++ * link, the device instance and interface where plug and play leaves them in
+++ * the registry (volatile keys, which go with the server), and the device's
+++ * I/O answered as hidclass.sys answers it for a HID collection: reads from
+++ * each open file's queue of input reports, which the thread fills 250 times
+++ * a second as a DualSense sends them, the HID ioctls, output and feature
+++ * reports, and the input sent on as raw input. The reports are the Unix
+++ * library's (pw_dualsense.h), the preparsed data hidparse.sys's
+++ * (dualsense_hid.c). */
+++
+++#include <stdarg.h>
+++#include <stdlib.h>
+++#include <string.h>
+++
+++#include "ntstatus.h"
+++#define WIN32_NO_STATUS
+++#include "windef.h"
+++#include "winbase.h"
+++#include "winternl.h"
+++#include "winioctl.h"
+++#include "winreg.h"
+++#include "ddk/wdm.h"
+++#include "hidusage.h"
+++#include "ddk/hidclass.h"
+++#include "ddk/hidpi.h"
+++#include "ddk/hidpddi.h"
+++#include "ntuser.h"
+++
+++#include "wine/hid.h"
+++#include "wine/list.h"
+++#include "wine/server.h"
+++#include "wine/debug.h"
+++
+++#include "unixlib.h"
+++#include "dualsense.h"
+++
+++WINE_DEFAULT_DEBUG_CHANNEL(xinput);
+++
+++#define DS_HID_GUID     L"{4d1e55b2-f16f-11cf-88cb-001111000030}"
+++#define DS_HIDCLASS     L"{745a17a0-74d3-11d0-b6fe-00a0c90f57da}"
+++#define DS_HARDWARE     L"VID_054C&PID_0CE6&MI_03"
+++#define DS_SERIAL       L"1&5d5e2a1&0&0000"
+++#define DS_INSTANCE     L"HID\\" DS_HARDWARE L"\\" DS_SERIAL
+++#define DS_LINK         L"HID#" DS_HARDWARE L"#" DS_SERIAL L"#" DS_HID_GUID
+++#define DS_DEVICE       L"\\Device\\PwDualSense"
+++#define DS_ENUM_KEY     L"System\\CurrentControlSet\\Enum\\" DS_INSTANCE
+++#define DS_CLASS_KEY    L"System\\CurrentControlSet\\Control\\DeviceClasses\\" DS_HID_GUID L"\\##?#" DS_LINK
+++
+++enum
+++{
+++    DS_INPUT_SIZE = 64,
+++    DS_OUTPUT_SIZE = 48,
+++    DS_INPUT_ID = 1,
+++    DS_OUTPUT_ID = 2,
+++    DS_QUEUE_DEFAULT = 32,      /* hidclass's, and Windows' */
+++    DS_QUEUE_MIN = 2,
+++    DS_QUEUE_MAX = 512,
+++    DS_TICK_US = 4000,          /* a DualSense on USB sends 250 reports a second */
+++    DS_RAWINPUT_HANDLE = 0x5c0e6, /* any but 1 and 2, which are the mouse's and the keyboard's */
+++    DS_VERSION = 0x0100,
+++};
+++
+++struct ds_read
+++{
+++    struct list entry;
+++    HANDLE irp;                 /* until it is answered */
+++    UINT64 id;                  /* the server's name for it, which a cancel gives: never reused */
+++};
+++
+++struct ds_file
+++{
+++    struct list entry;
+++    struct list reads;          /* ds_read: waiting for a report */
+++    BOOL closed;
+++    ULONG length;               /* the input reports kept, as IOCTL_SET_NUM_DEVICE_INPUT_BUFFERS sets */
+++    ULONG first, count;
+++    BYTE (*reports)[DS_INPUT_SIZE];
+++};
+++
+++/* What the next get_next_device_request answers the current call with. */
+++struct ds_result
+++{
+++    HANDLE handle;              /* the call's, which the server then closes; 0 when it is pending */
+++    client_ptr_t user_ptr;
+++    NTSTATUS status;
+++    int pending;
+++    ULONG_PTR info;
+++    BYTE *data;
+++    ULONG size;
+++};
+++
+++static struct
+++{
+++    unixlib_handle_t unix;
+++    HANDLE manager, link;
+++    HIDP_DEVICE_DESC desc;
+++    const HIDP_COLLECTION_DESC *collection;
+++    HID_COLLECTION_INFORMATION information;
+++    struct list files;
+++    BYTE report[DS_INPUT_SIZE]; /* the newest input report */
+++    BYTE counter;
+++    BYTE *in;
+++    ULONG in_capacity;
+++    UINT64 next_read;
+++    BOOL keys;
+++} ds = { .files = LIST_INIT( ds.files ) };
+++
+++static NTSTATUS ds_call( unsigned int code, void *params )
+++{
+++    return __wine_unix_call( ds.unix, code, params );
+++}
+++
+++/* The registry, as plug and play leaves it for a HID collection: the
+++ * device's instance, and its interface, enabled. */
+++static BOOL set_value( HKEY key, const WCHAR *name, DWORD type, const void *data, DWORD size )
+++{
+++    return !RegSetValueExW( key, name, 0, type, data, size );
+++}
+++
+++static BOOL set_string( HKEY key, const WCHAR *name, const WCHAR *value )
+++{
+++    return set_value( key, name, REG_SZ, value, (wcslen( value ) + 1) * sizeof(WCHAR) );
+++}
+++
+++static HKEY create_key( HKEY root, const WCHAR *path )
+++{
+++    HKEY key;
+++
+++    if (RegCreateKeyExW( root, path, 0, NULL, REG_OPTION_VOLATILE, KEY_ALL_ACCESS, NULL, &key, NULL )) return NULL;
+++    return key;
+++}
+++
+++static BOOL create_keys(void)
+++{
+++    static const WCHAR hardware_ids[] =
+++        L"HID\\VID_054C&PID_0CE6&REV_0100&MI_03\0HID\\" DS_HARDWARE L"\0"
+++        L"HID\\VID_054C&UP:0001_U:0005\0HID_DEVICE_SYSTEM_GAME\0HID_DEVICE_UP:0001_U:0005\0HID_DEVICE\0";
+++    static const WCHAR compatible_ids[] = L"HID_DEVICE_SYSTEM_GAME\0HID_DEVICE_UP:0001_U:0005\0HID_DEVICE\0";
+++    static const WCHAR link[] = L"\\\\?\\" DS_LINK;
+++    const DWORD one = 1;
+++    HKEY key, refstr, control;
+++    BOOL ok;
+++
+++    if (!(key = create_key( HKEY_LOCAL_MACHINE, DS_ENUM_KEY ))) return FALSE;
+++    ok = set_string( key, L"ClassGUID", DS_HIDCLASS ) && set_string( key, L"Class", L"HIDClass" ) &&
+++         set_string( key, L"DeviceDesc", L"HID-compliant game controller" ) &&
+++         set_string( key, L"Mfg", L"(Standard system devices)" ) &&
+++         set_value( key, L"HardwareID", REG_MULTI_SZ, hardware_ids, sizeof(hardware_ids) ) &&
+++         set_value( key, L"CompatibleIDs", REG_MULTI_SZ, compatible_ids, sizeof(compatible_ids) );
+++    RegCloseKey( key );
+++    if (!ok) return FALSE;
+++
+++    if (!(key = create_key( HKEY_LOCAL_MACHINE, DS_CLASS_KEY ))) return FALSE;
+++    ok = set_string( key, L"DeviceInstance", DS_INSTANCE );
+++    if (ok && (ok = (refstr = create_key( key, L"#" )) != NULL))
+++    {
+++        ok = set_string( refstr, L"SymbolicLink", link );
+++        if (ok && (ok = (control = create_key( refstr, L"Control" )) != NULL))
+++        {
+++            ok = set_value( control, L"Linked", REG_DWORD, &one, sizeof(one) );
+++            RegCloseKey( control );
+++        }
+++        RegCloseKey( refstr );
+++    }
+++    RegCloseKey( key );
+++    return ok;
+++}
+++
+++static void delete_keys(void)
+++{
+++    RegDeleteTreeW( HKEY_LOCAL_MACHINE, DS_CLASS_KEY );
+++    RegDeleteTreeW( HKEY_LOCAL_MACHINE, DS_ENUM_KEY );
+++}
+++
+++/* The device in the server, and the link the interface's path opens. */
+++static NTSTATUS create_device(void)
+++{
+++    static const WCHAR device[] = DS_DEVICE;
+++    UNICODE_STRING name = RTL_CONSTANT_STRING( L"\\??\\" DS_LINK ), target = RTL_CONSTANT_STRING( DS_DEVICE );
+++    OBJECT_ATTRIBUTES attr;
+++    NTSTATUS status;
+++
+++    SERVER_START_REQ( create_device_manager )
+++    {
+++        req->access     = SYNCHRONIZE;
+++        req->attributes = 0;
+++        if (!(status = wine_server_call( req ))) ds.manager = wine_server_ptr_handle( reply->handle );
+++    }
+++    SERVER_END_REQ;
+++    if (status) return status;
+++
+++    SERVER_START_REQ( create_device )
+++    {
+++        req->rootdir  = 0;
+++        req->manager  = wine_server_obj_handle( ds.manager );
+++        req->user_ptr = wine_server_client_ptr( &ds );
+++        wine_server_add_data( req, device, sizeof(device) - sizeof(WCHAR) );
+++        status = wine_server_call( req );
+++    }
+++    SERVER_END_REQ;
+++    if (status) return status;
+++
+++    InitializeObjectAttributes( &attr, &name, OBJ_CASE_INSENSITIVE, NULL, NULL );
+++    return NtCreateSymbolicLinkObject( &ds.link, SYMBOLIC_LINK_ALL_ACCESS, &attr, &target );
+++}
+++
+++/* Each open file's queue of input reports: the oldest goes first, and a
+++ * full queue drops it, as hidclass's does. */
+++static BOOL queue_resize( struct ds_file *file, ULONG length )
+++{
+++    BYTE (*reports)[DS_INPUT_SIZE];
+++
+++    if (!(reports = calloc( length, DS_INPUT_SIZE ))) return FALSE;
+++    free( file->reports );
+++    file->reports = reports;
+++    file->length = length;
+++    file->first = file->count = 0;
+++    return TRUE;
+++}
+++
+++static void queue_push( struct ds_file *file, const BYTE *report )
+++{
+++    if (file->count == file->length)
+++    {
+++        file->first = (file->first + 1) % file->length;
+++        file->count--;
+++    }
+++    memcpy( file->reports[(file->first + file->count++) % file->length], report, DS_INPUT_SIZE );
+++}
+++
+++static BOOL queue_pop( struct ds_file *file, BYTE *report )
+++{
+++    if (!file->count) return FALSE;
+++    memcpy( report, file->reports[file->first], DS_INPUT_SIZE );
+++    file->first = (file->first + 1) % file->length;
+++    file->count--;
+++    return TRUE;
+++}
+++
+++static void complete_irp( HANDLE irp, NTSTATUS status, const void *data, ULONG size )
+++{
+++    SERVER_START_REQ( set_irp_result )
+++    {
+++        req->handle = wine_server_obj_handle( irp );
+++        req->status = status;
+++        req->size   = size;
+++        if (size) wine_server_add_data( req, data, size );
+++        wine_server_call( req );
+++    }
+++    SERVER_END_REQ;
+++}
+++
+++static void complete_reads( struct ds_file *file, NTSTATUS status )
+++{
+++    struct ds_read *read, *next;
+++
+++    LIST_FOR_EACH_ENTRY_SAFE( read, next, &file->reads, struct ds_read, entry )
+++    {
+++        complete_irp( read->irp, status, NULL, 0 );
+++        list_remove( &read->entry );
+++        free( read );
+++    }
+++}
+++
+++static struct ds_file *find_file( client_ptr_t ptr )
+++{
+++    struct ds_file *file;
+++
+++    LIST_FOR_EACH_ENTRY( file, &ds.files, struct ds_file, entry )
+++        if (wine_server_client_ptr( file ) == ptr) return file;
+++    return NULL;
+++}
+++
+++/* A report the thread makes: it goes to each open file, to the oldest read
+++ * waiting there or else into the queue, and to raw input. */
+++static void send_report(void)
+++{
+++    struct xinput_dualsense_input params = {.counter = ds.counter++};
+++    UINT buffer[(sizeof(struct hid_packet) + DS_INPUT_SIZE + sizeof(UINT) - 1) / sizeof(UINT)];
+++    struct hid_packet *hid = (struct hid_packet *)buffer;
+++    INPUT input = {.type = INPUT_HARDWARE};
+++    struct ds_file *file;
+++
+++    if (ds_call( unix_dualsense_input, &params )) return;
+++    memcpy( ds.report, params.data, DS_INPUT_SIZE );
+++
+++    LIST_FOR_EACH_ENTRY( file, &ds.files, struct ds_file, entry )
+++    {
+++        struct list *head;
+++
+++        if (file->closed) continue;
+++        if ((head = list_head( &file->reads )))
+++        {
+++            struct ds_read *read = LIST_ENTRY( head, struct ds_read, entry );
+++            complete_irp( read->irp, STATUS_SUCCESS, ds.report, DS_INPUT_SIZE );
+++            list_remove( &read->entry );
+++            free( read );
+++        }
+++        else queue_push( file, ds.report );
+++    }
+++
+++    input.hi.uMsg = WM_INPUT;
+++    input.hi.wParamH = HIWORD(RIM_INPUT);
+++    input.hi.wParamL = LOWORD(RIM_INPUT);
+++    hid->head.device = DS_RAWINPUT_HANDLE;
+++    hid->head.usage = MAKELONG(ds.collection->Usage, ds.collection->UsagePage);
+++    hid->head.count = 1;
+++    hid->head.length = DS_INPUT_SIZE;
+++    memcpy( hid->data, ds.report, DS_INPUT_SIZE );
+++    NtUserSendHardwareInput( 0, 0, &input, (LPARAM)hid );
+++}
+++
+++static NTSTATUS dispatch_create( obj_handle_t handle )
+++{
+++    struct ds_file *file;
+++    NTSTATUS status;
+++
+++    if (!(file = calloc( 1, sizeof(*file) ))) return STATUS_NO_MEMORY;
+++    list_init( &file->reads );
+++    if (!queue_resize( file, DS_QUEUE_DEFAULT ))
+++    {
+++        free( file );
+++        return STATUS_NO_MEMORY;
+++    }
+++    SERVER_START_REQ( set_kernel_object_ptr )
+++    {
+++        req->manager  = wine_server_obj_handle( ds.manager );
+++        req->handle   = handle;
+++        req->user_ptr = wine_server_client_ptr( file );
+++        status = wine_server_call( req );
+++    }
+++    SERVER_END_REQ;
+++    if (status)
+++    {
+++        free( file->reports );
+++        free( file );
+++        return status;
+++    }
+++    list_add_tail( &ds.files, &file->entry );
+++    TRACE( "file %p opened\n", file );
+++    return STATUS_SUCCESS;
+++}
+++
+++static void dispatch_close( struct ds_file *file )
+++{
+++    if (!file) return;
+++    TRACE( "file %p closed\n", file );
+++    file->closed = TRUE;
+++    complete_reads( file, STATUS_DEVICE_NOT_CONNECTED );
+++    free( file->reports );
+++    file->reports = NULL;
+++    file->count = 0;
+++}
+++
+++static void dispatch_free( client_ptr_t ptr )
+++{
+++    struct ds_file *file;
+++
+++    if (!(file = find_file( ptr ))) return;  /* the device's, or unknown */
+++    complete_reads( file, STATUS_DEVICE_NOT_CONNECTED );
+++    list_remove( &file->entry );
+++    free( file->reports );
+++    free( file );
+++}
+++
+++static void dispatch_cancel( client_ptr_t ptr )
+++{
+++    struct ds_file *file;
+++    struct ds_read *read;
+++
+++    LIST_FOR_EACH_ENTRY( file, &ds.files, struct ds_file, entry )
+++    {
+++        LIST_FOR_EACH_ENTRY( read, &file->reads, struct ds_read, entry )
+++        {
+++            if (read->id != ptr) continue;
+++            complete_irp( read->irp, STATUS_CANCELLED, NULL, 0 );
+++            list_remove( &read->entry );
+++            free( read );
+++            return;
+++        }
+++    }
+++}
+++
+++static BYTE *result_data( struct ds_result *result, const void *data, ULONG size )
+++{
+++    if (!(result->data = malloc( size ? size : 1 ))) return NULL;
+++    if (data) memcpy( result->data, data, size );
+++    else memset( result->data, 0, size );
+++    result->size = size;
+++    return result->data;
+++}
+++
+++static void dispatch_read( struct ds_file *file, ULONG size, HANDLE irp, struct ds_result *result )
+++{
+++    struct ds_read *read;
+++    BYTE report[DS_INPUT_SIZE];
+++
+++    if (!file || file->closed) result->status = STATUS_INVALID_HANDLE;
+++    else if (size < ds.collection->InputLength) result->status = STATUS_INVALID_BUFFER_SIZE;
+++    else if (queue_pop( file, report ))
+++    {
+++        if (!result_data( result, report, DS_INPUT_SIZE )) result->status = STATUS_NO_MEMORY;
+++        else result->info = DS_INPUT_SIZE;
+++    }
+++    else if (!(read = malloc( sizeof(*read) ))) result->status = STATUS_NO_MEMORY;
+++    else
+++    {
+++        read->irp = irp;
+++        read->id = ++ds.next_read;
+++        list_add_tail( &file->reads, &read->entry );
+++        result->handle = 0;     /* kept until a report answers it */
+++        result->user_ptr = read->id;
+++        result->status = STATUS_PENDING;
+++        result->pending = 1;
+++    }
+++}
+++
+++/* An output report from the game: rumble, the light bar, the triggers. */
+++static NTSTATUS write_report( const BYTE *report, ULONG size, ULONG_PTR *info )
+++{
+++    struct xinput_dualsense_output params = {0};
+++
+++    if (!size) return STATUS_INVALID_USER_BUFFER;
+++    if (report[0] != DS_OUTPUT_ID || size < ds.collection->OutputLength) return STATUS_INVALID_PARAMETER;
+++    params.size = min( size, sizeof(params.data) );
+++    memcpy( params.data, report, params.size );
+++    ds_call( unix_dualsense_output, &params );
+++    TRACE( "output report, %s\n", params.asked ? "asked" : "nothing asked" );
+++    *info = ds.collection->OutputLength;
+++    return STATUS_SUCCESS;
+++}
+++
+++static NTSTATUS get_string( ULONG code, BYTE *out, ULONG out_size, ULONG_PTR *info )
+++{
+++    const WCHAR *string = code == IOCTL_HID_GET_PRODUCT_STRING ? L"DualSense Wireless Controller" :
+++                          code == IOCTL_HID_GET_MANUFACTURER_STRING ? L"Sony Interactive Entertainment" : L"";
+++
+++    *info = (wcslen( string ) + 1) * sizeof(WCHAR);
+++    if (*info > out_size) return STATUS_BUFFER_TOO_SMALL;
+++    memcpy( out, string, *info );
+++    return STATUS_SUCCESS;
+++}
+++
+++static NTSTATUS hid_ioctl( struct ds_file *file, ULONG code, const BYTE *in, ULONG in_size, BYTE *out,
+++                           ULONG out_size, ULONG_PTR *info )
+++{
+++    struct xinput_dualsense_feature feature = {0};
+++
+++    switch (code)
+++    {
+++    case IOCTL_HID_GET_POLL_FREQUENCY_MSEC:
+++        if (out_size < sizeof(ULONG)) return STATUS_BUFFER_OVERFLOW;
+++        *(ULONG *)out = 0;      /* not polled: it sends reports itself */
+++        *info = sizeof(ULONG);
+++        return STATUS_SUCCESS;
+++    case IOCTL_HID_SET_POLL_FREQUENCY_MSEC:
+++        if (in_size < sizeof(ULONG)) return STATUS_BUFFER_TOO_SMALL;
+++        return STATUS_SUCCESS;
+++    case IOCTL_HID_GET_PRODUCT_STRING:
+++    case IOCTL_HID_GET_MANUFACTURER_STRING:
+++    case IOCTL_HID_GET_SERIALNUMBER_STRING:
+++        return get_string( code, out, out_size, info );
+++    case IOCTL_HID_GET_COLLECTION_INFORMATION:
+++        *info = sizeof(ds.information);
+++        if (out_size < sizeof(ds.information)) return STATUS_BUFFER_OVERFLOW;
+++        memcpy( out, &ds.information, sizeof(ds.information) );
+++        return STATUS_SUCCESS;
+++    case IOCTL_HID_GET_COLLECTION_DESCRIPTOR:
+++        *info = ds.collection->PreparsedDataLength;
+++        if (out_size < ds.collection->PreparsedDataLength) return STATUS_INVALID_BUFFER_SIZE;
+++        memcpy( out, ds.collection->PreparsedData, ds.collection->PreparsedDataLength );
+++        return STATUS_SUCCESS;
+++    case IOCTL_SET_NUM_DEVICE_INPUT_BUFFERS:
+++    {
+++        ULONG length;
+++
+++        if (in_size != sizeof(ULONG)) return STATUS_BUFFER_OVERFLOW;
+++        length = *(const ULONG *)in;
+++        if (length < DS_QUEUE_MIN || length > DS_QUEUE_MAX) return STATUS_INVALID_PARAMETER;
+++        if (length == file->length) return STATUS_SUCCESS;
+++        return queue_resize( file, length ) ? STATUS_SUCCESS : STATUS_NO_MEMORY;
+++    }
+++    case IOCTL_GET_NUM_DEVICE_INPUT_BUFFERS:
+++        if (out_size < sizeof(ULONG)) return STATUS_BUFFER_TOO_SMALL;
+++        *(ULONG *)out = file->length;
+++        *info = sizeof(ULONG);
+++        return STATUS_SUCCESS;
+++    case IOCTL_HID_FLUSH_QUEUE:
+++        file->first = file->count = 0;
+++        return STATUS_SUCCESS;
+++    case IOCTL_HID_GET_INPUT_REPORT:
+++        if (!out_size) return STATUS_INVALID_USER_BUFFER;
+++        if (out[0] != DS_INPUT_ID || out_size < ds.collection->InputLength) return STATUS_INVALID_PARAMETER;
+++        memcpy( out, ds.report, DS_INPUT_SIZE );
+++        *info = DS_INPUT_SIZE;
+++        return STATUS_SUCCESS;
+++    case IOCTL_HID_GET_FEATURE:
+++        if (!out_size) return STATUS_INVALID_USER_BUFFER;
+++        feature.id = out[0];
+++        if (ds_call( unix_dualsense_feature, &feature ) || !feature.size || out_size < feature.size)
+++            return STATUS_INVALID_PARAMETER;
+++        memcpy( out, feature.data, feature.size );
+++        *info = feature.size;
+++        TRACE( "feature report %#x\n", feature.id );
+++        return STATUS_SUCCESS;
+++    case IOCTL_HID_SET_FEATURE:
+++        if (!in_size) return STATUS_INVALID_USER_BUFFER;
+++        feature.id = in[0];
+++        if (ds_call( unix_dualsense_feature, &feature ) || !feature.size || in_size < feature.size)
+++            return STATUS_INVALID_PARAMETER;
+++        *info = feature.size;   /* a DualSense keeps nothing a game sets this way */
+++        return STATUS_SUCCESS;
+++    case IOCTL_HID_SET_OUTPUT_REPORT:
+++        return write_report( in, in_size, info );
+++    case IOCTL_HID_GET_WINE_RAWINPUT_HANDLE:
+++        if (out_size < sizeof(ULONG)) return STATUS_BUFFER_OVERFLOW;
+++        *(ULONG *)out = DS_RAWINPUT_HANDLE;
+++        *info = sizeof(ULONG);
+++        return STATUS_SUCCESS;
+++    default:
+++        FIXME( "unsupported ioctl %#lx\n", code );
+++        return STATUS_NOT_SUPPORTED;
+++    }
+++}
+++
+++/* As ntoskrnl hands an ioctl to a driver, and returns what it wrote: a
+++ * buffered ioctl's output is what it reports writing, a direct one's is
+++ * the whole buffer, which arrives after the input. */
+++static void dispatch_ioctl( struct ds_file *file, ULONG code, ULONG in_size, ULONG out_size,
+++                            struct ds_result *result )
+++{
+++    BOOL direct = (code & 3) != METHOD_BUFFERED;
+++    BYTE *out;
+++
+++    if (!file || file->closed)
+++    {
+++        result->status = STATUS_INVALID_HANDLE;
+++        return;
+++    }
+++    if (direct && out_size)
+++    {
+++        if (in_size < out_size)
+++        {
+++            result->status = STATUS_INVALID_DEVICE_REQUEST;
+++            return;
+++        }
+++        in_size -= out_size;
+++    }
+++    if (!(out = result_data( result, direct && out_size ? ds.in + in_size : NULL, out_size )))
+++    {
+++        result->status = STATUS_NO_MEMORY;
+++        return;
+++    }
+++    result->status = hid_ioctl( file, code, ds.in, in_size, out, out_size, &result->info );
+++    if (!direct) result->size = NT_ERROR(result->status) ? 0 : min( result->info, out_size );
+++}
+++
+++static void dispatch_volume( ULONG info_class, ULONG out_size, struct ds_result *result )
+++{
+++    FILE_FS_DEVICE_INFORMATION info = {.DeviceType = FILE_DEVICE_UNKNOWN};
+++
+++    if (info_class != FileFsDeviceInformation) result->status = STATUS_NOT_SUPPORTED;
+++    else if (out_size < sizeof(info)) result->status = STATUS_INFO_LENGTH_MISMATCH;
+++    else if (!result_data( result, &info, sizeof(info) )) result->status = STATUS_NO_MEMORY;
+++    else result->info = sizeof(info);
+++}
+++
+++static void dispatch( const union irp_params *params, HANDLE irp, ULONG in_size, struct ds_result *result )
+++{
+++    result->handle = irp;
+++    result->status = STATUS_SUCCESS;
+++
+++    switch (params->type)
+++    {
+++    case IRP_CALL_CREATE:
+++        result->status = dispatch_create( params->create.file );
+++        break;
+++    case IRP_CALL_CLOSE:
+++        dispatch_close( find_file( params->close.file ) );
+++        break;
+++    case IRP_CALL_READ:
+++        dispatch_read( find_file( params->read.file ), params->read.out_size, irp, result );
+++        break;
+++    case IRP_CALL_WRITE:
+++    {
+++        struct ds_file *file = find_file( params->write.file );
+++        if (!file || file->closed) result->status = STATUS_INVALID_HANDLE;
+++        else result->status = write_report( ds.in, in_size, &result->info );
+++        break;
+++    }
+++    case IRP_CALL_FLUSH:
+++        break;
+++    case IRP_CALL_IOCTL:
+++        dispatch_ioctl( find_file( params->ioctl.file ), params->ioctl.code, in_size, params->ioctl.out_size, result );
+++        break;
+++    case IRP_CALL_VOLUME:
+++        dispatch_volume( params->volume.info_class, params->volume.out_size, result );
+++        break;
+++    case IRP_CALL_FREE:
+++        dispatch_free( params->free.obj );
+++        break;
+++    case IRP_CALL_CANCEL:
+++        dispatch_cancel( params->cancel.irp );
+++        break;
+++    default:
+++        result->status = STATUS_NOT_SUPPORTED;
+++        break;
+++    }
+++}
+++
+++/* Answers the current call and takes the next one, as ntoskrnl's loop does. */
+++static NTSTATUS next_request( struct ds_result *result, union irp_params *params, HANDLE *irp, ULONG *in_size )
+++{
+++    NTSTATUS status;
+++
+++    SERVER_START_REQ( get_next_device_request )
+++    {
+++        req->manager     = wine_server_obj_handle( ds.manager );
+++        req->prev        = wine_server_obj_handle( result->handle );
+++        req->user_ptr    = result->user_ptr;
+++        req->status      = result->status;
+++        req->pending     = result->pending;
+++        req->iosb_status = result->status;
+++        req->result      = result->info;
+++        if (result->size) wine_server_add_data( req, result->data, result->size );
+++        wine_server_set_reply( req, ds.in, ds.in_capacity );
+++        if (!(status = wine_server_call( req )))
+++        {
+++            *irp     = wine_server_ptr_handle( reply->next );
+++            *params  = reply->params;
+++            *in_size = reply->in_size;
+++        }
+++        else if (status == STATUS_BUFFER_OVERFLOW) *in_size = reply->in_size;
+++    }
+++    SERVER_END_REQ;
+++
+++    free( result->data );
+++    memset( result, 0, sizeof(*result) );
+++    return status;
+++}
+++
+++/* The device goes: the server deletes it with the manager, and fails what
+++ * waits on it, so a game is not left waiting for good. */
+++static void stop_device(void)
+++{
+++    delete_keys();
+++    ds.keys = FALSE;
+++    if (ds.link) NtClose( ds.link );
+++    NtClose( ds.manager );
+++    ds.link = ds.manager = 0;
+++}
+++
+++static DWORD WINAPI dualsense_thread( void *arg )
+++{
+++    struct ds_result result = {0};
+++    LARGE_INTEGER frequency, now, next;
+++    unsigned int failures = 0;
+++    LONGLONG tick;
+++
+++    SetThreadDescription( GetCurrentThread(), L"wine_xinput_dualsense" );
+++    QueryPerformanceFrequency( &frequency );
+++    tick = frequency.QuadPart * DS_TICK_US / 1000000;
+++    if (tick < 1) tick = 1;
+++    QueryPerformanceCounter( &next );
+++
+++    for (;;)
+++    {
+++        union irp_params params;
+++        HANDLE irp = 0;
+++        ULONG in_size = 0;
+++        NTSTATUS status = next_request( &result, &params, &irp, &in_size );
+++
+++        if (status == STATUS_BUFFER_OVERFLOW)
+++        {
+++            BYTE *in = realloc( ds.in, in_size );
+++
+++            if (in)
+++            {
+++                ds.in = in;
+++                ds.in_capacity = in_size;
+++                continue;
+++            }
+++            status = STATUS_NO_MEMORY;
+++        }
+++        if (status == STATUS_SUCCESS)
+++        {
+++            failures = 0;
+++            dispatch( &params, irp, in_size, &result );
+++        }
+++        else if (status != STATUS_PENDING)
+++        {
+++            /* as ntoskrnl's loop, go on; but not forever */
+++            LARGE_INTEGER pause = {.QuadPart = -10 * 10000};
+++
+++            if (!failures++) ERR( "the server refused the next request: status %#lx\n", status );
+++            if (failures == 500)
+++            {
+++                ERR( "the DualSense stops: status %#lx\n", status );
+++                stop_device();
+++                return 1;
+++            }
+++            NtDelayExecution( FALSE, &pause );
+++        }
+++
+++        QueryPerformanceCounter( &now );
+++        if (now.QuadPart >= next.QuadPart)
+++        {
+++            send_report();
+++            next.QuadPart += tick;
+++            if (next.QuadPart <= now.QuadPart) next.QuadPart = now.QuadPart + tick;  /* late: no burst */
+++        }
+++        if (status == STATUS_PENDING)
+++        {
+++            LARGE_INTEGER timeout;
+++
+++            QueryPerformanceCounter( &now );
+++            if (next.QuadPart > now.QuadPart)
+++            {
+++                timeout.QuadPart = -((next.QuadPart - now.QuadPart) * 10000000 / frequency.QuadPart) - 1;
+++                NtWaitForSingleObject( ds.manager, FALSE, &timeout );
+++            }
+++        }
+++    }
+++}
+++
+++void dualsense_start(void)
+++{
+++    UNICODE_STRING name = RTL_CONSTANT_STRING( L"xinput1_3" );
+++    struct xinput_dualsense_descriptor descriptor = {0};
+++    struct xinput_dualsense_input input = {0};
+++    unixlib_module_t module;
+++    WCHAR value[4];
+++    NTSTATUS status;
+++    HANDLE thread;
+++
+++    if (GetEnvironmentVariableW( L"PW_DUALSENSE", value, ARRAY_SIZE(value) ) != 1 || value[0] != '1') return;
+++
+++    if ((status = __wine_load_unix_lib( &name, &module, &ds.unix )))
+++    {
+++        ERR( "no Unix library, status %#lx: no DualSense\n", status );
+++        return;
+++    }
+++    if ((status = ds_call( unix_dualsense_init, NULL )))
+++    {
+++        ERR( "no title, status %#lx: no DualSense\n", status );
+++        return;
+++    }
+++    if (ds_call( unix_dualsense_descriptor, &descriptor ) ||
+++        (status = HidP_GetCollectionDescription( descriptor.data, descriptor.size, PagedPool, &ds.desc )) !=
+++        HIDP_STATUS_SUCCESS || ds.desc.CollectionDescLength != 1)
+++    {
+++        ERR( "the report descriptor does not parse, status %#lx: no DualSense\n", status );
+++        return;
+++    }
+++    ds.collection = ds.desc.CollectionDesc;
+++    ds.information.DescriptorSize = ds.collection->PreparsedDataLength;
+++    ds.information.Polled = FALSE;
+++    ds.information.VendorID = 0x054c;
+++    ds.information.ProductID = 0x0ce6;
+++    ds.information.VersionNumber = DS_VERSION;
+++    if (!ds_call( unix_dualsense_input, &input )) memcpy( ds.report, input.data, DS_INPUT_SIZE );
+++    if (!(ds.in = malloc( 4096 ))) return;
+++    ds.in_capacity = 4096;
+++
+++    if ((status = create_device()))
+++    {
+++        ERR( "cannot make the device, status %#lx: no DualSense\n", status );
+++        return;
+++    }
+++    if (!(ds.keys = create_keys()))
+++    {
+++        ERR( "cannot register the device: no DualSense\n" );
+++        delete_keys();
+++        return;
+++    }
+++    if (!(thread = CreateThread( NULL, 0, dualsense_thread, NULL, 0, NULL )))
+++    {
+++        ERR( "cannot start the device's thread, error %lu: no DualSense\n", GetLastError() );
+++        delete_keys();
+++        ds.keys = FALSE;
+++        return;
+++    }
+++    CloseHandle( thread );
+++    MESSAGE( "xinput: the controller is a DualSense (054c:0ce6, %u-byte reports, %u bytes of preparsed data)\n",
+++             ds.collection->InputLength, ds.collection->PreparsedDataLength );
+++}
+++
+++void dualsense_stop(void)
+++{
+++    if (ds.keys) delete_keys();
+++    ds.keys = FALSE;
+++}
++diff --git a/dlls/xinput1_3/dualsense.h b/dlls/xinput1_3/dualsense.h
++new file mode 100644
++index 0000000..861ca40
++--- /dev/null
+++++ b/dlls/xinput1_3/dualsense.h
++@@ -0,0 +1,31 @@
+++/*
+++ * The PS5 title's controller as a DualSense
+++ *
+++ * Copyright 2026 prospero-win
+++ *
+++ * This library is free software; you can redistribute it and/or
+++ * modify it under the terms of the GNU Lesser General Public
+++ * License as published by the Free Software Foundation; either
+++ * version 2.1 of the License, or (at your option) any later version.
+++ *
+++ * This library is distributed in the hope that it will be useful,
+++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+++ * Lesser General Public License for more details.
+++ *
+++ * You should have received a copy of the GNU Lesser General Public
+++ * License along with this library; if not, write to the Free Software
+++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+++ */
+++
+++#ifndef __WINE_XINPUT_DUALSENSE_H
+++#define __WINE_XINPUT_DUALSENSE_H
+++
+++/* At process attach: in dualsense mode (PW_DUALSENSE=1, in a PS5 title)
+++ * the DualSense appears, and stays until the process ends; anywhere else
+++ * nothing happens. */
+++extern void dualsense_start(void);
+++/* At process detach: the DualSense's registry keys go. */
+++extern void dualsense_stop(void);
+++
+++#endif /* __WINE_XINPUT_DUALSENSE_H */
++diff --git a/dlls/xinput1_3/dualsense_hid.c b/dlls/xinput1_3/dualsense_hid.c
++new file mode 100644
++index 0000000..92161e4
++--- /dev/null
+++++ b/dlls/xinput1_3/dualsense_hid.c
++@@ -0,0 +1,42 @@
+++/*
+++ * HID parsing for the PS5 title's DualSense
+++ *
+++ * Copyright 2026 prospero-win
+++ *
+++ * This library is free software; you can redistribute it and/or
+++ * modify it under the terms of the GNU Lesser General Public
+++ * License as published by the Free Software Foundation; either
+++ * version 2.1 of the License, or (at your option) any later version.
+++ *
+++ * This library is distributed in the hope that it will be useful,
+++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+++ * Lesser General Public License for more details.
+++ *
+++ * You should have received a copy of the GNU Lesser General Public
+++ * License along with this library; if not, write to the Free Software
+++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+++ */
+++
+++/* The DualSense's preparsed data, which hid.dll's HidP_ calls read, is what
+++ * hidclass.sys gets from hidparse.sys's HidP_GetCollectionDescription. A
+++ * PS5 title has no driver process to load hidparse.sys into, so its code is
+++ * built here, with the pool allocations it makes from the heap. */
+++
+++#include <stdarg.h>
+++#include <stdlib.h>
+++
+++#include "ntstatus.h"
+++#include "windef.h"
+++#include "winbase.h"
+++#include "winternl.h"
+++#include "winioctl.h"
+++
+++#include <ddk/wdm.h>
+++#include <ddk/hidpddi.h>
+++
+++#define ExAllocatePool( type, size ) ((void)(type), malloc( size ))
+++#define ExFreePool( ptr ) free( ptr )
+++#define DriverEntry dualsense_hidparse_entry
+++
+++#include "../hidparse.sys/main.c"
++-- 
++2.43.0
+diff --git a/wine/patches/0476-ntdll-load-xinput-for-the-dualsense.patch b/wine/patches/0476-ntdll-load-xinput-for-the-dualsense.patch
+new file mode 100644
+index 0000000..2089854
+--- /dev/null
++++ b/wine/patches/0476-ntdll-load-xinput-for-the-dualsense.patch
+@@ -0,0 +1,63 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: prospero-win <prospero-win@invalid>
++Date: Fri, 23 Oct 2026 20:40:00 +0200
++Subject: [PATCH] ntdll: Load xinput1_3 at the start for the PS5 title's DualSense.
++
++In dualsense mode (PW_DUALSENSE=1) xinput1_3 makes the title's
++controller a DualSense (patch 0475), which must exist before the game
++looks for controllers, whether or not the game imports an xinput. Once
++the main module's dependencies are attached, xinput1_3 is loaded from
++the system directory (a game's own copy has no DualSense); a failure is
++logged and the game runs on. In a WoW64 process the 32-bit side loads
++it.
++---
++ dlls/ntdll/loader.c |   27 +++++++++++++++++++++++++++
++ 1 file changed, 27 insertions(+)
++
++diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
++index a0992cf..1cb22bf 100644
++--- a/dlls/ntdll/loader.c
+++++ b/dlls/ntdll/loader.c
++@@ -4429,6 +4429,32 @@ static void init_wow64( CONTEXT *context )
++ #endif
++ 
++ 
+++/* dualsense mode (PW_DUALSENSE=1, which a PS5 title sets): xinput1_3 makes
+++ * the title's controller a DualSense (its dualsense.c), which must be there
+++ * before the game looks for controllers. It comes from the system
+++ * directory: a game's own xinput1_3.dll has no DualSense. */
+++static void load_dualsense(void)
+++{
+++    static const WCHAR variable[] = L"PW_DUALSENSE";
+++    WCHAR value[2], path[MAX_PATH];
+++    UNICODE_STRING name;
+++    HMODULE module;
+++    NTSTATUS status;
+++    SIZE_T len;
+++
+++#ifdef _WIN64
+++    if (NtCurrentTeb()->WowTebOffset) return;  /* the 32-bit side does it */
+++#endif
+++    if (RtlQueryEnvironmentVariable( NULL, variable, wcslen( variable ), value, ARRAY_SIZE(value), &len ) ||
+++        len != 1 || value[0] != '1')
+++        return;
+++    wcscpy( path, system_dir );
+++    wcscat( path, L"xinput1_3.dll" );
+++    RtlInitUnicodeString( &name, path );
+++    if ((status = LdrLoadDll( NULL, 0, &name, &module )))
+++        ERR( "cannot load %s for the DualSense, status %lx\n", debugstr_w(path), status );
+++}
+++
++ /* release some address space once dlls are loaded*/
++ static void release_address_space(void)
++ {
++@@ -4581,6 +4607,7 @@ void loader_init( CONTEXT *context, void **entry )
++                  debugstr_w(NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer), status );
++             NtTerminateProcess( GetCurrentProcess(), status );
++         }
+++        load_dualsense();
++         release_address_space();
++         if (wm->ldr.TlsIndex == -1) call_tls_callbacks( wm->ldr.DllBase, DLL_PROCESS_ATTACH );
++         if (wm->ldr.ActivationContext) RtlDeactivateActivationContext( 0, cookie );
++-- 
++2.43.0
+diff --git a/wine/ps5/input/pw_dualsense.h b/wine/ps5/input/pw_dualsense.h
+new file mode 100644
+index 0000000..d8f5ed6
+--- /dev/null
++++ b/wine/ps5/input/pw_dualsense.h
+@@ -0,0 +1,384 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#ifndef PW_DUALSENSE_H
++#define PW_DUALSENSE_H
++/*
++ * The DualSense as a PC sees one plugged in by USB: a HID game pad, Sony's
++ * 054c:0ce6, with its own reports. A game in dualsense mode finds the
++ * title's controller this way (xinput1_3's dualsense.c answers as Windows'
++ * HID class driver would, wine/patches/0475): the title gives its state
++ * (PwDualSenseState), this file makes the input report a DualSense sends,
++ * reads the output reports a game sends back (rumble, light bar, the
++ * adaptive triggers' effects) and answers the feature reports games and
++ * SDL ask for (calibration, pairing, firmware).
++ *
++ * Header only, with no Windows or console headers: Wine's xinput Unix
++ * library includes it (staged beside it by both Wine builds), and so do the
++ * host tests and the title.
++ *
++ * The report layouts are the DualSense's USB ones, as Linux's
++ * hid-playstation driver and SDL's HIDAPI driver read them.
++ */
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++
++enum {
++    PW_DUALSENSE_VENDOR = 0x054c, PW_DUALSENSE_PRODUCT = 0x0ce6, PW_DUALSENSE_VERSION = 0x0100,
++    PW_DUALSENSE_INPUT_SIZE = 64,    /* report 1, with its id */
++    PW_DUALSENSE_OUTPUT_SIZE = 48,   /* report 2, with its id */
++    PW_DUALSENSE_FEATURE_SIZE = 64,  /* the longest feature report, with its id */
++};
++
++/* The title's controller, laid out alike for 32- and 64-bit code (no
++ * pointers, fixed sizes): what the sink keeps (wine/ps5/pw_wine_sink.h). */
++typedef struct PwDualSenseState {
++    uint32_t connected;              /* 0: no controller */
++    uint32_t packet;                 /* the sink's: changes whenever the state does */
++    uint32_t buttons;                /* scePadRead's bits */
++    uint8_t lx, ly, rx, ry;          /* 0-255, 0x80 centred, left and up 0 */
++    uint8_t l2, r2;                  /* 0-255 */
++    uint8_t touches;                 /* fingers on the touchpad, 0-2 */
++    uint8_t reserved;
++    uint16_t touch_x[2], touch_y[2]; /* 0-1919, 0-1079 */
++    uint8_t touch_id[2];             /* each finger's number, while it stays down */
++    uint8_t reserved2[2];
++    float gyro[3];                   /* angular velocity, radians a second (pitch, yaw, roll) */
++    float accel[3];                  /* acceleration, g (x, y, z) */
++    uint64_t timestamp_us;
++} PwDualSenseState;
++
++/* What a game's output reports asked of the controller. */
++enum {
++    PW_DUALSENSE_MOTORS = 1u << 0, PW_DUALSENSE_LIGHT = 1u << 1,
++    PW_DUALSENSE_LEFT_TRIGGER = 1u << 2, PW_DUALSENSE_RIGHT_TRIGGER = 1u << 3,
++    PW_DUALSENSE_PLAYER_LEDS = 1u << 4,
++};
++typedef struct PwDualSenseOutput {
++    uint32_t sequence;               /* changes with each report that asks something */
++    uint32_t set;                    /* PW_DUALSENSE_*: what a game has set so far */
++    uint8_t motor_large, motor_small;
++    uint8_t light[3];                /* red, green, blue */
++    uint8_t player_leds;
++    uint8_t trigger[2][11];          /* L2, R2: the DualSense's effect, its mode and ten numbers */
++} PwDualSenseOutput;
++
++/* scePadRead's buttons. */
++enum {
++    PW_DS_PAD_CREATE = 0x1u, PW_DS_PAD_L3 = 0x2u, PW_DS_PAD_R3 = 0x4u, PW_DS_PAD_OPTIONS = 0x8u,
++    PW_DS_PAD_UP = 0x10u, PW_DS_PAD_RIGHT = 0x20u, PW_DS_PAD_DOWN = 0x40u, PW_DS_PAD_LEFT = 0x80u,
++    PW_DS_PAD_L2 = 0x100u, PW_DS_PAD_R2 = 0x200u, PW_DS_PAD_L1 = 0x400u, PW_DS_PAD_R1 = 0x800u,
++    PW_DS_PAD_TRIANGLE = 0x1000u, PW_DS_PAD_CIRCLE = 0x2000u, PW_DS_PAD_CROSS = 0x4000u,
++    PW_DS_PAD_SQUARE = 0x8000u, PW_DS_PAD_TOUCHPAD = 0x100000u,
++};
++
++/* The motion sensors' units, which the calibration report (5) states: 16 to
++ * a degree a second, 8192 to a g. */
++enum { PW_DUALSENSE_GYRO_PER_DEGREE = 16, PW_DUALSENSE_ACCEL_PER_G = 8192 };
++
++/* The report descriptor: report 1 in (the sticks X Y Z Rz, the triggers Rx
++ * Ry, a counter, the hat, 15 buttons, then the DualSense's own data), report
++ * 2 out, and the feature reports a DualSense has. */
++static const uint8_t pw_dualsense_descriptor[] = {
++    0x05, 0x01, 0x09, 0x05, 0xa1, 0x01,             /* Generic Desktop, Game Pad, Application */
++    0x85, 0x01,                                     /*   report 1 */
++    0x09, 0x30, 0x09, 0x31, 0x09, 0x32, 0x09, 0x35, /*   X Y Z Rz: the sticks */
++    0x09, 0x33, 0x09, 0x34,                         /*   Rx Ry: the triggers */
++    0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08, 0x95, 0x06, 0x81, 0x02,
++    0x06, 0x00, 0xff, 0x09, 0x20, 0x95, 0x01, 0x81, 0x02,             /*   the counter */
++    0x05, 0x01, 0x09, 0x39, 0x15, 0x00, 0x25, 0x07, 0x35, 0x00, 0x46, 0x3b, 0x01,
++    0x65, 0x14, 0x75, 0x04, 0x95, 0x01, 0x81, 0x42, 0x65, 0x00,       /*   the hat, 0-7 or none */
++    0x05, 0x09, 0x19, 0x01, 0x29, 0x0f, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x0f, 0x81, 0x02,
++    0x06, 0x00, 0xff, 0x09, 0x21, 0x95, 0x0d, 0x81, 0x02,             /*   13 bits */
++    0x06, 0x00, 0xff, 0x09, 0x22, 0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08, 0x95, 0x34, 0x81, 0x02,
++    0x85, 0x02, 0x09, 0x23, 0x95, 0x2f, 0x91, 0x02,  /*   report 2 out: 47 bytes */
++    0x85, 0x05, 0x09, 0x33, 0x95, 0x28, 0xb1, 0x02,  /*   feature 5: calibration */
++    0x85, 0x08, 0x09, 0x34, 0x95, 0x2f, 0xb1, 0x02,
++    0x85, 0x09, 0x09, 0x24, 0x95, 0x13, 0xb1, 0x02,  /*   feature 9: pairing */
++    0x85, 0x0a, 0x09, 0x25, 0x95, 0x1a, 0xb1, 0x02,
++    0x85, 0x20, 0x09, 0x26, 0x95, 0x3f, 0xb1, 0x02,  /*   feature 0x20: firmware */
++    0x85, 0x21, 0x09, 0x27, 0x95, 0x04, 0xb1, 0x02,
++    0x85, 0x22, 0x09, 0x40, 0x95, 0x3f, 0xb1, 0x02,
++    0x85, 0x80, 0x09, 0x28, 0x95, 0x3f, 0xb1, 0x02,
++    0x85, 0x81, 0x09, 0x29, 0x95, 0x3f, 0xb1, 0x02,
++    0x85, 0x82, 0x09, 0x2a, 0x95, 0x09, 0xb1, 0x02,
++    0x85, 0x83, 0x09, 0x2b, 0x95, 0x3f, 0xb1, 0x02,
++    0x85, 0x84, 0x09, 0x2c, 0x95, 0x3f, 0xb1, 0x02,
++    0x85, 0x85, 0x09, 0x2d, 0x95, 0x02, 0xb1, 0x02,
++    0x85, 0xa0, 0x09, 0x2e, 0x95, 0x01, 0xb1, 0x02,
++    0x85, 0xe0, 0x09, 0x2f, 0x95, 0x3f, 0xb1, 0x02,
++    0x85, 0xf0, 0x09, 0x30, 0x95, 0x3f, 0xb1, 0x02,
++    0x85, 0xf1, 0x09, 0x31, 0x95, 0x3f, 0xb1, 0x02,
++    0x85, 0xf2, 0x09, 0x32, 0x95, 0x0f, 0xb1, 0x02,
++    0x85, 0xf4, 0x09, 0x35, 0x95, 0x3f, 0xb1, 0x02,
++    0x85, 0xf5, 0x09, 0x36, 0x95, 0x03, 0xb1, 0x02,
++    0xc0,
++};
++
++/* The feature reports, with their lengths (the id included). */
++static const struct { uint8_t id, length; } pw_dualsense_features[] = {
++    { 0x05, 41 }, { 0x08, 48 }, { 0x09, 20 }, { 0x0a, 27 }, { 0x20, 64 }, { 0x21, 5 }, { 0x22, 64 },
++    { 0x80, 64 }, { 0x81, 64 }, { 0x82, 10 }, { 0x83, 64 }, { 0x84, 64 }, { 0x85, 3 }, { 0xa0, 2 },
++    { 0xe0, 64 }, { 0xf0, 64 }, { 0xf1, 64 }, { 0xf2, 16 }, { 0xf4, 64 }, { 0xf5, 4 },
++};
++
++static inline void pw_dualsense_le16(uint8_t *at, int32_t value)
++{
++    if (value > 32767) value = 32767;
++    if (value < -32768) value = -32768;
++    at[0] = (uint8_t)((uint32_t)value & 0xff);
++    at[1] = (uint8_t)(((uint32_t)value >> 8) & 0xff);
++}
++
++static inline void pw_dualsense_le32(uint8_t *at, uint32_t value)
++{
++    for (int i = 0; i < 4; i++) at[i] = (uint8_t)(value >> (8 * i));
++}
++
++/* The d-pad as the hat: 0 up, clockwise to 7 up-left, 8 none. */
++static inline uint8_t pw_dualsense_hat(uint32_t buttons)
++{
++    int up = !!(buttons & PW_DS_PAD_UP), down = !!(buttons & PW_DS_PAD_DOWN);
++    int left = !!(buttons & PW_DS_PAD_LEFT), right = !!(buttons & PW_DS_PAD_RIGHT);
++    if (up && down) up = down = 0;
++    if (left && right) left = right = 0;
++    if (up) return right ? 1 : left ? 7 : 0;
++    if (down) return right ? 3 : left ? 5 : 4;
++    if (right) return 2;
++    if (left) return 6;
++    return 8;
++}
++
++static inline int32_t pw_dualsense_round(float value)
++{
++    return (int32_t)(value < 0 ? value - 0.5f : value + 0.5f);
++}
++
++/* Input report 1 for a state (a neutral one while disconnected); counter
++ * numbers the reports. */
++static inline void pw_dualsense_input(const PwDualSenseState *s, uint8_t counter,
++                                      uint8_t report[PW_DUALSENSE_INPUT_SIZE])
++{
++    const float degrees = 57.29577951f;
++    uint32_t b = s->connected ? s->buttons : 0;
++
++    memset(report, 0, PW_DUALSENSE_INPUT_SIZE);
++    report[0] = 0x01;
++    report[1] = s->connected ? s->lx : 0x80;
++    report[2] = s->connected ? s->ly : 0x80;
++    report[3] = s->connected ? s->rx : 0x80;
++    report[4] = s->connected ? s->ry : 0x80;
++    report[5] = s->connected ? s->l2 : 0;
++    report[6] = s->connected ? s->r2 : 0;
++    report[7] = counter;
++    report[8] = (uint8_t)(pw_dualsense_hat(b) | (b & PW_DS_PAD_SQUARE ? 0x10 : 0) | (b & PW_DS_PAD_CROSS ? 0x20 : 0) |
++                          (b & PW_DS_PAD_CIRCLE ? 0x40 : 0) | (b & PW_DS_PAD_TRIANGLE ? 0x80 : 0));
++    report[9] = (uint8_t)((b & PW_DS_PAD_L1 ? 0x01 : 0) | (b & PW_DS_PAD_R1 ? 0x02 : 0) | (b & PW_DS_PAD_L2 ? 0x04 : 0) |
++                          (b & PW_DS_PAD_R2 ? 0x08 : 0) | (b & PW_DS_PAD_CREATE ? 0x10 : 0) |
++                          (b & PW_DS_PAD_OPTIONS ? 0x20 : 0) | (b & PW_DS_PAD_L3 ? 0x40 : 0) | (b & PW_DS_PAD_R3 ? 0x80 : 0));
++    report[10] = (uint8_t)(b & PW_DS_PAD_TOUCHPAD ? 0x02 : 0);   /* the PS button is the console's */
++    pw_dualsense_le32(report + 12, s->packet);
++    if (s->connected) {
++        for (int i = 0; i < 3; i++) {
++            pw_dualsense_le16(report + 16 + 2 * i, pw_dualsense_round(s->gyro[i] * degrees * PW_DUALSENSE_GYRO_PER_DEGREE));
++            pw_dualsense_le16(report + 22 + 2 * i, pw_dualsense_round(s->accel[i] * PW_DUALSENSE_ACCEL_PER_G));
++        }
++    } else {
++        pw_dualsense_le16(report + 24, PW_DUALSENSE_ACCEL_PER_G);   /* at rest, flat: 1 g */
++    }
++    pw_dualsense_le32(report + 28, (uint32_t)(s->timestamp_us * 3));   /* a third of a microsecond each */
++    /* The touchpad's two fingers: bit 7 set while a finger is up, then x and y
++     * (12 bits each). */
++    for (int i = 0; i < 2; i++) {
++        uint8_t *point = report + 33 + 4 * i;
++        uint16_t x = s->touch_x[i] > 1919 ? 1919 : s->touch_x[i], y = s->touch_y[i] > 1079 ? 1079 : s->touch_y[i];
++        int down = s->connected && i < s->touches;
++        point[0] = (uint8_t)((down ? 0 : 0x80) | (s->touch_id[i] & 0x7f));
++        point[1] = (uint8_t)(x & 0xff);
++        point[2] = (uint8_t)(((x >> 8) & 0x0f) | ((y & 0x0f) << 4));
++        point[3] = (uint8_t)(y >> 4);
++    }
++    report[53] = 0x0a;   /* the battery: full, not charging */
++}
++
++/* An output report (2) merged into out: 1 when it asked anything. */
++static inline int pw_dualsense_parse_output(const uint8_t *report, size_t size, PwDualSenseOutput *out)
++{
++    uint8_t r[PW_DUALSENSE_OUTPUT_SIZE] = { 0 };
++    uint32_t asked = 0;
++
++    if (!report || size < 3 || report[0] != 0x02) return 0;
++    memcpy(r, report, size < sizeof(r) ? size : sizeof(r));
++    if (r[1] & 0x03) {   /* the motors (DualShock 4 style) */
++        out->motor_small = r[3];
++        out->motor_large = r[4];
++        asked |= PW_DUALSENSE_MOTORS;
++    }
++    if (r[1] & 0x04) {
++        memcpy(out->trigger[1], r + 11, 11);
++        asked |= PW_DUALSENSE_RIGHT_TRIGGER;
++    }
++    if (r[1] & 0x08) {
++        memcpy(out->trigger[0], r + 22, 11);
++        asked |= PW_DUALSENSE_LEFT_TRIGGER;
++    }
++    if (r[2] & 0x04) {
++        out->light[0] = r[45];
++        out->light[1] = r[46];
++        out->light[2] = r[47];
++        asked |= PW_DUALSENSE_LIGHT;
++    }
++    if (r[2] & 0x10) {
++        out->player_leds = r[44];
++        asked |= PW_DUALSENSE_PLAYER_LEDS;
++    }
++    if (!asked) return 0;
++    out->set |= asked;
++    out->sequence++;
++    return 1;
++}
++
++/* A feature report by its id into report (whose size is size): how long it
++ * is with its id, or 0 for an id the DualSense hasn't got. Calibration (5)
++ * gives the motion sensors' units above; pairing (9) an address; firmware
++ * (0x20) a recent version. The rest read as zeros. */
++static inline size_t pw_dualsense_feature(uint8_t id, uint8_t *report, size_t size)
++{
++    size_t length = 0;
++
++    for (size_t i = 0; i < sizeof(pw_dualsense_features) / sizeof(pw_dualsense_features[0]); i++)
++        if (pw_dualsense_features[i].id == id) length = pw_dualsense_features[i].length;
++    if (!length || !report) return length;
++    if (size > length) size = length;
++    memset(report, 0, size);
++    {
++        uint8_t full[PW_DUALSENSE_FEATURE_SIZE] = { 0 };
++        full[0] = id;
++        if (id == 0x05) {
++            /* The gyro's biases (0), then each axis's reading at +/- the speed
++             * below, pitch, yaw, roll; then the accelerometer's at +/- 1 g. */
++            for (int axis = 0; axis < 3; axis++) {
++                pw_dualsense_le16(full + 7 + 4 * axis, 32000);
++                pw_dualsense_le16(full + 9 + 4 * axis, -32000);
++            }
++            pw_dualsense_le16(full + 19, 2000);   /* degrees a second */
++            pw_dualsense_le16(full + 21, 2000);
++            for (int axis = 0; axis < 3; axis++) {
++                pw_dualsense_le16(full + 23 + 4 * axis, PW_DUALSENSE_ACCEL_PER_G);
++                pw_dualsense_le16(full + 25 + 4 * axis, -PW_DUALSENSE_ACCEL_PER_G);
++            }
++        } else if (id == 0x09) {
++            static const uint8_t address[6] = { 0x35, 0x43, 0x50, 0x01, 0xc5, 0x7c };   /* little-endian */
++            memcpy(full + 1, address, sizeof(address));
++        } else if (id == 0x20) {
++            memcpy(full + 1, "Jun 10 2024", 11);
++            memcpy(full + 12, "12:00:00", 8);
++            pw_dualsense_le16(full + 20, 0x0003);      /* firmware type */
++            pw_dualsense_le16(full + 22, 0x0000);      /* software series */
++            pw_dualsense_le32(full + 24, 0x00000613);  /* hardware */
++            pw_dualsense_le32(full + 28, 0x01000100);  /* firmware */
++            pw_dualsense_le16(full + 44, 0x0630);      /* the update version SDL reads */
++        }
++        memcpy(report, full, size);
++    }
++    return length;
++}
++
++/* libScePad's adaptive trigger modes, and one trigger's command in its terms. */
++enum {
++    PW_DS_TRIGGER_OFF = 0, PW_DS_TRIGGER_FEEDBACK = 1, PW_DS_TRIGGER_WEAPON = 2, PW_DS_TRIGGER_VIBRATION = 3,
++    PW_DS_TRIGGER_MULTIPLE_FEEDBACK = 4, PW_DS_TRIGGER_SLOPE = 5, PW_DS_TRIGGER_MULTIPLE_VIBRATION = 6,
++};
++typedef struct PwDualSenseTrigger {
++    uint32_t mode;
++    uint8_t data[11];   /* as libScePad's command lays them out for the mode */
++} PwDualSenseTrigger;
++
++static inline uint8_t pw_dualsense_scale(uint8_t value, uint8_t most)
++{
++    return (uint8_t)((value * most + 127) / 255);
++}
++
++/* The first and last of the zones a ten-bit mask names. */
++static inline int pw_dualsense_zones(const uint8_t *mask, int *first, int *last)
++{
++    uint32_t bits = (uint32_t)mask[0] | (uint32_t)mask[1] << 8;
++    *first = *last = -1;
++    for (int i = 0; i < 10; i++)
++        if (bits & (1u << i)) {
++            if (*first < 0) *first = i;
++            *last = i;
++        }
++    return *first >= 0;
++}
++
++/* A DualSense trigger effect (its mode, then ten numbers, as a game sends
++ * them in report 2) as libScePad's command. The effects games use are
++ * these; any other, or a malformed one, is off. */
++static inline void pw_dualsense_trigger(const uint8_t effect[11], PwDualSenseTrigger *out)
++{
++    const uint8_t *p = effect + 1;
++    uint32_t packed = (uint32_t)p[2] | (uint32_t)p[3] << 8 | (uint32_t)p[4] << 16 | (uint32_t)p[5] << 24;
++    uint32_t mask = (uint32_t)p[0] | (uint32_t)p[1] << 8;
++    int first, last;
++
++    memset(out, 0, sizeof(*out));
++    switch (effect[0]) {
++    case 0x01:   /* resistance from a point: where (0-255), how firm (0-255) */
++        out->mode = PW_DS_TRIGGER_FEEDBACK;
++        out->data[0] = pw_dualsense_scale(p[0], 9);
++        out->data[1] = pw_dualsense_scale(p[1], 8);
++        if (!out->data[1]) out->mode = PW_DS_TRIGGER_OFF;
++        break;
++    case 0x02:   /* resistance between two points, then a release: from, to, how firm */
++        out->mode = PW_DS_TRIGGER_WEAPON;
++        out->data[0] = pw_dualsense_scale(p[0], 9);
++        out->data[1] = pw_dualsense_scale(p[1], 9);
++        out->data[2] = pw_dualsense_scale(p[2], 8);
++        if (out->data[0] < 2) out->data[0] = 2;
++        if (out->data[0] > 7) out->data[0] = 7;
++        if (out->data[1] <= out->data[0]) out->data[1] = (uint8_t)(out->data[0] + 1);
++        if (out->data[1] > 8) out->data[1] = 8;
++        break;
++    case 0x06:   /* a vibration: how fast (Hz), how strong (0-255), from where (0-255) */
++        out->mode = PW_DS_TRIGGER_VIBRATION;
++        out->data[0] = pw_dualsense_scale(p[2], 9);
++        out->data[1] = pw_dualsense_scale(p[1], 8);
++        out->data[2] = p[0];
++        if (!out->data[1] || !out->data[2]) out->mode = PW_DS_TRIGGER_OFF;
++        break;
++    case 0x21:   /* resistance zone by zone: ten zones on or off, each one's firmness 1-8 */
++        out->mode = PW_DS_TRIGGER_MULTIPLE_FEEDBACK;
++        for (int i = 0; i < 10; i++)
++            if (mask & (1u << i)) out->data[i] = (uint8_t)(((packed >> (3 * i)) & 7) + 1);
++        if (!(mask & 0x3ff)) out->mode = PW_DS_TRIGGER_OFF;
++        break;
++    case 0x22:   /* a bow: resistance from a point to another, then it snaps */
++    case 0x25:   /* a weapon: resistance from a point to another, then it gives */
++        if (!pw_dualsense_zones(p, &first, &last) || first == last) break;
++        out->mode = PW_DS_TRIGGER_WEAPON;
++        out->data[0] = (uint8_t)(first < 2 ? 2 : first > 7 ? 7 : first);
++        out->data[1] = (uint8_t)(last <= out->data[0] ? out->data[0] + 1 : last > 8 ? 8 : last);
++        out->data[2] = (uint8_t)((p[2] & 7) + 1);
++        break;
++    case 0x26:   /* a vibration zone by zone: ten zones, each one's strength 1-8, and how fast */
++        out->mode = PW_DS_TRIGGER_MULTIPLE_VIBRATION;
++        out->data[0] = p[8];
++        for (int i = 0; i < 10; i++)
++            if (mask & (1u << i)) out->data[1 + i] = (uint8_t)(((packed >> (3 * i)) & 7) + 1);
++        if (!(mask & 0x3ff) || !p[8]) out->mode = PW_DS_TRIGGER_OFF;
++        break;
++    case 0x23:   /* galloping: a beat from a point to another */
++    case 0x27:   /* a machine: a vibration between two points */
++        if (!pw_dualsense_zones(p, &first, &last)) break;
++        out->mode = PW_DS_TRIGGER_VIBRATION;
++        out->data[0] = (uint8_t)first;
++        out->data[1] = effect[0] == 0x27 ? (uint8_t)((p[2] & 7) + 1) : 4;
++        out->data[2] = effect[0] == 0x27 ? p[3] : p[3] ? p[3] : 10;
++        if (!out->data[2]) out->mode = PW_DS_TRIGGER_OFF;
++        break;
++    default:     /* 0x05 and 0x00: off */
++        break;
++    }
++}
++
++#endif
+diff --git a/wine/ps5/pw_wine_sink.c b/wine/ps5/pw_wine_sink.c
+index a750320..d2adce4 100644
+--- a/wine/ps5/pw_wine_sink.c
++++ b/wine/ps5/pw_wine_sink.c
+@@ -19,6 +19,12 @@ static pthread_once_t wake_once=PTHREAD_ONCE_INIT;
+ static int wake[2]={-1,-1};
+ static PwWinePad pad_state;
+ static uint32_t rumble_left,rumble_right,rumble_changed;
++/* The DualSense has its own lock too: Wine's thread for it reads the state
++ * 250 times a second, which must not wait for a frame the sink holds. */
++static pthread_mutex_t dualsense_lock=PTHREAD_MUTEX_INITIALIZER;
++static PwDualSenseState dualsense_state;
++static PwDualSenseOutput dualsense_out;
++static uint32_t dualsense_out_seen;
+ /* Audio has its own lock: its sink blocks for a grain, which must not hold
+  * up frames or input. */
+ static pthread_mutex_t audio_lock=PTHREAD_MUTEX_INITIALIZER;
+@@ -205,6 +211,62 @@ void pw_wine_set_rumble(uint32_t left,uint32_t right)
+     }
+     pthread_mutex_unlock(&lock);
+ }
++/* The DualSense: a new packet number whenever anything but the time changed. */
++static int same_dualsense(const PwDualSenseState *a,const PwDualSenseState *b)
++{
++    return a->buttons==b->buttons && a->lx==b->lx && a->ly==b->ly && a->rx==b->rx && a->ry==b->ry &&
++           a->l2==b->l2 && a->r2==b->r2 && a->touches==b->touches &&
++           !memcmp(a->touch_x,b->touch_x,sizeof(a->touch_x)) && !memcmp(a->touch_y,b->touch_y,sizeof(a->touch_y)) &&
++           !memcmp(a->touch_id,b->touch_id,sizeof(a->touch_id)) && !memcmp(a->gyro,b->gyro,sizeof(a->gyro)) &&
++           !memcmp(a->accel,b->accel,sizeof(a->accel));
++}
++void pw_wine_set_dualsense(const PwDualSenseState *state)
++{
++    pthread_mutex_lock(&dualsense_lock);
++    if(!state)dualsense_state.connected=0;
++    else {
++        uint32_t packet=dualsense_state.packet;
++        if(!dualsense_state.connected || !same_dualsense(state,&dualsense_state))
++            packet=packet+1?packet+1:1;   /* 0 is never a packet */
++        dualsense_state=*state;dualsense_state.connected=1;dualsense_state.packet=packet;
++    }
++    pthread_mutex_unlock(&dualsense_lock);
++}
++int pw_wine_dualsense(PwDualSenseState *state)
++{
++    int connected;
++    if(!state)return 0;
++    pthread_mutex_lock(&dualsense_lock);
++    connected=dualsense_state.connected!=0;
++    if(connected)*state=dualsense_state;
++    else {
++        uint32_t packet=dualsense_state.packet;
++        memset(state,0,sizeof(*state));
++        state->packet=packet;
++    }
++    pthread_mutex_unlock(&dualsense_lock);
++    return connected;
++}
++int pw_wine_dualsense_report(const uint8_t *report,uint32_t size)
++{
++    int asked;
++    if(!report)return 0;
++    pthread_mutex_lock(&dualsense_lock);
++    asked=pw_dualsense_parse_output(report,size,&dualsense_out);
++    pthread_mutex_unlock(&dualsense_lock);
++    return asked;
++}
++int pw_wine_dualsense_output(PwDualSenseOutput *output)
++{
++    int changed;
++    pthread_mutex_lock(&dualsense_lock);
++    changed=dualsense_out.sequence!=dualsense_out_seen;
++    dualsense_out_seen=dualsense_out.sequence;
++    if(output)*output=dualsense_out;
++    pthread_mutex_unlock(&dualsense_lock);
++    return changed;
++}
++
+ int pw_wine_rumble(uint32_t *left,uint32_t *right)
+ {
+     int changed;
+diff --git a/wine/ps5/pw_wine_sink.h b/wine/ps5/pw_wine_sink.h
+index 6c09eb1..6022422 100644
+--- a/wine/ps5/pw_wine_sink.h
++++ b/wine/ps5/pw_wine_sink.h
+@@ -2,6 +2,7 @@
+ #ifndef PW_WINE_SINK_H
+ #define PW_WINE_SINK_H
+ #include <stdint.h>
++#include "input/pw_dualsense.h"
+ 
+ /* The meeting point between the title and Wine's PS5 user driver. ntdll
+  * links it: the title reaches the set/post calls through ntdll.prx's
+@@ -73,6 +74,14 @@ void pw_wine_set_pad(const PwWinePad *pad);
+ /* 1 and the newest motor speeds (0..65535) when they changed since the
+  * last call, else 0. */
+ int pw_wine_rumble(uint32_t *left,uint32_t *right);
++/* dualsense mode: the controller in full (touchpad and motion too), for
++ * the DualSense a game finds as on a PC (patch 0475), or NULL when it is
++ * disconnected. The sink numbers the states; the state's own packet field
++ * is ignored. */
++void pw_wine_set_dualsense(const PwDualSenseState *state);
++/* 1 and what the game's output reports asked (motors, light bar, the
++ * triggers' effects) when it changed since the last call, else 0. */
++int pw_wine_dualsense_output(PwDualSenseOutput *output);
+ 
+ /* Driver side. -1 when no sink is set or the arguments are invalid. */
+ int pw_wine_present(const void *bgra,uint32_t width,uint32_t height,uint32_t stride);
+@@ -90,6 +99,12 @@ int pw_wine_input_fd(void);
+ int pw_wine_pad(PwWinePad *pad);
+ /* The rumble a game asked for (XInputSetState); speeds are clamped. */
+ void pw_wine_set_rumble(uint32_t left,uint32_t right);
++/* 1 and the DualSense's state while one is connected, else 0 and a neutral
++ * state. */
++int pw_wine_dualsense(PwDualSenseState *state);
++/* An output report a game sent the DualSense (report 2): 1 when it asked
++ * anything, which the title then reads. */
++int pw_wine_dualsense_report(const uint8_t *report,uint32_t size);
+ /* 1 when the title set an audio sink: the audio driver offers its device
+  * only then. */
+ int pw_wine_audio_available(void);

@@ -15,8 +15,10 @@ int scePadResetLightBar(int32_t handle);
 /* The adaptive triggers (libScePad's ScePadTriggerEffectParam): which
  * triggers, then a command for L2 and one for R2, each a mode and its
  * numbers. Feedback: where it starts (0-9) and how firm (1-8); vibration:
- * where it starts, how strong (1-8) and how fast (Hz). */
-enum { TRIGGER_L2 = 0x01, TRIGGER_R2 = 0x02, MODE_OFF = 0, MODE_FEEDBACK = 1, MODE_VIBRATION = 3 };
+ * where it starts, how strong (1-8) and how fast (Hz); a game's own effect
+ * (DualSense mode) comes with its mode, 1 to 6, and its numbers. */
+enum { TRIGGER_L2 = 0x01, TRIGGER_R2 = 0x02, MODE_OFF = 0, MODE_FEEDBACK = 1, MODE_VIBRATION = 3,
+       MODE_MULTIPLE_VIBRATION = 6 };
 typedef struct TriggerCommand { uint32_t mode; uint8_t padding[4]; uint8_t data[48]; } TriggerCommand;
 typedef struct TriggerParam { uint8_t mask; uint8_t padding[7]; TriggerCommand command[2]; } TriggerParam;
 _Static_assert(sizeof(TriggerParam) == 120, "ScePadTriggerEffectParam is 120 bytes");
@@ -55,6 +57,11 @@ static void command(TriggerCommand *out, const Pc5Trigger *trigger)
         out->data[0] = trigger->position;
         out->data[1] = trigger->amplitude;
         out->data[2] = trigger->frequency;
+        break;
+    case PC5_TRIGGER_GAME:
+        /* the game's effect, already in libScePad's terms */
+        out->mode = trigger->effect <= MODE_MULTIPLE_VIBRATION ? trigger->effect : MODE_OFF;
+        if (out->mode != MODE_OFF) memcpy(out->data, trigger->data, sizeof(trigger->data));
         break;
     default:
         out->mode = MODE_OFF;

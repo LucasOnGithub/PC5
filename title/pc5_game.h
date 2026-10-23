@@ -2,7 +2,8 @@
 /* PC5 in a game's process (prospero-win's title in game mode, PW_PC5): its
  * settings applied while the game runs. The controller: the game's rumble
  * at the strength chosen, the light bar in the game's colour or the
- * screen's, the triggers' rumble, resistance or both. The loading screen until the game's first
+ * screen's, the triggers' rumble, resistance or both; in DualSense mode the game's own light bar
+ * and trigger effects, once it sets them. The loading screen until the game's first
  * picture (pc5_matrix.h). The frame counter over the frames the title shows
  * itself (a game drawing with Vulkan gets libvulkan's, pw_pc5_hud). The
  * console's calls come through Pc5GameOps (pc5_game_ps5.c), so the host
@@ -13,7 +14,10 @@
 #include "pc5_matrix.h"
 #include "pc5_settings.h"
 
-typedef enum Pc5TriggerMode { PC5_TRIGGER_OFF, PC5_TRIGGER_FEEDBACK, PC5_TRIGGER_VIBRATION } Pc5TriggerMode;
+typedef enum Pc5TriggerMode {
+    PC5_TRIGGER_OFF, PC5_TRIGGER_FEEDBACK, PC5_TRIGGER_VIBRATION,
+    PC5_TRIGGER_GAME,     /* the game's own effect (DualSense mode) */
+} Pc5TriggerMode;
 
 typedef struct Pc5Trigger {
     Pc5TriggerMode mode;
@@ -21,7 +25,22 @@ typedef struct Pc5Trigger {
     uint8_t strength;     /* feedback: 1-8 */
     uint8_t amplitude;    /* vibration: 1-8 */
     uint8_t frequency;    /* vibration: Hz */
+    /* PC5_TRIGGER_GAME: libScePad's effect (its ScePadTriggerEffectMode: 1
+     * feedback, 2 weapon, 3 vibration, 4 feedback by zone, 5 slope, 6
+     * vibration by zone) and that effect's numbers, in its order. */
+    uint8_t effect;
+    uint8_t data[11];
 } Pc5Trigger;
+
+/* DualSense mode: what the game asked of its controller, as it would of a
+ * DualSense on a PC. */
+enum { PC5_OUTPUT_MOTORS = 1, PC5_OUTPUT_LIGHT = 2, PC5_OUTPUT_TRIGGERS = 4 };
+typedef struct Pc5PadOutput {
+    unsigned set;         /* PC5_OUTPUT_*: what the game has set so far */
+    uint8_t large, small; /* the motors, 0-255 */
+    uint32_t light;       /* the light bar, 0xRRGGBB */
+    Pc5Trigger trigger[2];/* L2, R2: PC5_TRIGGER_GAME or off */
+} Pc5PadOutput;
 
 typedef struct Pc5GameOps {
     int (*light_bar)(int handle, uint32_t rgb);         /* 0xRRGGBB */
@@ -41,6 +60,8 @@ typedef struct Pc5GameSession {
     uint32_t light, light_target; /* what the light bar shows and is going to */
     uint64_t light_at;
     int light_sent, triggers_sent, resistance;
+    int game_light, game_triggers;   /* DualSense mode: the game set its own */
+    Pc5Trigger game_trigger[2];
     uint8_t trigger_amplitude;
     Pc5Matrix *matrix;
     uint64_t matrix_at;
@@ -61,6 +82,12 @@ void pc5_game_loading_done(Pc5GameSession *game);
 /* The game's rumble (XInput's 0-65535 a motor): what the motors get, at
  * Vibration's strength, and the triggers when they follow it. */
 void pc5_game_rumble(Pc5GameSession *game, int pad, uint32_t left, uint32_t right, uint8_t *large, uint8_t *small);
+/* DualSense mode, whenever the game's output changes: the motors at
+ * Vibration's strength in large and small, which the triggers follow while
+ * the game has none of its own; the game's light bar and trigger effects
+ * once it sets them, which from then on replace PC5's Light bar and
+ * Triggers settings for this game. */
+void pc5_game_output(Pc5GameSession *game, int pad, const Pc5PadOutput *output, uint8_t *large, uint8_t *small);
 /* Every tick of the title's loop: the light bar (screen: the colour of the
  * frame on screen, 0 when unknown), the triggers' resistance. */
 void pc5_game_pad(Pc5GameSession *game, int pad, uint64_t now_ms, uint32_t screen);

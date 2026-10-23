@@ -274,6 +274,20 @@ step_app() {
     local app=$release/$TITLE
     rm -rf "$app" "$release/$TITLE.zip"
     cp -a "$B/package/PPSA99995" "$app"
+    # Built from a local FreeType copy (PROSPERO_FREETYPE_TARBALL): SOURCES.txt names it, as PARTS.txt does.
+    if [[ -n ${PROSPERO_FREETYPE_TARBALL:-} ]]; then
+        python3 - "$app/SOURCES.txt" "$(basename "$PROSPERO_FREETYPE_TARBALL")" \
+            "$(sha256sum "$PROSPERO_FREETYPE_TARBALL" | cut -c1-64)" <<'EOF_SOURCES'
+import re, sys
+path, name, sha = sys.argv[1:]
+text = open(path).read()
+text, count = re.subn(r"^(FreeType \S+)  \S+\n  SHA-256 [0-9a-f]{64}\n",
+                      lambda m: f"{m.group(1)}  from {name}, not the release archive\n  SHA-256 {sha}\n", text, flags=re.M)
+if count != 1:
+    sys.exit("build.sh: SOURCES.txt has no FreeType lines to correct")
+open(path, "w").write(text)
+EOF_SOURCES
+    fi
     cp "$here/sce_sys/param.json" "$here/art/icon0.png" "$here/art/pic0.png" "$app/sce_sys/"
     mkdir -p "$app/pc5"
     python3 "$here/tools/make-font.py" "$app/pc5/fonts.bin"

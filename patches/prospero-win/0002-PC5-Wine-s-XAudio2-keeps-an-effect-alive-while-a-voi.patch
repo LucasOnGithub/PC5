@@ -1,0 +1,137 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bornaradusin <bornaradusin@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 19:33:44 +0100
+Subject: [PATCH] PC5: Wine's XAudio2 keeps an effect alive while a voice holds
+ it (patch 0480)
+
+---
+ PUBLICATION_ALLOWLIST.txt                     |  1 +
+ docs/WINE_PS5_BUILD.md                        |  1 +
+ ...-effect-alive-while-a-voice-holds-it.patch | 94 +++++++++++++++++++
+ 3 files changed, 96 insertions(+)
+ create mode 100644 wine/patches/0480-xaudio2-keep-an-effect-alive-while-a-voice-holds-it.patch
+
+diff --git a/PUBLICATION_ALLOWLIST.txt b/PUBLICATION_ALLOWLIST.txt
+index ba650ad..49093d2 100644
+--- a/PUBLICATION_ALLOWLIST.txt
++++ b/PUBLICATION_ALLOWLIST.txt
+@@ -210,6 +210,7 @@ wine/patches/0456-win32u-vulkan-keep-swapchain-chain-when-scaling.patch
+ wine/patches/0457-win32u-vulkan-placed-map-properties-khr.patch
+ wine/patches/0460-win32u-ps5-driver-vulkan-display-plane.patch
+ wine/patches/0470-xinput-ps5-title-controller.patch
++wine/patches/0480-xaudio2-keep-an-effect-alive-while-a-voice-holds-it.patch
+ wine/patches/0560-ntdll-stderr-output-sink.patch
+ wine/patches/0570-ntdll-ps5-reserve-virtual-range.patch
+ wine/patches/0580-ntdll-ps5-config-dir-parent-ownership.patch
+diff --git a/docs/WINE_PS5_BUILD.md b/docs/WINE_PS5_BUILD.md
+index ff6ac8d..d667382 100644
+--- a/docs/WINE_PS5_BUILD.md
++++ b/docs/WINE_PS5_BUILD.md
+@@ -84,6 +84,7 @@ before evaluating a candidate built from that cache.
+ | 0457 | `win32u`: the WoW64 placed-map check reads its properties through `vkGetPhysicalDeviceProperties2KHR`; the core entry point is NULL on win32u's Vulkan 1.0 instances, so a host with `VK_EXT_map_memory_placed` (RADV) crashed every 32-bit process |
+ | 0460 | `win32u`: the PS5 user driver's Vulkan driver: a win32 surface becomes a host display-plane surface in the display's native mode, after the title releases its video output (before the first display query); installing the driver from Vulkan's initialisation does not refresh the display cache, which would wait on that initialisation |
+ | 0470 | `xinput`: controller 0 is the PS5 title's, read through a Unix library (`xinput1_3.so`) from the title's sink; elsewhere xinput uses HID as before; see [XInput controller](#xinput-controller) |
++| 0480 | `xaudio2`: FAudio's effect reference count (`FAPOBase`) changes atomically, so an effect shared by voices made and destroyed on several threads is not freed while a voice holds it (Samurai Warriors 4 DX); a voice that failed to be created no longer keeps the effect chain it freed |
+ | 0500 | `ntdll`: signal context at `ucontext`+64 (measured); GS = TEB through `sysarch`; FS stays the libc TLS base, so the syscall dispatcher never switches it; no LDT for WoW64 threads |
+ | 0501 | `ntdll`: a signal's FP state is read at `ucontext`+320, where the PS5 kernel keeps its FXSAVE image (32 bytes past the SDK's `mc_fpstate`), with the XSAVE header and YMM upper halves after it (measured); a handled exception's `CONTEXT` used to carry MXCSR 0 and shifted XMM registers |
+ | 0510 | `ntdll`: 16 KiB host pages under 4 KiB Windows pages, reusing the large-host-page path of `virtual.c` |
+diff --git a/wine/patches/0480-xaudio2-keep-an-effect-alive-while-a-voice-holds-it.patch b/wine/patches/0480-xaudio2-keep-an-effect-alive-while-a-voice-holds-it.patch
+new file mode 100644
+index 0000000..922ce10
+--- /dev/null
++++ b/wine/patches/0480-xaudio2-keep-an-effect-alive-while-a-voice-holds-it.patch
+@@ -0,0 +1,94 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: bornaradusin <bornaradusin@users.noreply.github.com>
++Date: Fri, 23 Oct 2026 19:30:00 +0100
++Subject: [PATCH] xaudio2: Keep an effect alive while a voice holds it.
++
++Samurai Warriors 4 DX crashed about ten minutes into a stage in
++XAPOFXParams_GetParameters, called from a voice's GetEffectParameters,
++through an effect that had already been freed.
++
++FAPOBase's reference count, which every Wine XAPO effect (reverb,
++volume meter, the XAPOFX effects) shares between the game's references
++and those its voices hold, changed with a plain += and -= while Release
++read it back afterwards. A game that attaches one effect to voices it
++creates and destroys on more than one thread loses updates between them,
++and the count reaches zero while a voice still holds the effect. It now
++changes atomically, as XAPOBase's does on Windows (InterlockedIncrement).
++
++A source or submix voice that FAudio failed to create kept the effect
++chain it had freed, and a mastering voice refused because one is in use
++leaked its chain: the chain is cleared, and freed, in both.
++---
++ dlls/xaudio2_7/xaudio_dll.c |  7 +++++--
++ libs/faudio/src/FAPOBase.c  | 15 +++++++++------
++ 2 files changed, 14 insertions(+), 8 deletions(-)
++
++diff --git a/dlls/xaudio2_7/xaudio_dll.c b/dlls/xaudio2_7/xaudio_dll.c
++index 2c42a99..cea309e 100644
++--- a/dlls/xaudio2_7/xaudio_dll.c
+++++ b/dlls/xaudio2_7/xaudio_dll.c
++@@ -1655,8 +1655,9 @@ static HRESULT WINAPI IXAudio2Impl_CreateSourceVoice(IXAudio2 *iface,
++             src->effect_chain);
++     free_voice_sends(faudio_sends);
++     if(FAILED(hr)){
++-        LeaveCriticalSection(&src->lock);
++         free_effect_chain(src->effect_chain);
+++        src->effect_chain = NULL;
+++        LeaveCriticalSection(&src->lock);
++         return hr;
++     }
++     src->in_use = TRUE;
++@@ -1717,8 +1718,9 @@ static HRESULT WINAPI IXAudio2Impl_CreateSubmixVoice(IXAudio2 *iface,
++             sub->effect_chain);
++     free_voice_sends(faudio_sends);
++     if(FAILED(hr)){
++-        LeaveCriticalSection(&sub->lock);
++         free_effect_chain(sub->effect_chain);
+++        sub->effect_chain = NULL;
+++        LeaveCriticalSection(&sub->lock);
++         return hr;
++     }
++     sub->in_use = TRUE;
++@@ -1767,6 +1769,7 @@ static HRESULT WINAPI IXAudio2Impl_CreateMasteringVoice(IXAudio2 *iface,
++     if(This->mst.in_use){
++         LeaveCriticalSection(&This->mst.lock);
++         LeaveCriticalSection(&This->lock);
+++        free_effect_chain(chain);
++         return COMPAT_E_INVALID_CALL;
++     }
++ 
++diff --git a/libs/faudio/src/FAPOBase.c b/libs/faudio/src/FAPOBase.c
++index 27a98e1..289445b 100644
++--- a/libs/faudio/src/FAPOBase.c
+++++ b/libs/faudio/src/FAPOBase.c
++@@ -104,21 +104,24 @@ void CreateFAPOBaseWithCustomAllocatorEXT(
++ 	fapo->m_lReferenceCount = 1;
++ }
++ 
+++/* The count changes atomically, as XAPOBase's does with InterlockedIncrement:
+++ * a game can attach one effect to voices it creates and destroys on several
+++ * threads, and an update lost between them frees the effect while a voice
+++ * still holds it.
+++ */
++ int32_t FAPOBase_AddRef(FAPOBase *fapo)
++ {
++-	fapo->m_lReferenceCount += 1;
++-	return fapo->m_lReferenceCount;
+++	return __atomic_add_fetch(&fapo->m_lReferenceCount, 1, __ATOMIC_SEQ_CST);
++ }
++ 
++ int32_t FAPOBase_Release(FAPOBase *fapo)
++ {
++-	fapo->m_lReferenceCount -= 1;
++-	if (fapo->m_lReferenceCount == 0)
+++	int32_t ref = __atomic_sub_fetch(&fapo->m_lReferenceCount, 1, __ATOMIC_SEQ_CST);
+++	if (ref == 0)
++ 	{
++ 		fapo->Destructor(fapo);
++-		return 0;
++ 	}
++-	return fapo->m_lReferenceCount;
+++	return ref;
++ }
++ 
++ uint32_t FAPOBase_GetRegistrationProperties(

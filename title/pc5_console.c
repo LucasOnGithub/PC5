@@ -246,7 +246,7 @@ void pc5_console_run(const Pc5Console *config)
     /* A game may have left the light bar or the triggers set: as the console had them. */
     if (pad_status == PW_OK) {
         Pc5GameOps game_ops;
-        Pc5Trigger off = { PC5_TRIGGER_OFF, 0, 0, 0, 0 };
+        Pc5Trigger off = { .mode = PC5_TRIGGER_OFF };
         pc5_game_ps5_ops(&game_ops, plain_log);
         int light = game_ops.light_bar_reset(pad.pad_handle), triggers = game_ops.triggers(pad.pad_handle, &off, &off);
         snprintf(line, sizeof(line), "PC5 controller reset light=%d triggers=%d", light, triggers);

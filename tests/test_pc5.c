@@ -560,7 +560,7 @@ static void test_install(void)
         Pc5Info twelve = info;
         static char text[4096];
         twelve.api = PC5_API_D3D12;
-        CHECK(!pc5_profile_text("twelve", &twelve, "", text, sizeof(text)) &&
+        CHECK(!pc5_profile_text("twelve", &twelve, "", NULL, text, sizeof(text)) &&
               strstr(text, "dll_overrides = d3d8,d3d9,d3d10core,d3d11,d3d12,d3d12core,dxgi=n\n"), "d3d12 overrides");
     }
     /* Changed launch options take effect at the next start. */
@@ -745,6 +745,74 @@ static void press(Pc5Ui *ui, uint32_t key, Pc5Canvas *canvas)
 static void until_screen(Pc5Ui *ui, const char *name, Pc5Canvas *canvas)
 {
     for (int i = 0; i < 20000 && strcmp(pc5_ui_screen(ui), name); i++) frames(ui, 0, 0, 1, canvas);
+}
+
+/* ---- a game's controller ----------------------------------------------------------------------------- */
+
+static void test_controls(void)
+{
+    char dir[PC5_PATH], file[PC5_PATH], text[2048];
+    Pc5Controls k, back;
+    PwGameInput input;
+
+    path(dir, sizeof(dir), "%s/controls-root", work);
+    CHECK(pc5_controls_load(dir, "game", &k) == -1 && k.mode == PC5_PAD_XBOX && k.stick[0] == PC5_STICK_KEYS &&
+              k.stick[1] == PC5_STICK_POINTER && k.speed == 4 && pc5_controls_pixels(&k) == 1200,
+          "the default: the Xbox controller, W A S D and the pointer for keyboard and mouse");
+    CHECK(!strcmp(pc5_keys[k.key[0]].name, "space") && !strcmp(pc5_keys[k.key[7]].name, "mouse_left") &&
+              !strcmp(pc5_keys[k.key[17]].name, "w") && !strcmp(pc5_keys[k.key[20]].name, "d") &&
+              !strcmp(pc5_keys[pc5_key_count - 1].name, "none"),
+          "default keys");
+    CHECK(!pc5_controls_input(&k, text, sizeof(text)) && !strcmp(text, "[input]\nmode = xinput\n"), "xbox: %s", text);
+    k.mode = PC5_PAD_DUALSENSE;
+    CHECK(!pc5_controls_input(&k, text, sizeof(text)) && !strcmp(text, "[input]\nmode = dualsense\n"), "dualsense: %s", text);
+    k.mode = PC5_PAD_KEYBOARD;
+    CHECK(!pc5_controls_input(&k, text, sizeof(text)) && strstr(text, "mode = keyboard\nmouse = right_stick\nmouse_speed = 1200\n") &&
+              strstr(text, "cross = space\n") && strstr(text, "left_stick_up = w\n") && !strstr(text, "right_stick_up"),
+          "keyboard: %s", text);
+    {
+        char small[40];
+        CHECK(pc5_controls_input(&k, small, sizeof(small)) == -1, "too small");
+    }
+    /* What prospero-win makes of it. */
+    pw_game_input_init(&input);
+    CHECK(pw_game_input_parse((const uint8_t *)text, strlen(text), &input) == 0 && input.mode == PW_GAME_INPUT_KEYBOARD &&
+              input.mouse == PW_GAME_STICK_RIGHT && input.bindings[17].code == 'W' && input.bindings[6].kind == PW_GAME_BIND_MOUSE,
+          "prospero-win reads the keyboard layout");
+    /* Every key's name is one prospero-win takes. */
+    for (int i = 0; i < pc5_key_count; i++) {
+        char line[64];
+        PwGameInput one;
+        pw_game_input_init(&one);
+        snprintf(line, sizeof(line), "[input]\ncross = %s\n", pc5_keys[i].name);
+        CHECK(pw_game_input_parse((const uint8_t *)line, strlen(line), &one) == 0, "key %s", pc5_keys[i].name);
+    }
+    /* Kept and read back; one pointer at a time. */
+    k.stick[0] = PC5_STICK_NOTHING;
+    k.speed = 9;
+    k.key[3] = 5;
+    CHECK(!pc5_controls_save(dir, "game", &k) && !pc5_controls_load(dir, "game", &back) && !memcmp(&k, &back, sizeof(k)),
+          "saved and read back");
+    pc5_controls_next_stick(&back, 0, 1);           /* nothing -> keys */
+    CHECK(back.stick[0] == PC5_STICK_KEYS, "nothing, then keys");
+    pc5_controls_next_stick(&back, 0, 1);           /* keys -> pointer: the right stick sends keys */
+    CHECK(back.stick[0] == PC5_STICK_POINTER && back.stick[1] == PC5_STICK_KEYS, "one pointer");
+    CHECK(!pc5_controls_input(&back, text, sizeof(text)) && strstr(text, "mouse = left_stick\n") &&
+              strstr(text, "right_stick_left = left\n") && !strstr(text, "left_stick_up"),
+          "the left stick the pointer: %s", text);
+    pc5_controls_next_stick(&back, 1, -1);          /* keys -> nothing */
+    CHECK(back.stick[1] == PC5_STICK_NOTHING, "back to nothing");
+    /* A file with two pointers, a bad speed and keys PC5 doesn't know keeps the defaults for them. */
+    path(file, sizeof(file), "%s/prefixes/odd/pc5/controls.txt", dir);
+    write_text(file, "mode = keyboard\nleft_stick = pointer\nright_stick = pointer\npointer_speed = 11\n"
+                     "cross = warp\ncircle = f13\nsquare = m\nwhat = a\n");
+    CHECK(!pc5_controls_load(dir, "odd", &back) && back.mode == PC5_PAD_KEYBOARD && back.stick[0] == PC5_STICK_KEYS &&
+              back.stick[1] == PC5_STICK_POINTER && back.speed == 4 && !strcmp(pc5_keys[back.key[0]].name, "space") &&
+              !strcmp(pc5_keys[back.key[1]].name, "ctrl") && !strcmp(pc5_keys[back.key[2]].name, "m"),
+          "an odd file");
+    CHECK(!strcmp(pc5_control_name(0), "Cross") && !strcmp(pc5_control_name(24), "Right stick right") &&
+              !strcmp(pc5_control_name(25), "") && !strcmp(pc5_pad_mode_name(PC5_PAD_DUALSENSE), "DualSense"),
+          "names");
 }
 
 /* ---- settings, updates, logs, covers ---------------------------------------------------------- */
@@ -1126,6 +1194,165 @@ static void test_game(const char *fonts_path)
     pc5_game_pad(&game, 7, 1000, 0);
     CHECK(pad_seen.triggers == 1 && pad_seen.l2.mode == PC5_TRIGGER_VIBRATION, "a rumble before the first tick stays");
     pc5_game_end(&game, 7);
+
+    /* DualSense mode: the game's motors at Vibration's strength, PC5's light bar and triggers until the
+     * game sets its own, then the game's. */
+    set.light_bar = PC5_LIGHT_GAME;
+    set.vibration = 50;
+    pc5_settings_save(game_root, &set);
+    memset(&pad_seen, 0, sizeof(pad_seen));
+    pc5_game_begin(&game, &ops, game_root, app, "liberty", "Liberty Town");
+    pc5_game_pad(&game, 7, 1000, 0);
+    CHECK(pad_seen.triggers == 1 && pad_seen.l2.mode == PC5_TRIGGER_FEEDBACK && pad_seen.lights == 1,
+          "dualsense: PC5's resistance and light bar first");
+    {
+        Pc5PadOutput out;
+        memset(&out, 0, sizeof(out));
+        out.set = PC5_OUTPUT_MOTORS;
+        out.large = 200;
+        pc5_game_output(&game, 7, &out, &large, &small);
+        CHECK(large == 100 && !small && pad_seen.triggers == 2 && pad_seen.l2.mode == PC5_TRIGGER_VIBRATION,
+              "dualsense: the motors at 50 %%, the triggers follow them: %d", large);
+        out.large = 0;
+        pc5_game_output(&game, 7, &out, &large, &small);
+        pc5_game_pad(&game, 7, 1100, 0);
+        CHECK(pad_seen.triggers == 3 && pad_seen.l2.mode == PC5_TRIGGER_FEEDBACK, "dualsense: back to resistance");
+        out.set |= PC5_OUTPUT_LIGHT;
+        out.light = 0x102030;
+        pc5_game_output(&game, 7, &out, &large, &small);
+        CHECK(pad_seen.lights == 2 && pad_seen.light == 0x102030, "dualsense: the game's light bar: %06x",
+              (unsigned)pad_seen.light);
+        pc5_game_output(&game, 7, &out, &large, &small);
+        pc5_game_pad(&game, 7, 1300, 0);
+        pc5_game_pad(&game, 7, 1500, 0xff00ff00u);
+        CHECK(pad_seen.lights == 2, "dualsense: kept, and PC5's light bar stops");
+        out.set |= PC5_OUTPUT_TRIGGERS;
+        out.trigger[1].mode = PC5_TRIGGER_GAME;
+        out.trigger[1].effect = 2;
+        out.trigger[1].data[0] = 2;
+        out.trigger[1].data[1] = 5;
+        out.trigger[1].data[2] = 8;
+        pc5_game_output(&game, 7, &out, &large, &small);
+        CHECK(pad_seen.triggers == 4 && pad_seen.r2.mode == PC5_TRIGGER_GAME && pad_seen.r2.effect == 2 &&
+              pad_seen.r2.data[1] == 5 && pad_seen.l2.mode == PC5_TRIGGER_OFF, "dualsense: the game's trigger effects");
+        pc5_game_output(&game, 7, &out, &large, &small);
+        CHECK(pad_seen.triggers == 4, "dualsense: not sent again while they stay");
+        out.large = 255;
+        out.small = 255;
+        pc5_game_output(&game, 7, &out, &large, &small);
+        pc5_game_pad(&game, 7, 1700, 0);
+        CHECK(large == 127 && small == 127 && pad_seen.triggers == 4,
+              "dualsense: the rumble no longer moves the triggers, nor does the resistance come back");
+        out.trigger[1].data[1] = 6;
+        pc5_game_output(&game, 7, &out, &large, &small);
+        CHECK(pad_seen.triggers == 5 && pad_seen.r2.data[1] == 6, "dualsense: a new effect is sent");
+    }
+    pc5_game_end(&game, 7);
+    CHECK(pad_seen.resets == 1 && pad_seen.r2.mode == PC5_TRIGGER_OFF && pad_seen.triggers == 6,
+          "dualsense: the controller as the console had it at the end");
+}
+
+/* What controls.txt says, as one string. */
+static int controls_has(const char *id, const char *line)
+{
+    char file[PC5_PATH];
+    Pc5Buf text = { 0 };
+    int found;
+    path(file, sizeof(file), "%s/prefixes/%s/pc5/controls.txt", root, id);
+    pc5_read_file(file, &text, 16 * 1024);
+    found = text.len && strstr((char *)text.data, line) != NULL;
+    pc5_buf_free(&text);
+    return found;
+}
+
+/* A game's controller from its menu: the three modes, Button mapping and the key picker. The
+ * library shows the engine game (orbital-nine). */
+static void test_controller_screens(Pc5Ui *ui, Pc5Canvas *canvas)
+{
+    press(ui, PC5_KEY_TRIANGLE, canvas);
+    CHECK(!strcmp(pc5_ui_screen(ui), "game-menu"), "its menu again: %s", pc5_ui_screen(ui));
+    press(ui, PC5_KEY_DOWN, canvas);
+    press(ui, PC5_KEY_RIGHT, canvas);
+    CHECK(controls_has("orbital-nine", "mode = dualsense\n"), "Controller: DualSense");
+    press(ui, PC5_KEY_ACCEPT, canvas);
+    CHECK(controls_has("orbital-nine", "mode = keyboard\n"), "then Keyboard & mouse");
+    press(ui, PC5_KEY_LEFT, canvas);
+    press(ui, PC5_KEY_LEFT, canvas);
+    press(ui, PC5_KEY_LEFT, canvas);
+    CHECK(controls_has("orbital-nine", "mode = keyboard\n"), "round the three, both ways");
+    /* Button mapping, which only Keyboard & mouse has. */
+    press(ui, PC5_KEY_DOWN, canvas);
+    press(ui, PC5_KEY_ACCEPT, canvas);
+    CHECK(!strcmp(pc5_ui_screen(ui), "buttons"), "button mapping: %s", pc5_ui_screen(ui));
+    /* The left stick's up (W) through the key picker: one to the right is X. */
+    press(ui, PC5_KEY_DOWN, canvas);
+    press(ui, PC5_KEY_ACCEPT, canvas);
+    CHECK(!strcmp(pc5_ui_screen(ui), "keys"), "key picker: %s", pc5_ui_screen(ui));
+    press(ui, PC5_KEY_RIGHT, canvas);
+    press(ui, PC5_KEY_ACCEPT, canvas);
+    CHECK(!strcmp(pc5_ui_screen(ui), "buttons") && controls_has("orbital-nine", "left_stick_up = x\n"), "W became X");
+    /* Back from the picker changes nothing; Square sends nothing; left and right step through keys. */
+    press(ui, PC5_KEY_ACCEPT, canvas);
+    press(ui, PC5_KEY_DOWN, canvas);
+    press(ui, PC5_KEY_BACK, canvas);
+    CHECK(controls_has("orbital-nine", "left_stick_up = x\n"), "picker left unchanged");
+    press(ui, PC5_KEY_SQUARE, canvas);
+    CHECK(controls_has("orbital-nine", "left_stick_up = none\n"), "Square: nothing");
+    press(ui, PC5_KEY_DOWN, canvas);
+    press(ui, PC5_KEY_LEFT, canvas);
+    CHECK(controls_has("orbital-nine", "left_stick_down = r\n"), "S stepped back to R");
+    /* The left stick becomes the pointer: the right one sends keys then. */
+    press(ui, PC5_KEY_UP, canvas);
+    press(ui, PC5_KEY_UP, canvas);
+    press(ui, PC5_KEY_RIGHT, canvas);
+    CHECK(controls_has("orbital-nine", "left_stick = pointer\n") && controls_has("orbital-nine", "right_stick = keys\n"),
+          "one pointer at a time");
+    /* Pointer speed, a row below the right stick's four keys. */
+    for (int i = 0; i < 6; i++) press(ui, PC5_KEY_DOWN, canvas);
+    press(ui, PC5_KEY_RIGHT, canvas);
+    CHECK(controls_has("orbital-nine", "pointer_speed = 5\n"), "faster pointer");
+    /* Reset to default, the last row. */
+    for (int i = 0; i < 40; i++) press(ui, PC5_KEY_DOWN, canvas);
+    press(ui, PC5_KEY_ACCEPT, canvas);
+    CHECK(controls_has("orbital-nine", "mode = keyboard\n") && controls_has("orbital-nine", "left_stick = keys\n") &&
+              controls_has("orbital-nine", "right_stick = pointer\n") && controls_has("orbital-nine", "left_stick_up = w\n") &&
+              controls_has("orbital-nine", "pointer_speed = 4\n"),
+          "reset: the default layout, still Keyboard & mouse");
+    /* The touchpad (the row above) sends nothing, the last key, found down the picker's column. */
+    press(ui, PC5_KEY_UP, canvas);
+    press(ui, PC5_KEY_ACCEPT, canvas);
+    for (int i = 0; i < 5; i++) press(ui, PC5_KEY_DOWN, canvas);
+    press(ui, PC5_KEY_ACCEPT, canvas);
+    CHECK(controls_has("orbital-nine", "touchpad = none\n"), "touchpad: nothing");
+    press(ui, PC5_KEY_BACK, canvas);
+    CHECK(!strcmp(pc5_ui_screen(ui), "game-menu"), "back to the menu: %s", pc5_ui_screen(ui));
+    press(ui, PC5_KEY_BACK, canvas);
+    {
+        char error[PC5_ERROR];
+        PwWineLibrary *pw = pc5_alloc(sizeof(*pw));
+        CHECK(!pc5_profile_refresh(root, "orbital-nine", error, sizeof(error)), "profile written");
+        pw_wine_library_load(pw, root);
+        const PwGameProfile *profile = pw_wine_library_find(pw, "orbital-nine");
+        CHECK(profile != NULL, "prospero-win reads it");
+        if (profile) {
+            const PwGameInput *in = &profile->input;
+            CHECK(in->mode == PW_GAME_INPUT_KEYBOARD && in->mouse == PW_GAME_STICK_RIGHT && in->mouse_speed == 1200,
+                  "keyboard, the right stick the pointer: mode %d mouse %d speed %u", (int)in->mode, (int)in->mouse,
+                  in->mouse_speed);
+            CHECK(in->bindings[0].kind == PW_GAME_BIND_KEY && in->bindings[0].code == 0x20, "Cross: space");
+            CHECK(in->bindings[7].kind == PW_GAME_BIND_MOUSE && in->bindings[7].code == 0, "R2: left click");
+            CHECK(in->bindings[17].kind == PW_GAME_BIND_KEY && in->bindings[17].code == 'W', "left stick up: W");
+            CHECK(in->bindings[21].kind == PW_GAME_BIND_UNSET, "the pointer's stick sends no keys");
+            CHECK(in->bindings[16].kind == PW_GAME_BIND_NONE, "the touchpad sends nothing: %d", (int)in->bindings[16].kind);
+        }
+        pc5_free(pw);
+    }
+    /* Back to the Xbox controller, as the tests after this expect. */
+    press(ui, PC5_KEY_TRIANGLE, canvas);
+    press(ui, PC5_KEY_DOWN, canvas);
+    press(ui, PC5_KEY_RIGHT, canvas);
+    CHECK(controls_has("orbital-nine", "mode = xinput\n"), "the Xbox controller again");
+    press(ui, PC5_KEY_BACK, canvas);
 }
 
 static void test_screens(const char *fonts)
@@ -1281,6 +1508,7 @@ static void test_screens(const char *fonts)
     for (int i = 0; i < orbital; i++) press(ui, PC5_KEY_RIGHT, &canvas);
     press(ui, PC5_KEY_TRIANGLE, &canvas);
     CHECK(!strcmp(pc5_ui_screen(ui), "game-menu"), "game menu: %s", pc5_ui_screen(ui));
+    press(ui, PC5_KEY_DOWN, &canvas);       /* past Controller (the Xbox controller: no Button mapping) */
     press(ui, PC5_KEY_DOWN, &canvas);
     press(ui, PC5_KEY_ACCEPT, &canvas);
     until_screen(ui, "programs", &canvas);
@@ -1299,6 +1527,7 @@ static void test_screens(const char *fonts)
         pc5_free(pw);
     }
     press(ui, PC5_KEY_ACCEPT, &canvas);
+    test_controller_screens(ui, &canvas);
 
     /* Several games in a row: two ticked folders, read, then installed one after the other. */
     pc5_library_load(root, &library);
@@ -1350,6 +1579,7 @@ int main(int argc, char **argv)
     test_sources();
     test_install();
     test_uninstall();
+    test_controls();
     test_settings();
     test_update();
     test_logs();

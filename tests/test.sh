@@ -24,7 +24,7 @@ common=(-std=c11 -Wall -Wextra -Wpedantic -Werror -D_DEFAULT_SOURCE -Ititle -I"$
 # PC5's code, with every buffer on the heap so the sanitizers see it, against
 # prospero-win's own profile parser and library loader.
 cc "${common[@]}" -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -DPC5_HEAP_ONLY \
-    tests/test_pc5.c title/pc5_base.c title/pc5_cover.c title/pc5_draw.c title/pc5_game.c title/pc5_image.c title/pc5_json.c \
+    tests/test_pc5.c title/pc5_base.c title/pc5_controls.c title/pc5_cover.c title/pc5_draw.c title/pc5_game.c title/pc5_image.c title/pc5_json.c \
     title/pc5_library.c title/pc5_logs.c title/pc5_matrix.c title/pc5_pe.c title/pc5_settings.c title/pc5_source.c \
     title/pc5_stb.c title/pc5_ui.c title/pc5_update.c \
     "${upstream[@]}" -lm \
@@ -72,7 +72,7 @@ for file in title/pc5*.c; do
 done
 
 if [[ ${1:-} == --shots ]]; then
-    cc "${common[@]}" -O2 tests/shots.c title/pc5_base.c title/pc5_cover.c title/pc5_draw.c title/pc5_game.c \
+    cc "${common[@]}" -O2 tests/shots.c title/pc5_base.c title/pc5_controls.c title/pc5_cover.c title/pc5_draw.c title/pc5_game.c \
         title/pc5_image.c title/pc5_json.c title/pc5_library.c title/pc5_logs.c title/pc5_matrix.c title/pc5_pe.c \
         title/pc5_settings.c title/pc5_source.c title/pc5_stb.c title/pc5_ui.c title/pc5_update.c \
         "${upstream[@]}" -lm -o "$out/draw-shots"

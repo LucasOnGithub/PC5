@@ -102,11 +102,21 @@ static uint8_t trigger_level(int percent)
     return (uint8_t)(level < 1 ? 1 : level > 8 ? 8 : level);
 }
 
-static void set_triggers(Pc5GameSession *game, int pad, const Pc5Trigger *both, const char *why)
+static void set_trigger_pair(Pc5GameSession *game, int pad, const Pc5Trigger *l2, const Pc5Trigger *r2,
+                             const char *why)
 {
     if (!game->ops.triggers || pad < 0) return;
-    int rc = game->ops.triggers(pad, both, both);
-    if (!game->triggers_sent++ || rc) say(game, "PC5 triggers %s mode=%d rc=%d", why, (int)both->mode, rc);
+    int rc = game->ops.triggers(pad, l2, r2);
+    if (game->triggers_sent++ && !rc) return;
+    if (l2->mode == PC5_TRIGGER_GAME || r2->mode == PC5_TRIGGER_GAME)
+        say(game, "PC5 triggers %s effects=%d,%d rc=%d", why, l2->effect, r2->effect, rc);
+    else
+        say(game, "PC5 triggers %s mode=%d rc=%d", why, (int)l2->mode, rc);
+}
+
+static void set_triggers(Pc5GameSession *game, int pad, const Pc5Trigger *both, const char *why)
+{
+    set_trigger_pair(game, pad, both, both, why);
 }
 
 void pc5_game_rumble(Pc5GameSession *game, int pad, uint32_t left, uint32_t right, uint8_t *large, uint8_t *small)
@@ -114,7 +124,8 @@ void pc5_game_rumble(Pc5GameSession *game, int pad, uint32_t left, uint32_t righ
     /* The motors at Vibration's strength (0 % is off). */
     *large = (uint8_t)((left >> 8) * (uint32_t)game->settings.vibration / 100);
     *small = (uint8_t)((right >> 8) * (uint32_t)game->settings.vibration / 100);
-    if (game->settings.triggers == PC5_TRIGGERS_RUMBLE || game->settings.triggers == PC5_TRIGGERS_BOTH) {
+    if (!game->game_triggers &&
+        (game->settings.triggers == PC5_TRIGGERS_RUMBLE || game->settings.triggers == PC5_TRIGGERS_BOTH)) {
         /* The stronger motor's speed as the triggers' amplitude: 1 up to 2, 4, 6
          * or 8 at the triggers' rumble strength (25 to 100 %), 0 when the game
          * stops. Then they are off again, or push back (both). */
@@ -123,29 +134,61 @@ void pc5_game_rumble(Pc5GameSession *game, int pad, uint32_t left, uint32_t righ
         if (amplitude != game->trigger_amplitude) {
             game->trigger_amplitude = amplitude;
             if (amplitude) {
-                Pc5Trigger both = { PC5_TRIGGER_VIBRATION, 2, 0, amplitude, (uint8_t)(left >= right ? 30 : 60) };
+                Pc5Trigger both = { .mode = PC5_TRIGGER_VIBRATION, .position = 2, .amplitude = amplitude,
+                                     .frequency = (uint8_t)(left >= right ? 30 : 60) };
                 game->resistance = 0;   /* not over the rumble */
                 set_triggers(game, pad, &both, "rumble");
             } else if (game->settings.triggers == PC5_TRIGGERS_BOTH) {
                 game->resistance = 1;   /* pc5_game_pad sends it */
             } else {
-                Pc5Trigger off = { PC5_TRIGGER_OFF, 0, 0, 0, 0 };
+                Pc5Trigger off = { .mode = PC5_TRIGGER_OFF };
                 set_triggers(game, pad, &off, "rumble");
             }
         }
     }
 }
 
+static int same_trigger(const Pc5Trigger *a, const Pc5Trigger *b)
+{
+    return a->mode == b->mode && a->effect == b->effect && !memcmp(a->data, b->data, sizeof(a->data));
+}
+
+void pc5_game_output(Pc5GameSession *game, int pad, const Pc5PadOutput *output, uint8_t *large, uint8_t *small)
+{
+    uint32_t light = output->light & 0xffffffu;
+
+    if ((output->set & PC5_OUTPUT_LIGHT) && game->ops.light_bar && pad >= 0 &&
+        (!game->game_light || light != game->light)) {
+        int rc = game->ops.light_bar(pad, light);
+        if (!game->game_light || rc) say(game, "PC5 light bar the game's %06x rc=%d", (unsigned)light, rc);
+        game->game_light = 1;
+        game->light = light;
+        game->light_sent = 1;
+    }
+    if ((output->set & PC5_OUTPUT_TRIGGERS) &&
+        (!game->game_triggers || !same_trigger(&output->trigger[0], &game->game_trigger[0]) ||
+         !same_trigger(&output->trigger[1], &game->game_trigger[1]))) {
+        game->game_triggers = 1;
+        game->resistance = 0;
+        game->trigger_amplitude = 0;
+        game->game_trigger[0] = output->trigger[0];
+        game->game_trigger[1] = output->trigger[1];
+        set_trigger_pair(game, pad, &output->trigger[0], &output->trigger[1], "game");
+    }
+    pc5_game_rumble(game, pad, (uint32_t)output->large * 257u, (uint32_t)output->small * 257u, large, small);
+}
+
 void pc5_game_pad(Pc5GameSession *game, int pad, uint64_t now_ms, uint32_t screen)
 {
     if (pad < 0) return;
-    if (game->resistance) {
+    if (game->resistance && !game->game_triggers) {
         /* Pushing back from a third of the way in, 2 (25 %) to 8 (100 %) firm. */
-        Pc5Trigger both = { PC5_TRIGGER_FEEDBACK, 3, trigger_level(game->settings.trigger_resistance), 0, 0 };
+        Pc5Trigger both = { .mode = PC5_TRIGGER_FEEDBACK, .position = 3,
+                             .strength = trigger_level(game->settings.trigger_resistance) };
         game->resistance = 0;
         set_triggers(game, pad, &both, "resistance");
     }
-    if (game->settings.light_bar == PC5_LIGHT_CONSOLE || !game->ops.light_bar) return;
+    if (game->settings.light_bar == PC5_LIGHT_CONSOLE || !game->ops.light_bar || game->game_light) return;
     if (game->light_at && now_ms - game->light_at < LIGHT_EVERY_MS) return;
     game->light_at = now_ms;
     if (game->settings.light_bar == PC5_LIGHT_SCREEN && screen) game->light_target = bright(screen);
@@ -189,7 +232,7 @@ void pc5_game_hud(Pc5GameSession *game, int videoout, uint64_t frames, uint64_t 
 
 void pc5_game_end(Pc5GameSession *game, int pad)
 {
-    Pc5Trigger off = { PC5_TRIGGER_OFF, 0, 0, 0, 0 };
+    Pc5Trigger off = { .mode = PC5_TRIGGER_OFF };
     if (pad >= 0 && game->triggers_sent && game->ops.triggers) game->ops.triggers(pad, &off, &off);
     if (pad >= 0 && game->light_sent && game->ops.light_bar_reset) game->ops.light_bar_reset(pad);
     pc5_matrix_destroy(game->matrix);

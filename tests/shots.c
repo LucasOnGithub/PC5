@@ -83,7 +83,7 @@ static void make_library(const char *root, int count, int with_covers)
         pc5_info_text(&info, text, sizeof(text));
         fmt(file, sizeof(file), "%s/prefixes/%s/pc5/info.txt", root, id);
         put(file, text);
-        pc5_profile_text(id, &info, "", text, sizeof(text));
+        pc5_profile_text(id, &info, "", NULL, text, sizeof(text));
         fmt(file, sizeof(file), "%s/profiles/%s.profile", root, id);
         put(file, text);
         if (with_covers) {
@@ -222,6 +222,23 @@ int main(int argc, char **argv)
     step(ui, PC5_KEY_TRIANGLE, 1);
     settle(ui);
     save("15-game-menu");
+    /* Its controller: Keyboard & mouse, its buttons, and the key picker. */
+    step(ui, PC5_KEY_DOWN, 1);
+    step(ui, PC5_KEY_LEFT, 1);
+    settle(ui);
+    save("15b-game-menu-keyboard");
+    step(ui, PC5_KEY_DOWN, 1);
+    step(ui, PC5_KEY_ACCEPT, 1);
+    for (int i = 0; i < 7; i++) step(ui, PC5_KEY_DOWN, 1);   /* Cross */
+    settle(ui);
+    save("15c-button-mapping");
+    step(ui, PC5_KEY_ACCEPT, 1);
+    settle(ui);
+    save("15d-key-picker");
+    step(ui, PC5_KEY_BACK, 1);
+    step(ui, PC5_KEY_BACK, 1);
+    step(ui, PC5_KEY_UP, 1);
+    step(ui, PC5_KEY_RIGHT, 1);            /* back to the Xbox controller */
     step(ui, PC5_KEY_BACK, 1);
     step(ui, PC5_KEY_OPTIONS, 1);
     settle(ui);

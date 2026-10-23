@@ -34,13 +34,14 @@ enum { W = 1920, H = 1080, COVER_W = 400, COVER_H = 600, FLOOR_Y = 712, MARGIN =
 typedef enum Screen {
     S_START, S_COVERS, S_LIBRARY, S_SETTINGS, S_ABOUT, S_SCAN, S_SOURCES, S_READING, S_SEARCH, S_REVIEW,
     S_PROGRAMS, S_INSTALL, S_STOP, S_UNINSTALL_LIST, S_UNINSTALL_CONFIRM, S_REMOVING, S_MESSAGE, S_LAUNCH,
-    S_UPDATE, S_CHECKING, S_GAME_MENU, S_GAME_READING, S_QUEUE_READ, S_QUEUE
+    S_UPDATE, S_CHECKING, S_GAME_MENU, S_GAME_READING, S_QUEUE_READ, S_QUEUE, S_BUTTONS, S_KEYS
 } Screen;
 
 static const char *const screen_names[] = { "start", "covers", "library", "settings", "about", "scan", "sources",
                                             "reading", "search", "review", "programs", "install", "stop",
                                             "uninstall-list", "uninstall-confirm", "removing", "message", "launch",
-                                            "update", "checking", "game-menu", "game-reading", "queue-read", "queue" };
+                                            "update", "checking", "game-menu", "game-reading", "queue-read", "queue",
+                                            "buttons", "keys" };
 
 /* One game of several being installed in a row. */
 typedef enum QueueState { Q_WAITING, Q_INSTALLED, Q_FAILED, Q_STOPPED, Q_SKIPPED } QueueState;
@@ -94,6 +95,51 @@ static int page_rows(const Pc5Settings *set, int page, SettingRow rows[PAGE_ROWS
         rows[n++] = SR_KEEP_LOGS;
         rows[n++] = SR_ABOUT;
     }
+    return n;
+}
+
+/* A game's menu: its rows; Button mapping only while it plays the keyboard and mouse. */
+typedef enum GameRow { GR_PLAY, GR_CONTROLLER, GR_BUTTONS, GR_PROGRAM, GR_UNINSTALL } GameRow;
+enum { GAME_ROWS = 5 };
+
+static int game_rows(const Pc5Controls *controls, GameRow rows[GAME_ROWS])
+{
+    int n = 0;
+    rows[n++] = GR_PLAY;
+    rows[n++] = GR_CONTROLLER;
+    if (controls->mode == PC5_PAD_KEYBOARD) rows[n++] = GR_BUTTONS;
+    rows[n++] = GR_PROGRAM;
+    rows[n++] = GR_UNINSTALL;
+    return n;
+}
+
+static int game_row_at(const Pc5Controls *controls, GameRow row)
+{
+    GameRow rows[GAME_ROWS];
+    int n = game_rows(controls, rows);
+    for (int i = 0; i < n; i++)
+        if (rows[i] == row) return i;
+    return 0;
+}
+
+/* Button mapping: the sticks (with their four keys while they send keys), the
+ * pointer's speed while a stick moves it, the buttons, and the default layout. */
+typedef enum PadRowKind { PR_STICK, PR_DIRECTION, PR_SPEED, PR_BUTTON, PR_RESET } PadRowKind;
+typedef struct PadRow { PadRowKind kind; int index; } PadRow;
+enum { PAD_ROWS = 32, PAD_VISIBLE = 10, PAD_PITCH = 74, KEY_COLS = 8 };
+
+static int pad_rows(const Pc5Controls *controls, PadRow rows[PAD_ROWS])
+{
+    int n = 0;
+    for (int stick = 0; stick < 2; stick++) {
+        rows[n++] = (PadRow){ PR_STICK, stick };
+        if (controls->stick[stick] == PC5_STICK_KEYS)
+            for (int d = 0; d < 4; d++) rows[n++] = (PadRow){ PR_DIRECTION, PC5_STICK_FIRST + 4 * stick + d };
+    }
+    if (controls->stick[0] == PC5_STICK_POINTER || controls->stick[1] == PC5_STICK_POINTER)
+        rows[n++] = (PadRow){ PR_SPEED, 0 };
+    for (int button = 0; button < PC5_BUTTONS; button++) rows[n++] = (PadRow){ PR_BUTTON, button };
+    rows[n++] = (PadRow){ PR_RESET, 0 };
     return n;
 }
 
@@ -166,6 +212,9 @@ struct Pc5Ui {
 
     Pc5Settings settings;
     int page;                      /* Settings: 0 its first page, 1 In games, 2 Updates */
+    Pc5Controls controls;          /* the controller of the game in launch_id (its menu) */
+    int pad_row, pad_top;          /* Button mapping: the row chosen, the first one shown */
+    int key_control, key_choice;   /* the key picker: for which control, the key chosen */
     Pc5UpdateMemory update;
     Pc5LogIssue issue;             /* what went wrong last time, told once the library shows */
     int issue_pending;
@@ -1037,6 +1086,44 @@ static int setting_change(Pc5Ui *ui, SettingRow row, int step)
     return 1;
 }
 
+/* The game's controller, kept after every change (it reaches the game's profile at its next start). */
+static void controls_changed(Pc5Ui *ui)
+{
+    const Pc5Controls *k = &ui->controls;
+    if (pc5_controls_save(ui->root, ui->launch_id, k)) say(ui, "PC5 problem controls %s: can't write them", ui->launch_id);
+    say(ui, "PC5 controls id=%s mode=%s left=%s right=%s speed=%d", ui->launch_id, pc5_pad_mode_name(k->mode),
+        pc5_stick_use_name(k->stick[0]), pc5_stick_use_name(k->stick[1]), k->speed);
+}
+
+/* A Button mapping row moves to its next (step 1) or previous (-1) value: 1 when it changed. */
+static int pad_change(Pc5Ui *ui, PadRow row, int step)
+{
+    Pc5Controls *k = &ui->controls;
+    switch (row.kind) {
+    case PR_STICK: pc5_controls_next_stick(k, row.index, step); return 1;
+    case PR_SPEED: {
+        int speed = k->speed + (step < 0 ? -1 : 1);
+        if (speed < 1 || speed > PC5_SPEEDS) return 0;
+        k->speed = speed;
+        return 1;
+    }
+    case PR_BUTTON:
+    case PR_DIRECTION:
+        k->key[row.index] = (uint8_t)((k->key[row.index] + pc5_key_count + (step < 0 ? -1 : 1)) % pc5_key_count);
+        return 1;
+    default: return 0;
+    }
+}
+
+/* A game's menu, with its controller as PC5 kept it. */
+static void game_menu_open(Pc5Ui *ui, const char *id)
+{
+    pc5_copy(ui->launch_id, sizeof(ui->launch_id), id);
+    pc5_controls_load(ui->root, id, &ui->controls);
+    ui->menu = 0;
+    go(ui, S_GAME_MENU);
+}
+
 static void settings_open(Pc5Ui *ui, int page, int row)
 {
     ui->page = page;
@@ -1203,9 +1290,7 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
                     message(ui, 0, title, body, S_LIBRARY);
                 }
             } else if (k & PC5_KEY_TRIANGLE) {
-                pc5_copy(ui->launch_id, sizeof(ui->launch_id), ui->library.games[ui->selected].id);
-                ui->menu = 0;
-                go(ui, S_GAME_MENU);
+                game_menu_open(ui, ui->library.games[ui->selected].id);
             }
         }
         if (k & PC5_KEY_OPTIONS) settings_open(ui, 0, 0);
@@ -1384,7 +1469,10 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
     }
     case S_PROGRAMS:
         if (list_move(&ui->menu, ui->folder.exe_count, k)) ui->dirty = 1;
-        if (k & back) go(ui, ui->program_for ? S_GAME_MENU : S_REVIEW);
+        if (k & back) {
+            if (ui->program_for) ui->menu = game_row_at(&ui->controls, GR_PROGRAM);
+            go(ui, ui->program_for ? S_GAME_MENU : S_REVIEW);
+        }
         else if (k & accept) {
             if (!ui->program_for) {
                 ui->exe = ui->menu;
@@ -1409,17 +1497,29 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
         }
         break;
     case S_GAME_MENU: {
-        int index = pc5_library_find(&ui->library, ui->launch_id), rows = 3;
+        int index = pc5_library_find(&ui->library, ui->launch_id);
+        GameRow rows[GAME_ROWS];
+        int count = game_rows(&ui->controls, rows);
         if (index < 0) { go(ui, S_LIBRARY); break; }
         const Pc5Game *game = &ui->library.games[index];
-        if (list_move(&ui->menu, rows, k)) ui->dirty = 1;
+        if (ui->menu >= count) ui->menu = count - 1;
+        if (list_move(&ui->menu, count, k)) ui->dirty = 1;
+        GameRow row = rows[ui->menu];
         if (k & (back | PC5_KEY_TRIANGLE)) go(ui, S_LIBRARY);
-        else if (k & accept) {
-            if (ui->menu == 0) {
+        else if ((k & (PC5_KEY_LEFT | PC5_KEY_RIGHT | accept)) && row == GR_CONTROLLER) {
+            int step = (k & PC5_KEY_LEFT) ? -1 : 1;
+            ui->controls.mode = (Pc5PadMode)((ui->controls.mode + PC5_PAD_MODES + step) % PC5_PAD_MODES);
+            controls_changed(ui);
+            ui->dirty = 1;
+        } else if (k & accept) {
+            if (row == GR_PLAY) {
                 if (game->playable) go(ui, S_LAUNCH);
                 else message(ui, 0, "This game can't start", game->problem[0] ? game->problem : "Something it needs is missing.",
                              S_GAME_MENU);
-            } else if (ui->menu == 1) {
+            } else if (row == GR_BUTTONS) {
+                ui->pad_row = ui->pad_top = 0;
+                go(ui, S_BUTTONS);
+            } else if (row == GR_PROGRAM) {
                 if (!game->pc5) message(ui, 0, "PC5 didn't install this game",
                                         "Its program is set in its prospero-win profile.", S_GAME_MENU);
                 else go(ui, S_GAME_READING);
@@ -1429,6 +1529,67 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
                 ui->uninstall_back = S_GAME_MENU;
                 go(ui, S_UNINSTALL_CONFIRM);
             }
+        }
+        break;
+    }
+    case S_BUTTONS: {
+        PadRow rows[PAD_ROWS];
+        int count = pad_rows(&ui->controls, rows), changed = 0;
+        if (ui->pad_row >= count) ui->pad_row = count - 1;
+        if (list_move(&ui->pad_row, count, k)) ui->dirty = 1;
+        PadRow row = rows[ui->pad_row];
+        int bindable = row.kind == PR_BUTTON || row.kind == PR_DIRECTION;
+        if (k & back) {
+            ui->menu = game_row_at(&ui->controls, GR_BUTTONS);
+            go(ui, S_GAME_MENU);
+        } else if (k & (PC5_KEY_LEFT | PC5_KEY_RIGHT)) {
+            changed = pad_change(ui, row, (k & PC5_KEY_LEFT) ? -1 : 1);
+        } else if ((k & PC5_KEY_SQUARE) && bindable) {
+            ui->controls.key[row.index] = (uint8_t)(pc5_key_count - 1);   /* Nothing */
+            changed = 1;
+        } else if (k & accept) {
+            if (bindable) {
+                ui->key_control = row.index;
+                ui->key_choice = ui->controls.key[row.index] % pc5_key_count;
+                go(ui, S_KEYS);
+            } else if (row.kind == PR_RESET) {
+                Pc5PadMode mode = ui->controls.mode;
+                pc5_controls_default(&ui->controls);
+                ui->controls.mode = mode;
+                changed = 1;
+            } else if (row.kind == PR_SPEED) {
+                ui->controls.speed = ui->controls.speed % PC5_SPEEDS + 1;
+                changed = 1;
+            } else {
+                changed = pad_change(ui, row, 1);
+            }
+        }
+        if (changed) {
+            controls_changed(ui);
+            ui->dirty = 1;
+        }
+        count = pad_rows(&ui->controls, rows);
+        if (ui->pad_row >= count) ui->pad_row = count - 1;
+        if (ui->pad_row < ui->pad_top) ui->pad_top = ui->pad_row;
+        if (ui->pad_row >= ui->pad_top + PAD_VISIBLE) ui->pad_top = ui->pad_row - PAD_VISIBLE + 1;
+        if (ui->pad_top > count - PAD_VISIBLE) ui->pad_top = count > PAD_VISIBLE ? count - PAD_VISIBLE : 0;
+        break;
+    }
+    case S_KEYS: {
+        int before = ui->key_choice, n = pc5_key_count;
+        if ((k & PC5_KEY_LEFT) && ui->key_choice % KEY_COLS) ui->key_choice--;
+        if ((k & PC5_KEY_RIGHT) && ui->key_choice % KEY_COLS < KEY_COLS - 1 && ui->key_choice + 1 < n) ui->key_choice++;
+        if ((k & PC5_KEY_UP) && ui->key_choice >= KEY_COLS) ui->key_choice -= KEY_COLS;
+        if (k & PC5_KEY_DOWN) {
+            if (ui->key_choice + KEY_COLS < n) ui->key_choice += KEY_COLS;
+            else if (ui->key_choice / KEY_COLS < (n - 1) / KEY_COLS) ui->key_choice = n - 1;
+        }
+        if (ui->key_choice != before) ui->dirty = 1;
+        if (k & back) go(ui, S_BUTTONS);
+        else if (k & accept) {
+            ui->controls.key[ui->key_control] = (uint8_t)ui->key_choice;
+            controls_changed(ui);
+            go(ui, S_BUTTONS);
         }
         break;
     }
@@ -1493,11 +1654,11 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
     case S_UNINSTALL_CONFIRM:
         if (k & (PC5_KEY_LEFT | PC5_KEY_RIGHT)) { ui->button = !ui->button; ui->dirty = 1; }
         if (k & back) {
-            if (ui->uninstall_back == S_GAME_MENU) ui->menu = 2;
+            if (ui->uninstall_back == S_GAME_MENU) ui->menu = game_row_at(&ui->controls, GR_UNINSTALL);
             go(ui, ui->uninstall_back);
         } else if ((k & accept) && ui->now - ui->entered > 400) {
             if (!ui->button) {
-                if (ui->uninstall_back == S_GAME_MENU) ui->menu = 2;
+                if (ui->uninstall_back == S_GAME_MENU) ui->menu = game_row_at(&ui->controls, GR_UNINSTALL);
                 go(ui, ui->uninstall_back);
             } else {
                 const Pc5Game *game = &ui->library.games[ui->menu];
@@ -1856,16 +2017,120 @@ static void game_menu_screen(Pc5Ui *ui, Pc5Canvas *c, int chosen)
     float x = drawer(ui, c, game->title);
     char about[200];
 
+    GameRow rows[GAME_ROWS];
+    int count = game_rows(&ui->controls, rows);
+
     pc5_text(c, &ui->fonts, PC5_FACE_SMALL, (int)x + 64, 182, C_DIM, game->playable ? game->detail : game->problem, 760 - 128, 0);
-    drawer_row(ui, c, x, 226, 118, chosen == 0, "Play", "To leave it, hold the touchpad and OPTIONS for 2 s", "");
-    {
-        const char *exe = strrchr(game->executable, '\\');
-        snprintf(about, sizeof(about), "Now: %s", exe ? exe + 1 : game->executable);
+    for (int i = 0; i < count; i++) {
+        float y = 226 + 118 * i;
+        switch (rows[i]) {
+        case GR_PLAY:
+            drawer_row(ui, c, x, y, 118, chosen == i, "Play", "To leave it, hold the touchpad and OPTIONS for 2 s", "");
+            break;
+        case GR_CONTROLLER:
+            drawer_row(ui, c, x, y, 118, chosen == i, "Controller",
+                       ui->controls.mode == PC5_PAD_DUALSENSE ? "The game sees a DualSense, as one plugged into a PC"
+                       : ui->controls.mode == PC5_PAD_KEYBOARD ? "The buttons press keys, the sticks move the mouse"
+                                                               : "Games with controller support see an Xbox controller",
+                       pc5_pad_mode_name(ui->controls.mode));
+            break;
+        case GR_BUTTONS:
+            drawer_row(ui, c, x, y, 118, chosen == i, "Button mapping", "The key or mouse button each one sends",
+                       "\xe2\x80\xba");
+            break;
+        case GR_PROGRAM: {
+            const char *exe = strrchr(game->executable, '\\');
+            snprintf(about, sizeof(about), "Now: %s", exe ? exe + 1 : game->executable);
+            drawer_row(ui, c, x, y, 118, chosen == i, "Change program", about, "");
+            break;
+        }
+        case GR_UNINSTALL:
+            drawer_row(ui, c, x, y, 118, chosen == i, "Uninstall", "Deletes the game with its saves and settings", "");
+            break;
+        }
     }
-    drawer_row(ui, c, x, 226 + 118, 118, chosen == 1, "Change program", about, "");
-    drawer_row(ui, c, x, 226 + 236, 118, chosen == 2, "Uninstall", "Deletes the game with its saves and settings", "");
-    Hint list[] = { { accept_glyph(ui), "Choose" }, { back_glyph(ui), "Back" } };
+    Hint list[] = { { accept_glyph(ui), chosen < count && rows[chosen] == GR_CONTROLLER ? "Change" : "Choose" },
+                    { back_glyph(ui), "Back" } };
     hints(ui, c, (int)x + 64, 1012, list, 2);
+}
+
+/* Button mapping: what each button and stick does while the game plays the keyboard and mouse. */
+static void buttons_screen(Pc5Ui *ui, Pc5Canvas *c)
+{
+    float x = drawer(ui, c, "Button mapping");
+    PadRow rows[PAD_ROWS];
+    int count = pad_rows(&ui->controls, rows);
+    const Pc5Controls *k = &ui->controls;
+
+    pc5_text(c, &ui->fonts, PC5_FACE_SMALL, (int)x + 64, 182, C_DIM,
+             "Touchpad + OPTIONS for 2 s still leaves the game", 760 - 128, 0);
+    for (int i = ui->pad_top; i < count && i < ui->pad_top + PAD_VISIBLE; i++) {
+        float y = 214 + PAD_PITCH * (i - ui->pad_top);
+        char label[64], value[64];
+        PadRow row = rows[i];
+        value[0] = 0;
+        switch (row.kind) {
+        case PR_STICK:
+            pc5_copy(label, sizeof(label), row.index ? "Right stick" : "Left stick");
+            pc5_copy(value, sizeof(value), pc5_stick_use_name(k->stick[row.index]));
+            break;
+        case PR_DIRECTION:
+            snprintf(label, sizeof(label), "    %s", pc5_control_name(row.index));
+            pc5_copy(value, sizeof(value), pc5_key_label(k->key[row.index]));
+            break;
+        case PR_SPEED:
+            pc5_copy(label, sizeof(label), "Pointer speed");
+            snprintf(value, sizeof(value), "%d of %d", k->speed, PC5_SPEEDS);
+            break;
+        case PR_BUTTON:
+            pc5_copy(label, sizeof(label), pc5_control_name(row.index));
+            pc5_copy(value, sizeof(value), pc5_key_label(k->key[row.index]));
+            break;
+        case PR_RESET:
+            pc5_copy(label, sizeof(label), "Reset to default");
+            break;
+        }
+        drawer_row(ui, c, x, y, PAD_PITCH, i == ui->pad_row, label, NULL, value);
+    }
+    /* More above or below. */
+    if (ui->pad_top > 0) pc5_text(c, &ui->fonts, PC5_FACE_SMALL, (int)x + 760 - 72, 206, C_FAINT, "\xe2\x80\xa6", 0, 2);
+    if (ui->pad_top + PAD_VISIBLE < count)
+        pc5_text(c, &ui->fonts, PC5_FACE_SMALL, (int)x + 760 - 72, 214 + PAD_PITCH * PAD_VISIBLE + 4, C_FAINT,
+                 "\xe2\x80\xa6", 0, 2);
+    PadRow row = rows[ui->pad_row < count ? ui->pad_row : 0];
+    int bindable = row.kind == PR_BUTTON || row.kind == PR_DIRECTION;
+    Hint list[] = { { accept_glyph(ui), bindable ? "Choose a key" : row.kind == PR_RESET ? "Reset" : "Change" },
+                    { G_SQUARE, "Nothing" }, { back_glyph(ui), "Back" } };
+    if (bindable) hints(ui, c, (int)x + 64, 1012, list, 3);
+    else {
+        list[1] = list[2];
+        hints(ui, c, (int)x + 64, 1012, list, 2);
+    }
+}
+
+/* The key picker: every key, mouse button and Nothing, eight across. */
+static void keys_dialog(Pc5Ui *ui, Pc5Canvas *c)
+{
+    const float cell_w = 176, cell_h = 54, gap = 10;
+    int rows = (pc5_key_count + KEY_COLS - 1) / KEY_COLS;
+    float w = KEY_COLS * (cell_w + gap) - gap + 120, h = 150 + rows * (cell_h + gap) - gap + 110;
+    float x = (W - w) / 2, y = (H - h) / 2;
+    char title[96];
+
+    dim(c, 150);
+    panel(c, x, y, w, h);
+    snprintf(title, sizeof(title), "What %s sends", pc5_control_name(ui->key_control));
+    pc5_text(c, &ui->fonts, PC5_FACE_HEAD, (int)x + 60, (int)y + 92, C_TEXT, title, (int)w - 120, 0);
+    for (int i = 0; i < pc5_key_count; i++) {
+        float cx = x + 60 + (i % KEY_COLS) * (cell_w + gap), cy = y + 140 + (i / KEY_COLS) * (cell_h + gap);
+        int chosen = i == ui->key_choice, now = i == ui->controls.key[ui->key_control];
+        pc5_round_rect(c, cx, cy, cell_w, cell_h, 12, chosen ? C_TEXT : C_ROW);
+        if (now && !chosen) pc5_round_frame(c, cx, cy, cell_w, cell_h, 12, 2.5f, C_ACCENT);
+        pc5_text(c, &ui->fonts, PC5_FACE_SMALL, (int)(cx + cell_w / 2), (int)cy + 36, chosen ? C_PANEL : C_TEXT,
+                 pc5_key_label(i), (int)cell_w - 16, 1);
+    }
+    Hint list[] = { { accept_glyph(ui), "Choose" }, { back_glyph(ui), "Back" } };
+    hints(ui, c, (int)x + 60, (int)(y + h - 40), list, 2);
 }
 
 static void about_screen(Pc5Ui *ui, Pc5Canvas *c)
@@ -2215,6 +2480,8 @@ void pc5_ui_draw(Pc5Ui *ui, Pc5Canvas *c)
     case S_SETTINGS: settings_screen(ui, c); break;
     case S_CHECKING: settings_screen(ui, c); busy_dialog(ui, c, "Checking for a newer PC5", "Asking GitHub", 0); break;
     case S_GAME_MENU: game_menu_screen(ui, c, ui->menu); break;
+    case S_BUTTONS: buttons_screen(ui, c); break;
+    case S_KEYS: buttons_screen(ui, c); keys_dialog(ui, c); break;
     case S_GAME_READING: {
         int index = pc5_library_find(&ui->library, ui->launch_id);
         snprintf(line, sizeof(line), "Reading %s", index >= 0 ? ui->library.games[index].title : "the game");
@@ -2293,7 +2560,7 @@ void pc5_ui_draw(Pc5Ui *ui, Pc5Canvas *c)
     }
     case S_UNINSTALL_CONFIRM: {
         const Pc5Game *game = &ui->library.games[ui->menu];
-        if (ui->uninstall_back == S_GAME_MENU) game_menu_screen(ui, c, 2);
+        if (ui->uninstall_back == S_GAME_MENU) game_menu_screen(ui, c, game_row_at(&ui->controls, GR_UNINSTALL));
         snprintf(line, sizeof(line), "Uninstall %s?", game->title);
         confirm_dialog(ui, c, line,
                        "This deletes the game and all its saves and settings. There is no backup and no undo.",

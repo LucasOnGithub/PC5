@@ -16,6 +16,7 @@
 #ifndef PC5_LIBRARY_H
 #define PC5_LIBRARY_H
 #include "pc5.h"
+#include "pc5_controls.h"
 #include "pc5_pe.h"
 #include "pc5_source.h"
 
@@ -56,7 +57,8 @@ int pc5_library_find(const Pc5Library *library, const char *id);
 int pc5_info_read(const char *root, const char *id, Pc5Info *info);
 int pc5_info_text(const Pc5Info *info, char *out, size_t size);
 /* The profile prospero-win reads for a PC5 game; arguments may be "". */
-int pc5_profile_text(const char *id, const Pc5Info *info, const char *arguments, char *out, size_t size);
+int pc5_profile_text(const char *id, const Pc5Info *info, const char *arguments, const Pc5Controls *controls, char *out,
+                     size_t size);
 /* Writes the game's profile again, with the launch options in launch.txt
  * beside its program (so options can be changed without reinstalling). */
 int pc5_profile_refresh(const char *root, const char *id, char *error, size_t size);

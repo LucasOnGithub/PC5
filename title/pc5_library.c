@@ -123,9 +123,11 @@ static void windows_path(const char *folder, const char *relative, int keep_file
     else snprintf(out, size, "C:\\Games\\%s", folder);
 }
 
-int pc5_profile_text(const char *id, const Pc5Info *info, const char *arguments, char *out, size_t size)
+int pc5_profile_text(const char *id, const Pc5Info *info, const char *arguments, const Pc5Controls *controls, char *out,
+                     size_t size)
 {
-    char exe[PC5_PATH + 32], cwd[PC5_PATH + 32], options[600] = "";
+    char exe[PC5_PATH + 32], cwd[PC5_PATH + 32], options[600] = "", input[1600];
+    Pc5Controls defaults;
     const char *graphics = info->api == PC5_API_OPENGL ? "opengl" : info->api <= PC5_API_DDRAW ? "gdi" : "dxvk";
     /* Direct3D 8 to 11 and DXGI through DXVK, as prospero-win's own profiles. Direct3D 12
      * through VKD3D-Proton only for a game whose program draws with it; any other game gets
@@ -139,6 +141,11 @@ int pc5_profile_text(const char *id, const Pc5Info *info, const char *arguments,
     windows_path(info->folder, info->exe, 0, cwd, sizeof(cwd));
     if (strlen(exe) >= 260) return -1;
     if (arguments && arguments[0]) snprintf(options, sizeof(options), "arguments = %s\n", arguments);
+    if (!controls) {
+        pc5_controls_default(&defaults);
+        controls = &defaults;
+    }
+    if (pc5_controls_input(controls, input, sizeof(input))) return -1;
     return pc5_format(out, size,
         "; %s, installed by PC5 from the folder \"%s\".\n"
         "; PC5 writes this file again each time the game starts: launch options go in\n"
@@ -159,10 +166,9 @@ int pc5_profile_text(const char *id, const Pc5Info *info, const char *arguments,
         "desktop = 1920x1080\n"
         "show_fps = false\n"
         "\n"
-        "[input]\n"
-        "mode = xinput\n",
+        "%s",
         info->title, info->folder, id, info->title, exe, cwd, options, overrides, id,
-        info->bits == 64 ? "pe64" : "pe32", graphics);
+        info->bits == 64 ? "pe64" : "pe32", graphics, input);
 }
 
 /* The first line of launch.txt that says something: launch options. */
@@ -266,6 +272,7 @@ static int index_update(const char *root, const char *file, int add)
 int pc5_profile_refresh(const char *root, const char *id, char *error, size_t size)
 {
     Pc5Info info;
+    Pc5Controls controls;
     char arguments[512], path[PC5_PATH], file[PC5_ID + 16];
     static char text[4096];
     Pc5Buf old = { 0 };
@@ -276,8 +283,9 @@ int pc5_profile_refresh(const char *root, const char *id, char *error, size_t si
         return -1;
     }
     launch_options(root, id, &info, arguments, sizeof(arguments));
+    pc5_controls_load(root, id, &controls);
     snprintf(file, sizeof(file), "%s.profile", id);
-    if (pc5_profile_text(id, &info, arguments, text, sizeof(text)) ||
+    if (pc5_profile_text(id, &info, arguments, &controls, text, sizeof(text)) ||
         pc5_format(path, sizeof(path), "%s/profiles/%s", root, file)) {
         snprintf(error, size, "The game's path is too long for Windows.");
         return -1;
