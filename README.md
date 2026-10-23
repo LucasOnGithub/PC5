@@ -7,7 +7,13 @@ saves. It runs the games with [prospero-win](https://github.com/mpereiraesaa/pro
 (Wine on the PS5). 
 
 No game is part of PC5, and PC5 downloads none: you install the games you own.
-
+<p align="right">
+  <a href="https://www.buymeacoffee.com/bornaradusin">
+    <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png"
+         alt="Buy Me a Coffee"
+         width="140">
+  </a>
+</p>
 ## Using it
 
 1. Copy the `PPSA11018` folder to the console the way you add any homebrew app, and start
