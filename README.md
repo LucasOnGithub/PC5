@@ -137,52 +137,6 @@ Games already in `/data/prospero-win` (installed some other way) show up in PC5 
 a cover the first time PC5 opens. An install or uninstall cut short (the console switched
 off) is finished, by deleting, the next time PC5 starts.
 
-## Building
-
-On **Debian 13 or Ubuntu 24.04** (x86-64), as root:
-
-```sh
-apt-get install -y $(cat tools/packages.txt)
-tools/build.sh
-```
-
-The app is `release/PPSA11018/` and `release/PPSA11018.zip`, with the source of everything in
-it as `release/PPSA11018-sources.tar.xz`; or all three in the folder `PC5_RELEASE` names
-(`PC5_RELEASE=/mnt/media/builder/releases/PC5 tools/build.sh`). Everything else the build
-makes stays in the repo's `.build/`. Each step prints one line and writes
-`.build/logs/<step>.log`; run one step again with `tools/build.sh <step>`. Elsewhere the
-script runs itself in Docker (`tools/Dockerfile`). A first build takes a few hours, most of
-it Wine; Zink's link wants about 8 GB of memory per job (`PC5_ZINK_JOBS`, default 2).
-
-`tests/test.sh` runs the host checks (after `tools/build.sh sources`); `tests/test.sh
---shots` also draws every screen into `.build/tests/shots/` with made-up games.
-`tests/PS5-CHECKLIST.md` is what to try on a console.
-
-**Releasing**: the update check reads the newest release of
-<https://github.com/bornaradusin/PC5>, by its tag (`v1.0.0`, `v1.1.0`, …). Publish each
-version as a GitHub release with that tag, with `PPSA11018.zip` and
-`PPSA11018-sources.tar.xz` attached, and raise `PC5_VERSION` in `title/pc5.h` and
-`contentVersion` in `sce_sys/param.json` with it.
-
-## How it is made
-
-- `title/`: PC5's own code, plain C built into prospero-win's title: the screens
-  (`pc5_ui.c`, drawn on the CPU by `pc5_draw.c`), the library, installing and uninstalling
-  (`pc5_library.c`), USB folders (`pc5_source.c`), reading Windows programs (`pc5_pe.c`),
-  covers (`pc5_cover.c`, `pc5_image.c`, `pc5_json.c`), HTTPS on Mbed TLS (`pc5_net.c`),
-  settings, updates and logs (`pc5_settings.c`, `pc5_update.c`, `pc5_logs.c`), the game's
-  side (`pc5_game.c`, the loading screen `pc5_matrix.c`) and the console's
-  (`pc5_console.c`, `pc5_net_ps5.c`, `pc5_game_ps5.c`).
-- `patches/prospero-win/`: patches to prospero-win v0.2.0, so its title shows PC5
-  instead of its launcher, holds 128 games, gives each game the PS5's language and its own
-  shader cache, and applies PC5's settings in games (with libvulkan's frame counter and
-  screen colour); the sticks' directions as keys; the DualSense a game finds as on a PC
-  (Wine's xinput makes it in the game's process); and Wine's XAudio2 keeping an effect
-  alive while a voice holds it.
-- `tools/`: the build, the Windows template (`make-prefix.py`), the font atlas
-  (`make-font.py`) and the app (`make-app.py`). `art/make-art.py` draws the icon and the
-  Home background.
-
 ## Credits and licence
 
 PC5's own code is free software under the GNU LGPL 2.1 or later (`LICENSE`), like
