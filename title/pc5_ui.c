@@ -61,36 +61,44 @@ typedef struct QueueGame {
     char id[PC5_ID], error[PC5_ERROR];
 } QueueGame;
 
-/* Settings: its rows, on three pages. */
+/* Settings: its rows, on four pages. */
 typedef enum SettingRow {
-    SR_INSTALL, SR_UNINSTALL, SR_GAMES, SR_UPDATES, SR_KEEP_LOGS, SR_ABOUT,
-    SR_FPS, SR_FPS_CORNER, SR_VIBRATION, SR_LIGHT, SR_TRIGGERS, SR_TRIGGER_RUMBLE, SR_TRIGGER_RESISTANCE,
+    SR_INSTALL, SR_UNINSTALL, SR_GAMES, SR_OVERLAY, SR_UPDATES, SR_KEEP_LOGS, SR_ABOUT,
+    SR_FPS, SR_FRAME_TIME, SR_CPU_USAGE, SR_CPU_TEMPERATURE, SR_SOC_TEMPERATURE, SR_MEMORY, SR_FPS_CORNER,
+    SR_VIBRATION, SR_LIGHT, SR_TRIGGERS, SR_TRIGGER_RUMBLE, SR_TRIGGER_RESISTANCE,
     SR_CHECK_ON_OPEN, SR_CHECK_NOW
 } SettingRow;
 
-enum { PAGE_ROWS = 7 };
-static const char *const page_titles[3] = { "Settings", "In games", "Updates" };
+enum { PAGE_ROWS = 7, PAGE_GAMES = 1, PAGE_UPDATES = 2, PAGE_OVERLAY = 3 };
+static const char *const page_titles[4] = { "Settings", "In games", "Updates", "Overlay" };
 
 /* A page's rows: the triggers' strengths only while they are used. */
 static int page_rows(const Pc5Settings *set, int page, SettingRow rows[PAGE_ROWS])
 {
     int n = 0;
-    if (page == 1) {
+    if (page == PAGE_OVERLAY) {
         rows[n++] = SR_FPS;
+        rows[n++] = SR_FRAME_TIME;
+        rows[n++] = SR_CPU_USAGE;
+        rows[n++] = SR_CPU_TEMPERATURE;
+        rows[n++] = SR_SOC_TEMPERATURE;
+        rows[n++] = SR_MEMORY;
         rows[n++] = SR_FPS_CORNER;
+    } else if (page == PAGE_GAMES) {
         rows[n++] = SR_VIBRATION;
         rows[n++] = SR_LIGHT;
         rows[n++] = SR_TRIGGERS;
         if (set->triggers == PC5_TRIGGERS_RUMBLE || set->triggers == PC5_TRIGGERS_BOTH) rows[n++] = SR_TRIGGER_RUMBLE;
         if (set->triggers == PC5_TRIGGERS_RESISTANCE || set->triggers == PC5_TRIGGERS_BOTH)
             rows[n++] = SR_TRIGGER_RESISTANCE;
-    } else if (page == 2) {
+    } else if (page == PAGE_UPDATES) {
         rows[n++] = SR_CHECK_ON_OPEN;
         rows[n++] = SR_CHECK_NOW;
     } else {
         rows[n++] = SR_INSTALL;
         rows[n++] = SR_UNINSTALL;
         rows[n++] = SR_GAMES;
+        rows[n++] = SR_OVERLAY;
         rows[n++] = SR_UPDATES;
         rows[n++] = SR_KEEP_LOGS;
         rows[n++] = SR_ABOUT;
@@ -992,7 +1000,12 @@ static void setting_text(Pc5Ui *ui, SettingRow row, const char **label, char *ab
         break;
     case SR_GAMES:
         *label = "In games";
-        pc5_copy(about, about_size, "FPS counter, vibration, light bar and triggers");
+        pc5_copy(about, about_size, "Vibration, light bar and triggers");
+        pc5_copy(value, value_size, "\xe2\x80\xba");
+        break;
+    case SR_OVERLAY:
+        *label = "Overlay";
+        pc5_copy(about, about_size, "FPS, frame time, CPU, temperatures and memory");
         pc5_copy(value, value_size, "\xe2\x80\xba");
         break;
     case SR_UPDATES:
@@ -1012,12 +1025,37 @@ static void setting_text(Pc5Ui *ui, SettingRow row, const char **label, char *ab
         break;
     case SR_FPS:
         *label = "Show FPS";
-        pc5_copy(about, about_size, "A frame counter over every game");
+        pc5_copy(about, about_size, "Frames shown each second");
         pc5_copy(value, value_size, set->fps ? "On" : "Off");
         break;
+    case SR_FRAME_TIME:
+        *label = "Frame time";
+        pc5_copy(about, about_size, "How long a frame takes, on average, in milliseconds");
+        pc5_copy(value, value_size, set->frame_time ? "On" : "Off");
+        break;
+    case SR_CPU_USAGE:
+        *label = "CPU usage";
+        pc5_copy(about, about_size, "How much of the console's CPU the game uses");
+        pc5_copy(value, value_size, set->cpu_usage ? "On" : "Off");
+        break;
+    case SR_CPU_TEMPERATURE:
+        *label = "CPU temperature";
+        pc5_copy(about, about_size, "In degrees Celsius");
+        pc5_copy(value, value_size, set->cpu_temperature ? "On" : "Off");
+        break;
+    case SR_SOC_TEMPERATURE:
+        *label = "SoC temperature";
+        pc5_copy(about, about_size, "The console chip's, in degrees Celsius");
+        pc5_copy(value, value_size, set->soc_temperature ? "On" : "Off");
+        break;
+    case SR_MEMORY:
+        *label = "Memory";
+        pc5_copy(about, about_size, "What the game uses, of what it has, in GB");
+        pc5_copy(value, value_size, set->memory ? "On" : "Off");
+        break;
     case SR_FPS_CORNER:
-        *label = "FPS corner";
-        pc5_copy(about, about_size, "Where the counter sits on the screen");
+        *label = "Corner";
+        pc5_copy(about, about_size, "Where the overlay sits on the screen");
         pc5_copy(value, value_size, pc5_corner_name(set->fps_corner));
         break;
     case SR_VIBRATION:
@@ -1070,6 +1108,11 @@ static int setting_change(Pc5Ui *ui, SettingRow row, int step)
     switch (row) {
     case SR_KEEP_LOGS: set->keep_logs = !set->keep_logs; break;
     case SR_FPS: set->fps = !set->fps; break;
+    case SR_FRAME_TIME: set->frame_time = !set->frame_time; break;
+    case SR_CPU_USAGE: set->cpu_usage = !set->cpu_usage; break;
+    case SR_CPU_TEMPERATURE: set->cpu_temperature = !set->cpu_temperature; break;
+    case SR_SOC_TEMPERATURE: set->soc_temperature = !set->soc_temperature; break;
+    case SR_MEMORY: set->memory = !set->memory; break;
     case SR_FPS_CORNER: set->fps_corner = (Pc5Corner)((set->fps_corner + PC5_CORNERS + step) % PC5_CORNERS); break;
     case SR_VIBRATION: set->vibration = pc5_strength_next(set->vibration, 0, step); break;
     case SR_TRIGGER_RUMBLE: set->trigger_rumble = pc5_strength_next(set->trigger_rumble, 25, step); break;
@@ -1080,9 +1123,11 @@ static int setting_change(Pc5Ui *ui, SettingRow row, int step)
     default: return 0;
     }
     if (pc5_settings_save(ui->root, set)) say(ui, "PC5 problem settings: can't write them");
-    say(ui, "PC5 settings fps=%d corner=%d vibration=%d light=%d triggers=%d trigger_rumble=%d trigger_resistance=%d "
-        "updates=%d keep_logs=%d", set->fps, (int)set->fps_corner, set->vibration, (int)set->light_bar, (int)set->triggers,
-        set->trigger_rumble, set->trigger_resistance, set->check_updates, set->keep_logs);
+    say(ui, "PC5 settings fps=%d frame_time=%d cpu=%d cpu_temp=%d soc_temp=%d memory=%d corner=%d vibration=%d light=%d "
+        "triggers=%d trigger_rumble=%d trigger_resistance=%d updates=%d keep_logs=%d", set->fps, set->frame_time,
+        set->cpu_usage, set->cpu_temperature, set->soc_temperature, set->memory, (int)set->fps_corner, set->vibration,
+        (int)set->light_bar, (int)set->triggers, set->trigger_rumble, set->trigger_resistance, set->check_updates,
+        set->keep_logs);
     return 1;
 }
 
@@ -1309,8 +1354,9 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
         } else if (k & PC5_KEY_OPTIONS) {
             go(ui, S_LIBRARY);
         } else if (k & back) {
-            if (ui->page == 1) settings_open(ui, 0, 2);
-            else if (ui->page == 2) settings_open(ui, 0, 3);
+            if (ui->page == PAGE_GAMES) settings_open(ui, 0, 2);
+            else if (ui->page == PAGE_OVERLAY) settings_open(ui, 0, 3);
+            else if (ui->page == PAGE_UPDATES) settings_open(ui, 0, 4);
             else go(ui, S_LIBRARY);
         } else if (k & accept) {
             switch (row) {
@@ -1320,8 +1366,9 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
                 ui->list_top = 0;
                 go(ui, S_UNINSTALL_LIST);
                 break;
-            case SR_GAMES: settings_open(ui, 1, 0); break;
-            case SR_UPDATES: settings_open(ui, 2, 0); break;
+            case SR_GAMES: settings_open(ui, PAGE_GAMES, 0); break;
+            case SR_OVERLAY: settings_open(ui, PAGE_OVERLAY, 0); break;
+            case SR_UPDATES: settings_open(ui, PAGE_UPDATES, 0); break;
             case SR_ABOUT: go(ui, S_ABOUT); break;
             case SR_CHECK_NOW: go(ui, S_CHECKING); break;
             default: if (setting_change(ui, row, 1)) ui->dirty = 1; break;
@@ -1332,10 +1379,10 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
     case S_CHECKING:
         if (!ui->drawn) break;
         update_check_now(ui);
-        settings_open(ui, 2, 1);
+        settings_open(ui, PAGE_UPDATES, 1);
         break;
     case S_ABOUT:
-        if (k & (back | accept)) settings_open(ui, 0, 5);
+        if (k & (back | accept)) settings_open(ui, 0, 6);
         break;
     case S_SCAN:
         if (!ui->drawn) break;
@@ -1998,13 +2045,12 @@ static void settings_screen(Pc5Ui *ui, Pc5Canvas *c)
         setting_text(ui, rows[i], &label, about, sizeof(about), value, sizeof(value));
         drawer_row(ui, c, x, 196 + pitch * i, pitch, i == ui->menu, label, about, value);
     }
-    if (ui->page == 2 && ui->update.last.state == PC5_UPDATE_AVAILABLE)
+    if (ui->page == PAGE_UPDATES && ui->update.last.state == PC5_UPDATE_AVAILABLE)
         pc5_text_wrap(c, &ui->fonts, PC5_FACE_BODY, (int)x + 72, 196 + (int)pitch * count + 60, 760 - 144, 4, 42, C_DIM,
                       "Get it from github.com/bornaradusin/PC5 (Releases) and copy it to the console the way you "
                       "added PC5. Your games, saves and settings stay.", 0);
     SettingRow row = rows[ui->menu < count ? ui->menu : 0];
-    int changes = row == SR_KEEP_LOGS || row == SR_FPS || row == SR_FPS_CORNER || row == SR_VIBRATION || row == SR_LIGHT ||
-                  row == SR_TRIGGERS || row == SR_TRIGGER_RUMBLE || row == SR_TRIGGER_RESISTANCE || row == SR_CHECK_ON_OPEN;
+    int changes = row == SR_KEEP_LOGS || (row >= SR_FPS && row <= SR_TRIGGER_RESISTANCE) || row == SR_CHECK_ON_OPEN;
     Hint list[] = { { accept_glyph(ui), changes ? "Change" : "Choose" }, { back_glyph(ui), "Back" } };
     hints(ui, c, (int)x + 64, 1012, list, 2);
 }

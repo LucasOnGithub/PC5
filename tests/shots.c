@@ -246,8 +246,6 @@ int main(int argc, char **argv)
     step(ui, PC5_KEY_DOWN, 1);
     step(ui, PC5_KEY_DOWN, 1);
     step(ui, PC5_KEY_ACCEPT, 1);           /* In games */
-    step(ui, PC5_KEY_ACCEPT, 1);           /* Show FPS on */
-    step(ui, PC5_KEY_DOWN, 1);
     step(ui, PC5_KEY_DOWN, 1);
     step(ui, PC5_KEY_DOWN, 1);
     settle(ui);
@@ -258,6 +256,16 @@ int main(int argc, char **argv)
     step(ui, PC5_KEY_LEFT, 1);             /* trigger rumble: 75 % */
     settle(ui);
     save("07d-settings-trigger-strengths");
+    step(ui, PC5_KEY_BACK, 1);
+    step(ui, PC5_KEY_DOWN, 1);             /* Overlay */
+    step(ui, PC5_KEY_ACCEPT, 1);
+    step(ui, PC5_KEY_ACCEPT, 1);           /* Show FPS on */
+    for (int i = 0; i < 5; i++) {          /* and every line after it */
+        step(ui, PC5_KEY_DOWN, 1);
+        step(ui, PC5_KEY_ACCEPT, 1);
+    }
+    settle(ui);
+    save("07e-settings-overlay");
     step(ui, PC5_KEY_BACK, 1);
     step(ui, PC5_KEY_DOWN, 1);             /* Updates */
     step(ui, PC5_KEY_ACCEPT, 1);
@@ -270,7 +278,7 @@ int main(int argc, char **argv)
     settle(ui);
     save("08-about");
     step(ui, PC5_KEY_BACK, 1);
-    for (int i = 0; i < 4; i++) step(ui, PC5_KEY_UP, 1);
+    for (int i = 0; i < 5; i++) step(ui, PC5_KEY_UP, 1);
     step(ui, PC5_KEY_ACCEPT, 1);           /* Uninstall game */
     settle(ui);
     for (int i = 0; i < 3; i++) { step(ui, PC5_KEY_DOWN, 1); step(ui, 0, 2); }

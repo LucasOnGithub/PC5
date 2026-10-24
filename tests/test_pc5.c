@@ -824,11 +824,15 @@ static void test_settings(void)
 
     path(dir, sizeof(dir), "%s/settings-root", work);
     pc5_mkdirs(dir);
-    CHECK(pc5_settings_load(dir, &set) == -1 && !set.fps && set.vibration == 100 && set.check_updates && !set.keep_logs &&
+    CHECK(pc5_settings_load(dir, &set) == -1 && !set.fps && !set.frame_time && !set.cpu_usage && !set.cpu_temperature &&
+          !set.soc_temperature && !set.memory && !pc5_game_overlay_lines(&set) && set.vibration == 100 &&
+          set.check_updates && !set.keep_logs &&
           set.fps_corner == PC5_CORNER_TOP_RIGHT && set.light_bar == PC5_LIGHT_GAME && set.triggers == PC5_TRIGGERS_OFF &&
           set.trigger_rumble == 100 && set.trigger_resistance == 50,
           "defaults without a file");
     set.fps = 1;
+    set.cpu_usage = 1;
+    set.soc_temperature = 1;
     set.fps_corner = PC5_CORNER_BOTTOM_LEFT;
     set.vibration = 0;
     set.light_bar = PC5_LIGHT_SCREEN;
@@ -849,6 +853,11 @@ static void test_settings(void)
     CHECK(!pc5_settings_load(dir, &back) && back.vibration == 100, "an earlier PC5's vibration = on is 100 %%");
     write_text(file, "vibration = 75\ntrigger_rumble = 50\n");
     CHECK(!pc5_settings_load(dir, &back) && back.vibration == 75 && back.trigger_rumble == 50, "strengths read");
+    write_text(file, "frame_time = on\ncpu_usage = on\ncpu_temperature = on\nsoc_temperature = yes\nmemory = on\n");
+    CHECK(!pc5_settings_load(dir, &back) && !back.fps && back.frame_time && back.cpu_usage && back.cpu_temperature &&
+          !back.soc_temperature && back.memory &&
+          pc5_game_overlay_lines(&back) == (PW_PC5_HUD_FRAME_TIME | PW_PC5_HUD_CPU | PW_PC5_HUD_CPU_TEMP | PW_PC5_HUD_MEMORY),
+          "the overlay's lines read, each on its own: %#x", pc5_game_overlay_lines(&back));
     CHECK(pc5_strength_next(100, 0, 1) == 0 && pc5_strength_next(0, 0, -1) == 100 && pc5_strength_next(25, 25, -1) == 100 &&
           pc5_strength_next(100, 25, 1) == 25 && pc5_strength_next(50, 25, 1) == 75 && pc5_strength_next(50, 0, -1) == 25,
           "strength steps");
@@ -1053,10 +1062,30 @@ static int fake_cursor(int videoout, const uint32_t *image, uint32_t x, uint32_t
     return 0;
 }
 
+/* The overlay's numbers: a process that has used 4 of 16 CPUs since, a
+ * CPU at 61 degrees, a chip whose sensor can't be read, 5.1 of 12.5 GiB. */
+static struct { uint64_t cpu_us; int soc_rc; int memory_rc; } measured;
+static uint64_t fake_cpu_time_us(void) { return measured.cpu_us; }
+static unsigned fake_cpu_count(void) { return 16; }
+static int fake_temperature(int sensor, int *celsius)
+{
+    if (sensor) return measured.soc_rc;
+    *celsius = 61;
+    return 0;
+}
+static int fake_memory(uint64_t *used, uint64_t *total)
+{
+    *used = ((uint64_t)51 << 30) / 10;
+    *total = ((uint64_t)125 << 30) / 10;
+    return measured.memory_rc;
+}
+
 static void test_game(const char *fonts_path)
 {
     char game_root[PC5_PATH], app[PC5_PATH], file[PC5_PATH];
-    const Pc5GameOps ops = { fake_light, fake_light_reset, fake_triggers, fake_cursor, NULL };
+    const Pc5GameOps ops = { .light_bar = fake_light, .light_bar_reset = fake_light_reset, .triggers = fake_triggers,
+                             .cursor = fake_cursor, .cpu_time_us = fake_cpu_time_us, .cpu_count = fake_cpu_count,
+                             .temperature = fake_temperature, .memory = fake_memory };
     Pc5GameSession game;
     Pc5Settings set;
     uint8_t large, small;
@@ -1129,6 +1158,48 @@ static void test_game(const char *fonts_path)
         int lit = 0;
         for (int i = 0; i < 64 * 40; i++) lit += pad_seen.cursor_image[i] == 0xffffffffu;
         CHECK(lit > 100 && !pad_seen.cursor_image[63 * 64], "its digits drawn, the bottom clear: %d", lit);
+    }
+    /* The whole overlay: what PC5 measures once a second, a line each;
+     * the chip's sensor can't be read, so its line is left out. */
+    {
+        PwPc5HudStats stats;
+        game.settings.frame_time = game.settings.cpu_usage = game.settings.cpu_temperature = 1;
+        game.settings.soc_temperature = game.settings.memory = 1;
+        measured.cpu_us = 1000000;
+        measured.soc_rc = (int)0x80020002u;
+        game.stats_at = 0;
+        CHECK(pc5_game_overlay_sample(&game, 50000, &stats) && stats.cpu_percent == -1 && stats.cpu_celsius == 61 &&
+              stats.soc_celsius == -1 && stats.memory_total == ((uint64_t)125 << 30) / 10,
+              "first sample: cpu %d%% cpu %d soc %d", stats.cpu_percent, stats.cpu_celsius, stats.soc_celsius);
+        CHECK(!pc5_game_overlay_sample(&game, 50500, &stats), "not twice a second");
+        measured.cpu_us += 4000000;     /* 4 CPUs' worth in a second, of 16 */
+        CHECK(pc5_game_overlay_sample(&game, 51000, &stats) && stats.cpu_percent == 25, "cpu %d%%", stats.cpu_percent);
+        measured.memory_rc = -1;
+        CHECK(pc5_game_overlay_sample(&game, 52000, &stats) && !stats.memory_total, "memory unknown: left out");
+        measured.memory_rc = 0;
+        game.hud_second_at = 0;
+        pad_seen.cursors = 0;
+        pc5_game_hud(&game, 3, 0, 60000);
+        pc5_game_hud(&game, 3, 30, 61000);
+        /* FPS, MS, CPU, CPU temperature, RAM: 5 lines, a box 51 high */
+        CHECK(pad_seen.cursors == 1 && pad_seen.cursor_x == 1920 - 64 - 24 && pad_seen.cursor_y == 1080 - 51 - 24,
+              "overlay at %u,%u", pad_seen.cursor_x, pad_seen.cursor_y);
+        int white = 0, label = 0;
+        for (int i = 0; i < 64 * 64; i++) {
+            white += pad_seen.cursor_image[i] == 0xffffffffu;
+            label += pad_seen.cursor_image[i] == 0xff9aa3afu;
+        }
+        CHECK(white > 150 && label > 100 && !pad_seen.cursor_image[60 * 64 + 32], "its lines drawn: %d %d", white, label);
+        game.settings.fps = game.settings.frame_time = game.settings.cpu_usage = game.settings.memory = 0;
+        game.settings.cpu_temperature = 0;   /* the chip alone, which can't be read: nothing shown */
+        pad_seen.cursors = 0;
+        pc5_game_hud(&game, 3, 60, 62000);
+        CHECK(pad_seen.cursors == 1 && pad_seen.cursor_x == 0 && pad_seen.cursor_y == 0, "hidden while it has no line");
+        game.settings.soc_temperature = 0;
+        pad_seen.cursors = 0;
+        pc5_game_hud(&game, 3, 90, 63000);
+        CHECK(!pad_seen.cursors, "off");
+        game.settings.fps = 1;
     }
     /* The loading screen: a frame every 50 ms, green code and the name. */
     const uint32_t *frame = NULL;
@@ -1441,10 +1512,6 @@ static void test_screens(const char *fonts)
     press(ui, PC5_KEY_DOWN, &canvas);
     press(ui, PC5_KEY_DOWN, &canvas);
     press(ui, PC5_KEY_ACCEPT, &canvas);      /* In games */
-    press(ui, PC5_KEY_ACCEPT, &canvas);      /* Show FPS: on */
-    press(ui, PC5_KEY_DOWN, &canvas);
-    press(ui, PC5_KEY_RIGHT, &canvas);       /* corner: top right -> bottom left */
-    press(ui, PC5_KEY_DOWN, &canvas);
     press(ui, PC5_KEY_DOWN, &canvas);
     press(ui, PC5_KEY_LEFT, &canvas);        /* light bar: game -> console */
     press(ui, PC5_KEY_UP, &canvas);
@@ -1460,12 +1527,10 @@ static void test_screens(const char *fonts)
     {
         Pc5Settings set;
         pc5_settings_load(root, &set);
-        CHECK(set.fps && set.fps_corner == PC5_CORNER_BOTTOM_LEFT && set.light_bar == PC5_LIGHT_CONSOLE &&
-              set.vibration == 75 && set.triggers == PC5_TRIGGERS_BOTH && set.trigger_rumble == 75 &&
-              set.trigger_resistance == 75,
-              "settings saved: fps=%d corner=%d light=%d vibration=%d triggers=%d rumble=%d resistance=%d", set.fps,
-              (int)set.fps_corner, (int)set.light_bar, set.vibration, (int)set.triggers, set.trigger_rumble,
-              set.trigger_resistance);
+        CHECK(!set.fps && set.light_bar == PC5_LIGHT_CONSOLE && set.vibration == 75 && set.triggers == PC5_TRIGGERS_BOTH &&
+              set.trigger_rumble == 75 && set.trigger_resistance == 75,
+              "settings saved: fps=%d light=%d vibration=%d triggers=%d rumble=%d resistance=%d", set.fps,
+              (int)set.light_bar, set.vibration, (int)set.triggers, set.trigger_rumble, set.trigger_resistance);
     }
     /* Off again, then rumble: only its own strength shows. */
     press(ui, PC5_KEY_UP, &canvas);
@@ -1483,9 +1548,32 @@ static void test_screens(const char *fonts)
               "a strength row only while it is used: triggers=%d rumble=%d resistance=%d", (int)set.triggers,
               set.trigger_rumble, set.trigger_resistance);
     }
-    /* Updates: Check now finds a newer PC5 and says so once, with the console's notification. */
+    /* Overlay: its lines, each on its own, and the corner. */
     press(ui, PC5_KEY_BACK, &canvas);
     CHECK(!strcmp(pc5_ui_screen(ui), "settings"), "back to the first page");
+    press(ui, PC5_KEY_DOWN, &canvas);        /* Overlay */
+    press(ui, PC5_KEY_ACCEPT, &canvas);
+    press(ui, PC5_KEY_ACCEPT, &canvas);      /* Show FPS: on */
+    press(ui, PC5_KEY_DOWN, &canvas);
+    press(ui, PC5_KEY_RIGHT, &canvas);       /* Frame time: on */
+    for (int i = 0; i < 4; i++) press(ui, PC5_KEY_DOWN, &canvas);
+    press(ui, PC5_KEY_ACCEPT, &canvas);      /* Memory: on */
+    press(ui, PC5_KEY_DOWN, &canvas);
+    press(ui, PC5_KEY_RIGHT, &canvas);       /* corner: top right -> bottom left */
+    press(ui, PC5_KEY_DOWN, &canvas);        /* the last row: still the corner */
+    {
+        Pc5Settings set;
+        pc5_settings_load(root, &set);
+        CHECK(set.fps && set.frame_time && !set.cpu_usage && !set.cpu_temperature && !set.soc_temperature && set.memory &&
+              set.fps_corner == PC5_CORNER_BOTTOM_LEFT,
+              "overlay saved: fps=%d frame_time=%d cpu=%d cpu_temp=%d soc_temp=%d memory=%d corner=%d", set.fps,
+              set.frame_time, set.cpu_usage, set.cpu_temperature, set.soc_temperature, set.memory, (int)set.fps_corner);
+        CHECK(pc5_game_overlay_lines(&set) == (PW_PC5_HUD_FPS | PW_PC5_HUD_FRAME_TIME | PW_PC5_HUD_MEMORY),
+              "its lines: %#x", pc5_game_overlay_lines(&set));
+    }
+    /* Updates: Check now finds a newer PC5 and says so once, with the console's notification. */
+    press(ui, PC5_KEY_BACK, &canvas);
+    CHECK(!strcmp(pc5_ui_screen(ui), "settings"), "back to the first page, on Overlay");
     press(ui, PC5_KEY_DOWN, &canvas);        /* Updates */
     press(ui, PC5_KEY_ACCEPT, &canvas);
     press(ui, PC5_KEY_DOWN, &canvas);        /* Check now */

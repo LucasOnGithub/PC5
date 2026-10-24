@@ -13,7 +13,7 @@ with `PC5 `.
 | 1 | Replace the `PPSA11018` folder with the new one, start PC5 | the tile shows the tower without lettering; the library | `PC5 start version=1.1.0 …`, `PC5 controller reset light=0 triggers=0` |
 | 2 | Options › About PC5 | version 1.1.0 and the free space | |
 | 3 | Options › Updates | "No PC5 release is published on GitHub yet" (until there is one) | `PC5 update state=2` (2: none published) |
-| 4 | Options › In games: turn Show FPS on, pick a corner, change Vibration, Light bar and Adaptive triggers | the values change and stay after restarting PC5; Trigger rumble / Trigger resistance appear only with their effect on | `PC5 settings fps=1 …`; `/data/prospero-win/pc5/settings.txt` |
+| 4 | Options › In games: change Vibration, Light bar and Adaptive triggers; Options › Overlay: turn Show FPS on, pick a corner | the values change and stay after restarting PC5; Trigger rumble / Trigger resistance appear only with their effect on | `PC5 settings fps=1 …`; `/data/prospero-win/pc5/settings.txt` |
 | 5 | Options › Install games from USB, tick two folders with □, press Options | "Getting ready 1 of 2", then the list with covers | `PC5 folder=… queue=1/2`, `PC5 cover choices=… queue=…` |
 | 6 | ✕ on one, L1 / R1, ✕ (Done) | another cover; back to the list | |
 | 7 | Options (Install all) | "Game 1 of 2", "Step 1 of 3 …" with MB/s on every step, then a summary | `PC5 install id=… queue=1/2`, `PC5 queue done installed=2 of=2` |
@@ -25,13 +25,16 @@ with `PC5 `.
 | # | Do | Expect | Expect in the log |
 | --- | --- | --- | --- |
 | 10 | Start GTA IV | green falling code with "Grand Theft Auto IV", then the game | `PC5 game fps=… tint=…`, `PW_WINE64 profile … dll_overrides=d3d8,d3d9,d3d10core,d3d11,dxgi=n;d3d12,d3d12core=b`, no `Unhandled page fault` |
-| 11 | With Show FPS on | the counter in the chosen corner, once the game shows its picture | `PW_WINE64 pc5 vulkan hud=1 tick=1 color=1` |
+| 11 | With Show FPS on | the counter in the chosen corner, once the game shows its picture | `PW_WINE64 pc5 vulkan hud=1 stats=1 tick=1 color=1` |
+| 11b | Overlay: every line on, then start a game | FPS, MS, CPU %, CPU °C, SOC °C and RAM used/total in the chosen corner, updated every second; a line the console can't read is left out | `PC5 overlay lines=0x3f cpus=16 cpu_temp=… rc=0 soc_temp=… rc=0 memory=…M/…M rc=0` |
 | 12 | Light bar: Game's colour, then Follows the screen | the cover's colour; then the screen's, changing with it | `PC5 light bar … rc=0` |
 | 13 | Adaptive triggers: Rumble, then Resistance, then Rumble + resistance | L2/R2 buzz when the game rumbles; then push back; then push back and buzz while it rumbles | `PC5 triggers rumble mode=2 rc=0`, `PC5 triggers resistance mode=1 rc=0` |
 | 14 | Trigger rumble and Trigger resistance at 25 %, then 100 % | a faint buzz and a light push at 25 %; strong at 100 % | `PC5 game … trigger_rumble=25 trigger_resistance=25 …` |
 | 14b | Vibration 25 %, then Off | weaker rumble; then none | `PC5 game … vibration=25 …` |
 | 15 | Hold the touchpad and Options for 2 seconds | a short buzz, the game closes (or is ended after 5 s), PC5 shows | `PW_WINE64 close requested by=combo` |
 | 16 | A game that closes at once (or crashes) | PC5, when it opens, says so and names the kept log | `PC5 logs kept=1 newest=…` |
+| 16b | Start Unrailed 2: Back on Track | it gets past its start to its menu | no `GetComputerName` failure |
+| 16c | Samurai Warriors 4 DX: play a stage for 15 minutes | the sound plays on and the game doesn't crash | no `Unhandled page fault` |
 
 ## Controllers
 
@@ -42,6 +45,7 @@ with `PC5 `.
 | 19 | DualSense, then start a game with DualSense or SDL support (or a DirectInput game) | the game finds a controller and shows PlayStation buttons (an SDL game); the buttons, sticks and triggers work | `PW_WINE64 display … xinput=0 dualsense=1`, `PW_WINE64 dualsense output=1 motion=ok rc=0`, `xinput: the controller is a DualSense (054c:0ce6, …)` |
 | 20 | In that game: something that rumbles, changes the light bar or sets the triggers | the motors at Vibration's strength; the game's colour on the light bar; the game's trigger effects | `PW_WINE64 dualsense output set=…`, `PC5 light bar the game's …`, `PC5 triggers game effects=… rc=0` |
 | 21 | DualSense: the touchpad and tilting the controller in a game that uses them | the game follows the finger and the tilt | |
+| 22 | Xbox controller, then a game that reads controllers through Windows.Gaming.Input (Deep Rock Galactic Survivor, other Unity games) | the game finds the controller: buttons, sticks and triggers work, and its rumble reaches the motors | `PW_WINE64 rumble left=… right=… status=ok` when it rumbles |
 
 A non-zero `rc=` on the light bar or triggers lines means the console refused that call; send
 that log.

@@ -4,15 +4,17 @@
  * at the strength chosen, the light bar in the game's colour or the
  * screen's, the triggers' rumble, resistance or both; in DualSense mode the game's own light bar
  * and trigger effects, once it sets them. The loading screen until the game's first
- * picture (pc5_matrix.h). The frame counter over the frames the title shows
- * itself (a game drawing with Vulkan gets libvulkan's, pw_pc5_hud). The
- * console's calls come through Pc5GameOps (pc5_game_ps5.c), so the host
- * tests can watch them. */
+ * picture (pc5_matrix.h). The overlay (pw_pc5_hud.h): what PC5 measures for
+ * it, and the overlay itself over the frames the title shows itself (a game
+ * drawing with Vulkan gets libvulkan's, pw_pc5_hud). The console's calls
+ * come through Pc5GameOps (pc5_game_ps5.c), so the host tests can watch
+ * them. */
 #ifndef PC5_GAME_H
 #define PC5_GAME_H
 #include "pc5.h"
 #include "pc5_matrix.h"
 #include "pc5_settings.h"
+#include "pw_pc5_hud.h"
 
 typedef enum Pc5TriggerMode {
     PC5_TRIGGER_OFF, PC5_TRIGGER_FEEDBACK, PC5_TRIGGER_VIBRATION,
@@ -50,6 +52,13 @@ typedef struct Pc5GameOps {
      * (x, y), or hidden (image NULL). */
     int (*cursor)(int videoout, const uint32_t *image, uint32_t x, uint32_t y);
     void (*log)(const char *line);
+    /* The overlay's numbers: the process's CPU time (microseconds) and the
+     * CPUs it has; a temperature in degrees (sensor 0 the CPU, 1 the chip)
+     * and the memory in use of the whole a game has (bytes), 0 when read. */
+    uint64_t (*cpu_time_us)(void);
+    unsigned (*cpu_count)(void);
+    int (*temperature)(int sensor, int *celsius);
+    int (*memory)(uint64_t *used, uint64_t *total);
 } Pc5GameOps;
 
 typedef struct Pc5GameSession {
@@ -68,6 +77,9 @@ typedef struct Pc5GameSession {
     int matrix_failed;
     int hud_shown;
     uint64_t hud_second_at, hud_second_frames;
+    PwPc5HudStats stats;          /* what PC5 measured last for the overlay */
+    uint64_t stats_at, stats_cpu_us;
+    int stats_logged;
 } Pc5GameSession;
 
 /* At the game's start: PC5's settings and the game's cover colour, from
@@ -91,8 +103,15 @@ void pc5_game_output(Pc5GameSession *game, int pad, const Pc5PadOutput *output, 
 /* Every tick of the title's loop: the light bar (screen: the colour of the
  * frame on screen, 0 when unknown), the triggers' resistance. */
 void pc5_game_pad(Pc5GameSession *game, int pad, uint64_t now_ms, uint32_t screen);
-/* Every tick while the title shows the frames itself: frames is how many it
- * has shown. */
+/* The overlay's lines the settings turn on (PW_PC5_HUD_*), 0 for none. */
+unsigned pc5_game_overlay_lines(const Pc5Settings *settings);
+/* Every tick while the overlay is on: what PC5 measures for it, once a
+ * second (the game's share of every CPU since the last time, the CPU's and
+ * the chip's temperatures, the memory in use), with the lines on: 1 when
+ * stats has new numbers. */
+int pc5_game_overlay_sample(Pc5GameSession *game, uint64_t now_ms, PwPc5HudStats *stats);
+/* Every tick while the title shows the frames itself: the overlay, once a
+ * second; frames is how many it has shown. */
 void pc5_game_hud(Pc5GameSession *game, int videoout, uint64_t frames, uint64_t now_ms);
 /* The game has ended: the controller as the console had it. */
 void pc5_game_end(Pc5GameSession *game, int pad);

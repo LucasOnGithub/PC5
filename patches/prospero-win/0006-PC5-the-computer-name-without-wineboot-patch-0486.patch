@@ -1,0 +1,110 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bornaradusin <bornaradusin@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 00:46:06 +0100
+Subject: [PATCH] PC5: the computer name without wineboot (patch 0486)
+
+Unrailed 2: Back on Track stopped at its start on the console:
+GetComputerNameW failed with ERROR_FILE_NOT_FOUND. The NetBIOS name is
+read from ActiveComputerName, a volatile key wineboot writes at each
+start, and wineboot never runs in a title.
+
+Patch 0486: when the key is missing, GetComputerNameExW reads the
+configured name the prefix keeps, as wineboot would have copied it.
+
+Tested on the PC's Wine, 64- and 32-bit: with ActiveComputerName
+deleted, GetComputerNameW and GetComputerNameExW(ComputerNameNetBIOS)
+return the prefix's name.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
+---
+ PUBLICATION_ALLOWLIST.txt                     |  1 +
+ docs/WINE_PS5_BUILD.md                        |  1 +
+ ...e-the-computer-name-without-wineboot.patch | 54 +++++++++++++++++++
+ 3 files changed, 56 insertions(+)
+ create mode 100644 wine/patches/0486-kernelbase-the-computer-name-without-wineboot.patch
+
+diff --git a/PUBLICATION_ALLOWLIST.txt b/PUBLICATION_ALLOWLIST.txt
+index 81c0969..f82d027 100644
+--- a/PUBLICATION_ALLOWLIST.txt
++++ b/PUBLICATION_ALLOWLIST.txt
+@@ -215,6 +215,7 @@ wine/patches/0475-xinput-ps5-the-title-controller-as-a-dualsense.patch
+ wine/patches/0476-ntdll-load-xinput-for-the-dualsense.patch
+ wine/patches/0477-windows-gaming-input-the-title-controller-as-a-gamepad.patch
+ wine/patches/0480-xaudio2-keep-an-effect-alive-while-a-voice-holds-it.patch
++wine/patches/0486-kernelbase-the-computer-name-without-wineboot.patch
+ wine/patches/0560-ntdll-stderr-output-sink.patch
+ wine/patches/0570-ntdll-ps5-reserve-virtual-range.patch
+ wine/patches/0580-ntdll-ps5-config-dir-parent-ownership.patch
+diff --git a/docs/WINE_PS5_BUILD.md b/docs/WINE_PS5_BUILD.md
+index 622a870..5bb839c 100644
+--- a/docs/WINE_PS5_BUILD.md
++++ b/docs/WINE_PS5_BUILD.md
+@@ -89,6 +89,7 @@ before evaluating a candidate built from that cache.
+ | 0476 | `ntdll`: in dualsense mode, xinput1_3 is loaded from the system directory once the main module's dependencies are attached, so the DualSense is there before the game looks |
+ | 0477 | `windows.gaming.input`: in a title, the controller XInput reports is also a Windows.Gaming.Input Gamepad and RawGameController (`045e:028e`), read through xinput's Unix library; it comes and goes with the controller. Elsewhere nothing changes; see [XInput controller](#xinput-controller) |
+ | 0480 | `xaudio2`: FAudio's effect reference count (`FAPOBase`) changes atomically, so an effect shared by voices made and destroyed on several threads is not freed while a voice holds it (Samurai Warriors 4 DX); a voice that failed to be created no longer keeps the effect chain it freed |
++| 0486 | `kernelbase`: `GetComputerNameExW` reads the configured NetBIOS name when `ActiveComputerName` is missing; wineboot writes that volatile key at each start and never runs in a title, so `GetComputerNameW` failed (Unrailed 2: Back on Track) |
+ | 0500 | `ntdll`: signal context at `ucontext`+64 (measured); GS = TEB through `sysarch`; FS stays the libc TLS base, so the syscall dispatcher never switches it; no LDT for WoW64 threads |
+ | 0501 | `ntdll`: a signal's FP state is read at `ucontext`+320, where the PS5 kernel keeps its FXSAVE image (32 bytes past the SDK's `mc_fpstate`), with the XSAVE header and YMM upper halves after it (measured); a handled exception's `CONTEXT` used to carry MXCSR 0 and shifted XMM registers |
+ | 0510 | `ntdll`: 16 KiB host pages under 4 KiB Windows pages, reusing the large-host-page path of `virtual.c` |
+diff --git a/wine/patches/0486-kernelbase-the-computer-name-without-wineboot.patch b/wine/patches/0486-kernelbase-the-computer-name-without-wineboot.patch
+new file mode 100644
+index 0000000..b11bedc
+--- /dev/null
++++ b/wine/patches/0486-kernelbase-the-computer-name-without-wineboot.patch
+@@ -0,0 +1,54 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: bornaradusin <bornaradusin@users.noreply.github.com>
++Date: Sat, 24 Oct 2026 00:50:00 +0100
++Subject: [PATCH] kernelbase: The computer name without wineboot.
++
++Unrailed 2: Back on Track stopped at its start on the console because
++GetComputerNameW failed with ERROR_FILE_NOT_FOUND.
++
++The NetBIOS name is read from the ActiveComputerName key, a volatile key
++wineboot writes from the configured name each time a prefix starts. A
++PS5 title starts no processes, so wineboot never runs there and the key
++is never made. When it is missing, the configured name (ComputerName\
++ComputerName, which the prefix keeps) is read instead, as wineboot
++would have copied it. Where wineboot ran, the key is there and nothing
++changes.
++---
++ dlls/kernelbase/registry.c | 10 +++++++++-
++ 1 file changed, 9 insertions(+), 1 deletion(-)
++
++diff --git a/dlls/kernelbase/registry.c b/dlls/kernelbase/registry.c
++index 7ec30c2..261963a 100644
++--- a/dlls/kernelbase/registry.c
+++++ b/dlls/kernelbase/registry.c
++@@ -3312,6 +3312,7 @@ BOOL WINAPI GetComputerNameExA( COMPUTER_NAME_FORMAT type, char *name, DWORD *le
++ BOOL WINAPI GetComputerNameExW( COMPUTER_NAME_FORMAT type, WCHAR *name, DWORD *len )
++ {
++     const WCHAR *keyname, *valuename;
+++    BOOL netbios = FALSE;
++     LRESULT ret;
++     HKEY key;
++ 
++@@ -3321,6 +3322,7 @@ BOOL WINAPI GetComputerNameExW( COMPUTER_NAME_FORMAT type, WCHAR *name, DWORD *l
++     case ComputerNamePhysicalNetBIOS:
++         keyname = L"System\\CurrentControlSet\\Control\\ComputerName\\ActiveComputerName";
++         valuename = L"ComputerName";
+++        netbios = TRUE;
++         break;
++     case ComputerNameDnsHostname:
++     case ComputerNamePhysicalDnsHostname:
++@@ -3360,7 +3362,13 @@ BOOL WINAPI GetComputerNameExW( COMPUTER_NAME_FORMAT type, WCHAR *name, DWORD *l
++         return FALSE;
++     }
++ 
++-    if (!(ret = RegOpenKeyExW( HKEY_LOCAL_MACHINE, keyname, 0, KEY_READ, &key )))
+++    ret = RegOpenKeyExW( HKEY_LOCAL_MACHINE, keyname, 0, KEY_READ, &key );
+++    /* wineboot sets the active name at each start; where it cannot run (a
+++     * PS5 title starts no processes) the configured name is the active one */
+++    if (ret == ERROR_FILE_NOT_FOUND && netbios)
+++        ret = RegOpenKeyExW( HKEY_LOCAL_MACHINE, L"System\\CurrentControlSet\\Control\\ComputerName\\ComputerName",
+++                             0, KEY_READ, &key );
+++    if (!ret)
++     {
++         DWORD size = *len * sizeof(WCHAR);
++         ret = RegQueryValueExW( key, valuename, NULL, NULL, (BYTE *)name, &size );

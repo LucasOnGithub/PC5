@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 /* PC5's settings, kept in <root>/pc5/settings.txt as "name = value" lines.
  * PC5 writes them from its Settings; the game's process reads them when a
- * game starts (the FPS counter, the controller). A missing file, or a line
+ * game starts (the overlay, the controller). A missing file, or a line
  * PC5 doesn't know, gives the default. */
 #ifndef PC5_SETTINGS_H
 #define PC5_SETTINGS_H
@@ -28,7 +28,15 @@ typedef enum Pc5Triggers {
 } Pc5Triggers;
 
 typedef struct Pc5Settings {
-    int fps;                  /* the counter in games */
+    /* The overlay in games (Settings › Overlay), a line each: the frame
+     * counter, the frames' average time, the game's share of the CPU, the
+     * CPU's and the chip's temperatures, the memory in use; and its corner. */
+    int fps;
+    int frame_time;
+    int cpu_usage;
+    int cpu_temperature;
+    int soc_temperature;
+    int memory;
     Pc5Corner fps_corner;
     int vibration;            /* how strong the game's rumble is on the controller: 0 (off), 25, 50, 75, 100 % */
     Pc5Light light_bar;

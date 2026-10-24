@@ -1,11 +1,14 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 /* PC5's game ops on the console (pc5_game.h): libScePad's light bar and
- * adaptive triggers, and VideoOut's second hardware cursor for the frame
- * counter over the frames the title shows itself. */
+ * adaptive triggers, VideoOut's second hardware cursor for the overlay over
+ * the frames the title shows itself, and the overlay's numbers: the
+ * process's CPU time, libkernel's temperatures and memory. */
 #include "pc5_game.h"
 
 #include <stdint.h>
 #include <string.h>
+#include <sys/resource.h>
+#include <unistd.h>
 #include <x86intrin.h>
 
 typedef struct LightBar { uint8_t r, g, b, reserved; } LightBar;
@@ -31,6 +34,13 @@ int sceVideoOutCursorSetPosition(int32_t handle, int32_t index, uint32_t x, uint
 size_t sceKernelGetDirectMemorySize(void);
 int sceKernelAllocateDirectMemory(int64_t start, int64_t end, size_t bytes, size_t alignment, int type, int64_t *offset);
 int sceKernelMapDirectMemory(void **address, size_t bytes, int protection, int flags, int64_t offset, size_t alignment);
+int sceKernelGetCpuTemperature(int *celsius);
+int sceKernelGetSocSensorTemperature(int sensor, int *celsius);
+int sceKernelConfiguredFlexibleMemorySize(size_t *bytes);
+int sceKernelAvailableFlexibleMemorySize(size_t *bytes);
+/* What sceKernelDirectMemoryQuery tells of an allocation (SCE_KERNEL_DMQ_FIND_NEXT: the one at or after offset). */
+typedef struct DirectMemoryQueryInfo { int64_t start, end; int32_t type; } DirectMemoryQueryInfo;
+int sceKernelDirectMemoryQuery(int64_t offset, int flags, DirectMemoryQueryInfo *info, size_t size);
 
 static int light_bar(int handle, uint32_t rgb)
 {
@@ -113,8 +123,56 @@ static int cursor(int videoout, const uint32_t *image, uint32_t x, uint32_t y)
     return sceVideoOutCursorSetPosition(videoout, 1, x, y);
 }
 
+static uint64_t cpu_time_us(void)
+{
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage)) return 0;
+    return (uint64_t)(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) * 1000000u +
+           (uint64_t)(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec);
+}
+
+static unsigned cpu_count(void)
+{
+    long online = sysconf(_SC_NPROCESSORS_ONLN);
+    return online > 0 ? (unsigned)online : 1u;
+}
+
+static int temperature(int sensor, int *celsius)
+{
+    return sensor ? sceKernelGetSocSensorTemperature(0, celsius) : sceKernelGetCpuTemperature(celsius);
+}
+
+/* The memory the game's process has of what the console gives it: the
+ * direct memory allocated (Wine's, the GPU's, the display's, a walk over
+ * the allocations) and the flexible memory in use. */
+static int memory(uint64_t *used, uint64_t *total)
+{
+    enum { FIND_NEXT = 1, MOST = 65536 };
+    uint64_t direct = sceKernelGetDirectMemorySize(), allocated = 0;
+    size_t configured = 0, available = 0;
+    int64_t at = 0;
+    int rc = 0, found = 0;
+
+    while ((uint64_t)at < direct && found < MOST) {
+        DirectMemoryQueryInfo info = { 0 };
+        if ((rc = sceKernelDirectMemoryQuery(at, FIND_NEXT, &info, sizeof(info)))) break;
+        if (info.end <= info.start || info.end <= at || (uint64_t)info.end > direct) { rc = -1; break; }
+        allocated += (uint64_t)(info.end - (info.start > at ? info.start : at));
+        at = info.end;
+        found++;
+    }
+    if (!found) return rc ? rc : -1;   /* a running game has allocations: the query doesn't work */
+    if (sceKernelConfiguredFlexibleMemorySize(&configured) || sceKernelAvailableFlexibleMemorySize(&available))
+        configured = available = 0;
+    *used = allocated + (configured > available ? configured - available : 0);
+    *total = direct + configured;
+    return 0;
+}
+
 void pc5_game_ps5_ops(Pc5GameOps *ops, void (*log)(const char *line));
 void pc5_game_ps5_ops(Pc5GameOps *ops, void (*log)(const char *line))
 {
-    *ops = (Pc5GameOps){ light_bar, light_bar_reset, triggers, cursor, log };
+    *ops = (Pc5GameOps){ .light_bar = light_bar, .light_bar_reset = light_bar_reset, .triggers = triggers,
+                         .cursor = cursor, .log = log, .cpu_time_us = cpu_time_us, .cpu_count = cpu_count,
+                         .temperature = temperature, .memory = memory };
 }

@@ -59,8 +59,9 @@ void pc5_game_begin(Pc5GameSession *game, const Pc5GameOps *ops, const char *roo
     game->light_target = bright(game->cover_tint);
     game->trigger_amplitude = 0;
     game->resistance = game->settings.triggers == PC5_TRIGGERS_RESISTANCE || game->settings.triggers == PC5_TRIGGERS_BOTH;
-    say(game, "PC5 game fps=%d corner=%d vibration=%d light=%d triggers=%d trigger_rumble=%d trigger_resistance=%d "
-        "tint=%06x", game->settings.fps, (int)game->settings.fps_corner, game->settings.vibration,
+    say(game, "PC5 game fps=%d overlay=%#x corner=%d vibration=%d light=%d triggers=%d trigger_rumble=%d "
+        "trigger_resistance=%d tint=%06x", game->settings.fps, pc5_game_overlay_lines(&game->settings),
+        (int)game->settings.fps_corner, game->settings.vibration,
         (int)game->settings.light_bar, (int)game->settings.triggers, game->settings.trigger_rumble,
         game->settings.trigger_resistance, (unsigned)game->cover_tint);
 }
@@ -209,24 +210,91 @@ void pc5_game_pad(Pc5GameSession *game, int pad, uint64_t now_ms, uint32_t scree
     game->light_sent = 1;
 }
 
+unsigned pc5_game_overlay_lines(const Pc5Settings *settings)
+{
+    return (settings->fps ? PW_PC5_HUD_FPS : 0u) | (settings->frame_time ? PW_PC5_HUD_FRAME_TIME : 0u) |
+           (settings->cpu_usage ? PW_PC5_HUD_CPU : 0u) | (settings->cpu_temperature ? PW_PC5_HUD_CPU_TEMP : 0u) |
+           (settings->soc_temperature ? PW_PC5_HUD_SOC_TEMP : 0u) | (settings->memory ? PW_PC5_HUD_MEMORY : 0u);
+}
+
+/* A sensor's temperature, -1 when it can't be read; *rc what the console said. */
+static int temperature(const Pc5GameSession *game, int sensor, int *rc)
+{
+    int celsius = -1;
+    *rc = game->ops.temperature ? game->ops.temperature(sensor, &celsius) : -1;
+    return !*rc && celsius > 0 && celsius < 150 ? celsius : -1;
+}
+
+int pc5_game_overlay_sample(Pc5GameSession *game, uint64_t now_ms, PwPc5HudStats *stats)
+{
+    unsigned lines = pc5_game_overlay_lines(&game->settings);
+    PwPc5HudStats s = { .lines = lines, .cpu_percent = -1, .cpu_celsius = -1, .soc_celsius = -1 };
+    int cpu_rc = 0, soc_rc = 0, memory_rc = 0;
+    unsigned cpus = 0;
+
+    if (!lines || (game->stats_at && now_ms - game->stats_at < 1000)) return 0;
+    if ((lines & PW_PC5_HUD_CPU) && game->ops.cpu_time_us) {
+        uint64_t cpu = game->ops.cpu_time_us();
+        cpus = game->ops.cpu_count ? game->ops.cpu_count() : 1;
+        /* from the second time on: the CPU time since, of every CPU's */
+        if (game->stats_at && now_ms > game->stats_at && cpu >= game->stats_cpu_us && cpus) {
+            uint64_t whole = (now_ms - game->stats_at) * 1000u * cpus;
+            uint64_t percent = ((cpu - game->stats_cpu_us) * 100u + whole / 2) / whole;
+            s.cpu_percent = percent > 100 ? 100 : (int)percent;
+        }
+        game->stats_cpu_us = cpu;
+    }
+    if (lines & PW_PC5_HUD_CPU_TEMP) s.cpu_celsius = temperature(game, 0, &cpu_rc);
+    if (lines & PW_PC5_HUD_SOC_TEMP) s.soc_celsius = temperature(game, 1, &soc_rc);
+    if (lines & PW_PC5_HUD_MEMORY) {
+        uint64_t used = 0, total = 0;
+        memory_rc = game->ops.memory ? game->ops.memory(&used, &total) : -1;
+        if (!memory_rc && total && used <= total) {
+            s.memory_used = used;
+            s.memory_total = total;
+        }
+    }
+    /* once, for the log: what the console answered */
+    if (!game->stats_logged) {
+        say(game, "PC5 overlay lines=%#x cpus=%u cpu_temp=%d rc=%#x soc_temp=%d rc=%#x memory=%lluM/%lluM rc=%#x",
+            lines, cpus, s.cpu_celsius, (unsigned)cpu_rc, s.soc_celsius, (unsigned)soc_rc,
+            (unsigned long long)(s.memory_used >> 20), (unsigned long long)(s.memory_total >> 20),
+            (unsigned)memory_rc);
+        game->stats_logged = 1;
+    }
+    game->stats_at = now_ms;
+    game->stats = s;
+    *stats = s;
+    return 1;
+}
+
 void pc5_game_hud(Pc5GameSession *game, int videoout, uint64_t frames, uint64_t now_ms)
 {
-    uint32_t image[PW_PC5_HUD_SIDE * PW_PC5_HUD_SIDE], x, y;
+    uint32_t image[PW_PC5_HUD_SIDE * PW_PC5_HUD_SIDE], x, y, height;
+    unsigned lines = pc5_game_overlay_lines(&game->settings);
+    PwPc5HudStats stats;
 
-    if (!game->settings.fps || !game->ops.cursor || videoout < 0) return;
+    if (!lines || !game->ops.cursor || videoout < 0) return;
+    (void)pc5_game_overlay_sample(game, now_ms, &stats);
     if (!game->hud_second_at) {
         game->hud_second_at = now_ms;
         game->hud_second_frames = frames;
         return;
     }
     if (now_ms - game->hud_second_at < 1000) return;
-    unsigned fps = (unsigned)(((frames - game->hud_second_frames) * 1000 + (now_ms - game->hud_second_at) / 2) /
-                              (now_ms - game->hud_second_at));
+    stats = game->stats;
+    stats.lines = lines;
+    uint64_t shown = frames - game->hud_second_frames, elapsed = now_ms - game->hud_second_at;
+    stats.fps = (unsigned)((shown * 1000 + elapsed / 2) / elapsed);
+    stats.frame_us = shown ? (uint32_t)(elapsed * 1000 / shown) : 0;
     game->hud_second_at = now_ms;
     game->hud_second_frames = frames;
-    pw_pc5_hud_draw(image, fps);
-    pw_pc5_hud_place((int)game->settings.fps_corner, 1920, 1080, &x, &y);
-    if (game->ops.cursor(videoout, image, x, y) && !game->hud_shown) say(game, "PC5 fps counter refused");
+    if (!(height = pw_pc5_hud_draw_stats(image, &stats))) {
+        game->ops.cursor(videoout, NULL, 0, 0);   /* nothing to show: hidden */
+        return;
+    }
+    pw_pc5_hud_place_box((int)game->settings.fps_corner, 1920, 1080, height, &x, &y);
+    if (game->ops.cursor(videoout, image, x, y) && !game->hud_shown) say(game, "PC5 overlay refused");
     game->hud_shown = 1;
 }
 

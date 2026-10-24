@@ -1,0 +1,507 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bornaradusin <bornaradusin@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 01:20:17 +0100
+Subject: [PATCH] PC5: the overlay, the frame counter with more lines
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+PC5's Settings › Overlay turns on, each on its own: the frame rate, the
+frames' average time, the game's share of the CPU, the CPU's and the
+chip's temperatures, and the memory in use of the whole. FPS alone keeps
+the large counter; with more, every line is a label and a value in the
+5x7 glyphs on the same 64x64 hardware cursor image, and a line whose
+value can't be read is left out.
+
+- wine/ps5/pw_pc5_hud.h: the lines (PW_PC5_HUD_*), PwPc5HudStats, the
+  glyphs they need, pw_pc5_hud_draw_lines/_stats, and the corner for a
+  box of any height (pw_pc5_hud_place_box).
+- libvulkan.prx: pw_pc5_hud takes the lines (1 is the counter alone, as
+  before), pw_pc5_hud_stats takes what the title measures, and the tick
+  adds the frame rate and the frames' average time from the flips.
+- The title passes PC5's lines and, once a second, its numbers.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
+---
+ native/wine64_main.c      |  24 ++--
+ tools/link_radv_prx.sh    |   2 +-
+ wine/ps5/pw_pc5_hud.h     | 227 +++++++++++++++++++++++++++++++++++++-
+ wine/ps5/pw_vulkan_radv.c |  71 ++++++++----
+ 4 files changed, 288 insertions(+), 36 deletions(-)
+
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+index 4073603..3bb3041 100644
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -952,10 +952,11 @@ static void pc5_game_start(const PwGameProfile *game, const char *executable)
+     pc5_game_on = 1;
+ }
+ 
+-/* libvulkan.prx's frame counter and screen colour (wine/ps5/pw_vulkan_radv.c),
++/* libvulkan.prx's overlay and screen colour (wine/ps5/pw_vulkan_radv.c),
+  * looked for once Vulkan has the display, every second until found. */
+ static struct {
+-    void (*hud)(int on, int corner);
++    void (*hud)(int lines, int corner);
++    void (*hud_stats)(const PwPc5HudStats *stats);
+     void (*hud_tick)(void);
+     uint32_t (*screen_color)(void);
+     int hud_set;
+@@ -973,16 +974,17 @@ static void pc5_vulkan_find(const PwPrxDescriptor *ntdll, uint64_t ms)
+     wine_dlsym = (void *(*)(void *, const char *))(uintptr_t)pw_prx_lookup(ntdll, "dlsym");
+     if (!wine_dlsym) return;
+     pc5_vulkan.hud = (void (*)(int, int))(uintptr_t)wine_dlsym(NULL, "pw_pc5_hud");
++    pc5_vulkan.hud_stats = (void (*)(const PwPc5HudStats *))(uintptr_t)wine_dlsym(NULL, "pw_pc5_hud_stats");
+     pc5_vulkan.hud_tick = (void (*)(void))(uintptr_t)wine_dlsym(NULL, "pw_pc5_hud_tick");
+     pc5_vulkan.screen_color = (uint32_t (*)(void))(uintptr_t)wine_dlsym(NULL, "pw_pc5_screen_color");
+     if (pc5_vulkan.hud)
+-        PS5LOG_LOG("PW_WINE64 pc5 vulkan hud=%d tick=%d color=%d", pc5_vulkan.hud != NULL, pc5_vulkan.hud_tick != NULL,
+-                   pc5_vulkan.screen_color != NULL);
++        PS5LOG_LOG("PW_WINE64 pc5 vulkan hud=%d stats=%d tick=%d color=%d", pc5_vulkan.hud != NULL,
++                   pc5_vulkan.hud_stats != NULL, pc5_vulkan.hud_tick != NULL, pc5_vulkan.screen_color != NULL);
+ }
+ 
+-/* Every tick of the game's loop: the controller, and the frame counter once
+- * the game shows something (over Vulkan's frames by libvulkan, over the
+- * title's own by the title). */
++/* Every tick of the game's loop: the controller, and the overlay once the
++ * game shows something (over Vulkan's frames by libvulkan, with the numbers
++ * PC5 measures, over the title's own by the title). */
+ static void pc5_game_tick(const PwPrxDescriptor *ntdll, PwPadPs5 *pad, int pad_ok, PwVideoOutPs5 *video,
+                           int video_ok, uint64_t shown, int content, uint64_t now)
+ {
+@@ -1005,11 +1007,15 @@ static void pc5_game_tick(const PwPrxDescriptor *ntdll, PwPadPs5 *pad, int pad_o
+     }
+     if (!content) return;
+     if (vulkan) {
++        unsigned lines = pc5_game_overlay_lines(&pc5_game.settings);
++        PwPc5HudStats stats;
+         if (pc5_vulkan.hud && !pc5_vulkan.hud_set) {
+-            pc5_vulkan.hud(pc5_game.settings.fps, (int)pc5_game.settings.fps_corner);
++            pc5_vulkan.hud((int)lines, (int)pc5_game.settings.fps_corner);
+             pc5_vulkan.hud_set = 1;
+         }
+-        if (pc5_vulkan.hud_tick && pc5_game.settings.fps) pc5_vulkan.hud_tick();
++        if (lines && pc5_vulkan.hud_stats && pc5_game_overlay_sample(&pc5_game, ms, &stats))
++            pc5_vulkan.hud_stats(&stats);
++        if (pc5_vulkan.hud_tick && lines) pc5_vulkan.hud_tick();
+     } else if (video_ok) {
+         pc5_game_hud(&pc5_game, video->handle, shown, ms);
+     }
+diff --git a/tools/link_radv_prx.sh b/tools/link_radv_prx.sh
+index 3d84b71..db992ca 100755
+--- a/tools/link_radv_prx.sh
++++ b/tools/link_radv_prx.sh
+@@ -56,7 +56,7 @@ for unit in pw_vk_radv_profile pw_vk_radv_profile_wrap; do
+ done
+ python3 "$root/tools/gen_prx_descriptor.py" "$work/obj/libvulkan_desc.c" \
+     vkGetInstanceProcAddr vkGetDeviceProcAddr pw_videoout_idle pw_videoout_show_tiled pw_videoout_cursor \
+-    pw_vk_radv_profile_set_frame_hook pw_pc5_hud pw_pc5_hud_tick pw_pc5_screen_color
++    pw_vk_radv_profile_set_frame_hook pw_pc5_hud pw_pc5_hud_stats pw_pc5_hud_tick pw_pc5_screen_color
+ "$sdk/bin/prospero-clang" -std=c11 -O2 -Wall -Wextra -Werror -fPIC -I"$root/wine/ps5" \
+     -c "$work/obj/libvulkan_desc.c" -o "$work/obj/libvulkan_desc.o"
+ 
+diff --git a/wine/ps5/pw_pc5_hud.h b/wine/ps5/pw_pc5_hud.h
+index 4bf1af2..f24d227 100644
+--- a/wine/ps5/pw_pc5_hud.h
++++ b/wine/ps5/pw_pc5_hud.h
+@@ -8,6 +8,7 @@
+ #ifndef PW_PC5_HUD_H
+ #define PW_PC5_HUD_H
+ #include <stdint.h>
++#include <stdio.h>
+ #include <string.h>
+ 
+ enum { PW_PC5_HUD_SIDE = 64, PW_PC5_HUD_BOX_HEIGHT = 40, PW_PC5_HUD_MARGIN = 24 };
+@@ -62,15 +63,233 @@ static inline void pw_pc5_hud_draw(uint32_t *image, unsigned fps)
+         pw_pc5_hud_glyph(image, (PW_PC5_HUD_SIDE - 17) / 2 + i * 6, 29, 10 + i, 1, 0xff9aa3afu);
+ }
+ 
+-/* The image's top-left corner in a frame_width x frame_height frame. */
+-static inline void pw_pc5_hud_place(int corner, uint32_t frame_width, uint32_t frame_height, uint32_t *x, uint32_t *y)
++/* The image's top-left corner in a frame_width x frame_height frame, for a
++ * box box_height high at the image's top. */
++static inline void pw_pc5_hud_place_box(int corner, uint32_t frame_width, uint32_t frame_height, uint32_t box_height,
++                                        uint32_t *x, uint32_t *y)
+ {
+     int right = corner == PW_PC5_HUD_TOP_RIGHT || corner == PW_PC5_HUD_BOTTOM_RIGHT;
+     int bottom = corner == PW_PC5_HUD_BOTTOM_LEFT || corner == PW_PC5_HUD_BOTTOM_RIGHT;
+     *x = right && frame_width > PW_PC5_HUD_SIDE + PW_PC5_HUD_MARGIN ? frame_width - PW_PC5_HUD_SIDE - PW_PC5_HUD_MARGIN
+                                                                     : PW_PC5_HUD_MARGIN;
+-    *y = bottom && frame_height > PW_PC5_HUD_BOX_HEIGHT + PW_PC5_HUD_MARGIN
+-             ? frame_height - PW_PC5_HUD_BOX_HEIGHT - PW_PC5_HUD_MARGIN : PW_PC5_HUD_MARGIN;
++    *y = bottom && frame_height > box_height + PW_PC5_HUD_MARGIN ? frame_height - box_height - PW_PC5_HUD_MARGIN
++                                                                 : PW_PC5_HUD_MARGIN;
++}
++
++/* The frame counter's corner (pw_pc5_hud_draw). */
++static inline void pw_pc5_hud_place(int corner, uint32_t frame_width, uint32_t frame_height, uint32_t *x, uint32_t *y)
++{
++    pw_pc5_hud_place_box(corner, frame_width, frame_height, PW_PC5_HUD_BOX_HEIGHT, x, y);
++}
++
++/* ---- The overlay: the frame counter and more, a line each ----------------
++ * What PC5's Settings › Overlay turns on, as flags. FPS alone keeps the
++ * large counter above; with anything else every line is a label and a
++ * value in the 5x7 glyphs. A line whose value is unknown (a sensor that
++ * can't be read) is left out. */
++enum {
++    PW_PC5_HUD_FPS = 1u,
++    PW_PC5_HUD_FRAME_TIME = 2u,
++    PW_PC5_HUD_CPU = 4u,
++    PW_PC5_HUD_CPU_TEMP = 8u,
++    PW_PC5_HUD_SOC_TEMP = 16u,
++    PW_PC5_HUD_MEMORY = 32u,
++    PW_PC5_HUD_ALL = 63u,
++    PW_PC5_HUD_LINES = 6,
++    PW_PC5_HUD_PITCH = 9,        /* a line: 7 rows of glyph and 2 of space */
++};
++
++typedef struct PwPc5HudStats {
++    unsigned lines;              /* PW_PC5_HUD_*: what is shown */
++    unsigned fps;                /* frames shown in the last second */
++    uint32_t frame_us;           /* their average time, 0 when none */
++    int cpu_percent;             /* the game's process, of every CPU; -1 unknown */
++    int cpu_celsius, soc_celsius;/* -1 unknown */
++    uint64_t memory_used;        /* bytes */
++    uint64_t memory_total;       /* bytes, 0 unknown */
++} PwPc5HudStats;
++
++/* A glyph of the overlay's lines: its width (1 to 5 columns, bit width-1
++ * the left one) and 7 rows. Letters for the labels, digits and signs for
++ * the values; '^' is the degree sign. */
++static inline int pw_pc5_hud_line_glyph(char c, const uint8_t **rows)
++{
++    static const struct { char c; uint8_t width; uint8_t rows[7]; } glyphs[] = {
++        { 'A', 5, { 0x0e, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11 } },
++        { 'C', 5, { 0x0e, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0e } },
++        { 'F', 5, { 0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x10 } },
++        { 'M', 5, { 0x11, 0x1b, 0x15, 0x15, 0x11, 0x11, 0x11 } },
++        { 'O', 5, { 0x0e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e } },
++        { 'P', 5, { 0x1e, 0x11, 0x11, 0x1e, 0x10, 0x10, 0x10 } },
++        { 'R', 5, { 0x1e, 0x11, 0x11, 0x1e, 0x14, 0x12, 0x11 } },
++        { 'S', 5, { 0x0f, 0x10, 0x10, 0x0e, 0x01, 0x01, 0x1e } },
++        { 'U', 5, { 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e } },
++        { '%', 5, { 0x19, 0x1a, 0x02, 0x04, 0x08, 0x0b, 0x13 } },
++        { '.', 1, { 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01 } },
++        { '/', 3, { 0x01, 0x01, 0x02, 0x02, 0x02, 0x04, 0x04 } },
++        { '^', 3, { 0x02, 0x05, 0x02, 0x00, 0x00, 0x00, 0x00 } },
++        { ' ', 2, { 0 } },
++    };
++    if (c >= '0' && c <= '9') {
++        *rows = pw_pc5_hud_glyphs[c - '0'];
++        return 5;
++    }
++    for (unsigned i = 0; i < sizeof(glyphs) / sizeof(glyphs[0]); i++)
++        if (glyphs[i].c == c) {
++            *rows = glyphs[i].rows;
++            return glyphs[i].width;
++        }
++    *rows = NULL;
++    return 0;
++}
++
++/* How wide text is in the line glyphs, a column between them. */
++static inline int pw_pc5_hud_text_width(const char *text)
++{
++    int width = 0;
++    for (const char *p = text; *p; p++) {
++        const uint8_t *rows;
++        int w = pw_pc5_hud_line_glyph(*p, &rows);
++        if (w) width += w + (width ? 1 : 0);
++    }
++    return width;
++}
++
++static inline void pw_pc5_hud_text(uint32_t *image, int x, int y, const char *text, uint32_t color)
++{
++    for (const char *p = text; *p; p++) {
++        const uint8_t *rows;
++        int w = pw_pc5_hud_line_glyph(*p, &rows);
++        if (!w) continue;
++        for (int row = 0; row < 7; row++)
++            for (int column = 0; column < w; column++)
++                if (rows[row] & (1u << (w - 1 - column))) {
++                    int px = x + column, py = y + row;
++                    if (px >= 0 && px < PW_PC5_HUD_SIDE && py >= 0 && py < PW_PC5_HUD_SIDE)
++                        image[py * PW_PC5_HUD_SIDE + px] = color;
++                }
++        x += w + 1;
++    }
++}
++
++/* A decimal with one digit after the point, from tenths. */
++static inline void pw_pc5_hud_tenths(char *out, size_t size, uint64_t tenths, int point)
++{
++    char digits[24];
++    int count = 0;
++    size_t at = 0;
++    uint64_t whole = tenths / 10;
++
++    do { digits[count++] = (char)('0' + whole % 10); whole /= 10; } while (whole && count < 20);
++    while (count && at + 1 < size) out[at++] = digits[--count];
++    if (point && at + 3 < size) {
++        out[at++] = '.';
++        out[at++] = (char)('0' + tenths % 10);
++    }
++    out[at] = 0;
++}
++
++/* A line's label and value, 0 when it isn't shown. The value is the
++ * longest form that fits beside the label. */
++static inline int pw_pc5_hud_line(const PwPc5HudStats *stats, unsigned line, const char **label, char *value,
++                                  size_t size)
++{
++    enum { ROOM = PW_PC5_HUD_SIDE - 3 - 17 - 3 - 3 };   /* the margins, the label and a space */
++    char used[8], total[8];
++
++    value[0] = 0;
++    if (!(stats->lines & line)) return 0;
++    switch (line) {
++    case PW_PC5_HUD_FPS:
++        *label = "FPS";
++        snprintf(value, size, "%u", stats->fps > 999 ? 999 : stats->fps);
++        return 1;
++    case PW_PC5_HUD_FRAME_TIME:
++        *label = "MS";
++        if (!stats->frame_us) return 0;
++        /* 16.7 below 100 ms, 125 above */
++        pw_pc5_hud_tenths(value, size, (stats->frame_us + 50) / 100 > 9999 ? 9999 : (stats->frame_us + 50) / 100,
++                          stats->frame_us < 99950);
++        return 1;
++    case PW_PC5_HUD_CPU:
++        *label = "CPU";
++        if (stats->cpu_percent < 0) return 0;
++        snprintf(value, size, "%d%%", stats->cpu_percent > 100 ? 100 : stats->cpu_percent);
++        return 1;
++    case PW_PC5_HUD_CPU_TEMP:
++    case PW_PC5_HUD_SOC_TEMP: {
++        int celsius = line == PW_PC5_HUD_CPU_TEMP ? stats->cpu_celsius : stats->soc_celsius;
++        *label = line == PW_PC5_HUD_CPU_TEMP ? "CPU" : "SOC";
++        if (celsius < 0) return 0;
++        snprintf(value, size, "%d^C", celsius > 999 ? 999 : celsius);
++        return 1;
++    }
++    case PW_PC5_HUD_MEMORY: {
++        /* gigabytes (GiB) used of the whole: 5.1/12.5, then 12/12.5, then
++         * 12/13, each rounded from the bytes */
++        const uint64_t half = (uint64_t)1 << 29;
++        uint64_t used10 = (stats->memory_used * 10 + half) >> 30, total10 = (stats->memory_total * 10 + half) >> 30;
++        uint64_t used1 = (stats->memory_used + half) >> 30, total1 = (stats->memory_total + half) >> 30;
++        *label = "RAM";
++        if (!stats->memory_total) return 0;
++        if (used10 > 99999) used10 = 99999;   /* 9999.9 at most */
++        if (total10 > 99999) total10 = 99999;
++        if (used1 > 9999) used1 = 9999;
++        if (total1 > 9999) total1 = 9999;
++        for (int form = 0; form < 3; form++) {
++            /* never more used than the whole it's shown with */
++            uint64_t u = form == 0 ? used10 : form == 1 && used1 * 10 > total10 ? total10 / 10 * 10 : used1 * 10;
++            pw_pc5_hud_tenths(used, sizeof(used), u, !form);
++            pw_pc5_hud_tenths(total, sizeof(total), form == 2 ? total1 * 10 : total10, form < 2);
++            snprintf(value, size, "%s/%s", used, total);
++            if (pw_pc5_hud_text_width(value) <= ROOM) break;
++        }
++        return 1;
++    }
++    }
++    return 0;
++}
++
++/* The overlay's lines on a dark rounded box at the top of the image: the
++ * box's height, 0 when no line is shown (the image is then clear). */
++static inline uint32_t pw_pc5_hud_draw_lines(uint32_t *image, const PwPc5HudStats *stats)
++{
++    static const unsigned order[PW_PC5_HUD_LINES] = { PW_PC5_HUD_FPS, PW_PC5_HUD_FRAME_TIME, PW_PC5_HUD_CPU,
++                                                      PW_PC5_HUD_CPU_TEMP, PW_PC5_HUD_SOC_TEMP, PW_PC5_HUD_MEMORY };
++    const char *labels[PW_PC5_HUD_LINES];
++    char values[PW_PC5_HUD_LINES][24];
++    unsigned count = 0;
++    uint32_t height;
++
++    memset(image, 0, PW_PC5_HUD_SIDE * PW_PC5_HUD_SIDE * 4);
++    for (unsigned i = 0; i < PW_PC5_HUD_LINES; i++)
++        if (pw_pc5_hud_line(stats, order[i], &labels[count], values[count], sizeof(values[count]))) count++;
++    if (!count) return 0;
++    height = 4 + count * PW_PC5_HUD_PITCH - 2 + 4;
++    for (uint32_t y = 0; y < height; y++)
++        for (uint32_t x = 0; x < PW_PC5_HUD_SIDE; x++) {
++            /* corners rounded to a radius of 6 */
++            int cx = x < 6 ? 6 - (int)x : x > PW_PC5_HUD_SIDE - 7 ? (int)x - (PW_PC5_HUD_SIDE - 7) : 0;
++            int cy = y < 6 ? 6 - (int)y : y > height - 7 ? (int)y - (int)(height - 7) : 0;
++            if (cx * cx + cy * cy <= 36) image[y * PW_PC5_HUD_SIDE + x] = 0xc0101216u;
++        }
++    for (unsigned i = 0; i < count; i++) {
++        int y = 4 + (int)i * PW_PC5_HUD_PITCH;
++        pw_pc5_hud_text(image, 3, y, labels[i], 0xff9aa3afu);
++        pw_pc5_hud_text(image, PW_PC5_HUD_SIDE - 3 - pw_pc5_hud_text_width(values[i]), y, values[i], 0xffffffffu);
++    }
++    return height;
++}
++
++/* The overlay for stats: the large counter for FPS alone (its box's
++ * height), else the lines. */
++static inline uint32_t pw_pc5_hud_draw_stats(uint32_t *image, const PwPc5HudStats *stats)
++{
++    if ((stats->lines & PW_PC5_HUD_ALL) == PW_PC5_HUD_FPS) {
++        pw_pc5_hud_draw(image, stats->fps);
++        return PW_PC5_HUD_BOX_HEIGHT;
++    }
++    return pw_pc5_hud_draw_lines(image, stats);
+ }
+ 
+ /* The colour of a frame for the controller's light bar, from B,G,R,X
+diff --git a/wine/ps5/pw_vulkan_radv.c b/wine/ps5/pw_vulkan_radv.c
+index f5bf3b9..d3457f1 100644
+--- a/wine/ps5/pw_vulkan_radv.c
++++ b/wine/ps5/pw_vulkan_radv.c
+@@ -214,10 +214,12 @@ int pw_videoout_show_tiled(const void *tiled, uint64_t bytes, uint32_t width, ui
+     return result;
+ }
+ 
+-/* --- PC5: the frame counter and the screen's colour --------------------------
++/* --- PC5: the overlay and the screen's colour ---------------------------------
+  * RADV's VideoOut calls are wrapped too (tools/link_radv_prx.sh). Each flip
+- * counts towards the frame counter, which the display's second hardware
+- * cursor shows, updated once a second, while PC5 asks for it (pw_pc5_hud).
++ * counts towards the overlay's frame rate and frame time, which the
++ * display's second hardware cursor shows with the numbers PC5 measures
++ * itself (pw_pc5_hud_stats), updated once a second, while PC5 asks for it
++ * (pw_pc5_hud).
+  * The framebuffers RADV registers are remembered, so the colour of the one
+  * on screen can be read for the controller's light bar (pw_pc5_screen_color):
+  * texels spread over it, which the display's tiling only puts in another
+@@ -243,9 +245,11 @@ static struct {
+     uint32_t width, height;                 /* the attribute being registered */
+     struct { const uint32_t *texels; uint32_t width, height; int set; } buffer[PC5_BUFFERS];
+     int shown;                              /* the buffer flipped last; -1 none */
+-    int hud_on, hud_corner, hud_enabled, hud_current;
++    unsigned hud_lines;                     /* PW_PC5_HUD_*, 0 off */
++    int hud_corner, hud_enabled, hud_current;
++    PwPc5HudStats hud_stats;                /* PC5's numbers: the CPU, the temperatures, the memory */
+     uint64_t flips, second_flips, second_at;
+-} pc5 = { .shown = -1 };
++} pc5 = { .shown = -1, .hud_stats = { .cpu_percent = -1, .cpu_celsius = -1, .soc_celsius = -1 } };
+ 
+ static void pc5_lock(void)
+ {
+@@ -312,17 +316,22 @@ int __wrap_sceVideoOutUnregisterBuffers(int32_t handle, int32_t set)
+     return __real_sceVideoOutUnregisterBuffers(handle, set);
+ }
+ 
+-/* Under the cursor's lock: the counter's image, shown or moved. */
+-static void pc5_hud_show_locked(int handle, unsigned fps)
++/* Under the cursor's lock: the overlay's image, shown or moved; hidden while
++ * it has no line to show. */
++static void pc5_hud_show_locked(int handle, const PwPc5HudStats *stats)
+ {
+-    uint32_t image[PW_PC5_HUD_SIDE * PW_PC5_HUD_SIDE], x, y;
++    uint32_t image[PW_PC5_HUD_SIDE * PW_PC5_HUD_SIDE], x, y, height;
+     uint32_t *next;
+     VkRect2D rect;
+     VkExtent2D frame = { 1920, 1080 };
+     int rc;
+ 
+     if (cursor_setup()) return;
+-    pw_pc5_hud_draw(image, fps);
++    if (!(height = pw_pc5_hud_draw_stats(image, stats))) {
++        if (pc5.hud_enabled) sceVideoOutCursorDisable(handle, 1);
++        pc5.hud_enabled = 0;
++        return;
++    }
+     /* Images 2 and 3 of the cursor's memory, in turn (0 and 1 are the game's cursor's). */
+     next = cursor.images + (PC5_HUD_IMAGE + (pc5.hud_enabled ? (pc5.hud_current ^ 1) : pc5.hud_current)) * CURSOR_PIXELS;
+     memcpy(next, image, sizeof(image));
+@@ -335,7 +344,7 @@ static void pc5_hud_show_locked(int handle, unsigned fps)
+     pc5.hud_current = (int)((next - cursor.images) / CURSOR_PIXELS) - PC5_HUD_IMAGE;
+     pc5.hud_enabled = 1;
+     if (!wsi_videoout_present_rect(&rect, &frame) || !frame.width || !frame.height) frame = (VkExtent2D){ 1920, 1080 };
+-    pw_pc5_hud_place(pc5.hud_corner, frame.width, frame.height, &x, &y);
++    pw_pc5_hud_place_box(pc5.hud_corner, frame.width, frame.height, height, &x, &y);
+     sceVideoOutCursorSetPosition(handle, 1, x, y);
+ }
+ 
+@@ -356,18 +365,19 @@ int __wrap_sceVideoOutSubmitFlip(int32_t handle, int32_t buffer_index, uint32_t
+     return result;
+ }
+ 
+-/* PC5 turns the counter on, in a corner (pw_pc5_hud.h), or off. */
+-void pw_pc5_hud(int on, int corner);
+-void pw_pc5_hud(int on, int corner)
++/* PC5 turns the overlay's lines on (PW_PC5_HUD_* in pw_pc5_hud.h; 1, the
++ * frame counter alone), in a corner, or off (0). */
++void pw_pc5_hud(int lines, int corner);
++void pw_pc5_hud(int lines, int corner)
+ {
+     int handle = __atomic_load_n(&videoout_handle, __ATOMIC_ACQUIRE);
+ 
+     pc5_lock();
+     pc5.hud_corner = corner;
+     pc5.second_at = 0;
+-    pc5.hud_on = on;
++    pc5.hud_lines = (unsigned)lines & PW_PC5_HUD_ALL;
+     pc5_unlock();
+-    if (!on && handle >= 0) {
++    if (!(lines & PW_PC5_HUD_ALL) && handle >= 0) {
+         cursor_lock();
+         if (pc5.hud_enabled) sceVideoOutCursorDisable(handle, 1);
+         pc5.hud_enabled = 0;
+@@ -375,25 +385,42 @@ void pw_pc5_hud(int on, int corner)
+     }
+ }
+ 
+-/* From the title's loop: the counter, once a second, with the frames shown
+- * since. */
++/* From the title's loop, about once a second: what PC5 measures itself
++ * (the CPU, the temperatures, the memory), shown at the overlay's next
++ * update. */
++void pw_pc5_hud_stats(const PwPc5HudStats *stats);
++void pw_pc5_hud_stats(const PwPc5HudStats *stats)
++{
++    if (!stats) return;
++    pc5_lock();
++    pc5.hud_stats = *stats;
++    pc5_unlock();
++}
++
++/* From the title's loop: the overlay, once a second, with the frames shown
++ * since and their average time. */
+ void pw_pc5_hud_tick(void);
+ void pw_pc5_hud_tick(void)
+ {
+     int handle = __atomic_load_n(&videoout_handle, __ATOMIC_ACQUIRE), show = 0;
+-    unsigned fps = 0;
++    PwPc5HudStats stats;
+     uint64_t now = pc5_now_ns();
+ 
+     if (handle < 0) return;
+     pc5_lock();
+-    if (pc5.hud_on) {
++    stats = pc5.hud_stats;
++    stats.lines = pc5.hud_lines;
++    stats.fps = 0;
++    stats.frame_us = 0;
++    if (pc5.hud_lines) {
+         if (!pc5.second_at) {
+             pc5.second_at = now;
+             pc5.second_flips = pc5.flips;
+             show = !pc5.hud_enabled;
+         } else if (now - pc5.second_at >= 1000000000u) {
+-            fps = (unsigned)(((pc5.flips - pc5.second_flips) * 1000000000u + (now - pc5.second_at) / 2) /
+-                             (now - pc5.second_at));
++            uint64_t frames = pc5.flips - pc5.second_flips, elapsed = now - pc5.second_at;
++            stats.fps = (unsigned)((frames * 1000000000u + elapsed / 2) / elapsed);
++            stats.frame_us = frames ? (uint32_t)((elapsed / frames + 500) / 1000) : 0;
+             pc5.second_at = now;
+             pc5.second_flips = pc5.flips;
+             show = 1;
+@@ -402,7 +429,7 @@ void pw_pc5_hud_tick(void)
+     pc5_unlock();
+     if (show) {
+         cursor_lock();
+-        pc5_hud_show_locked(handle, fps);
++        pc5_hud_show_locked(handle, &stats);
+         cursor_unlock();
+     }
+ }
