@@ -10,8 +10,8 @@ with `PC5 `.
 
 | # | Do | Expect on screen | Expect in the log |
 | --- | --- | --- | --- |
-| 1 | Replace the `PPSA11018` folder with the new one, start PC5 | the tile shows the tower without lettering; the library | `PC5 start version=1.1.0 …`, `PC5 controller reset light=0 triggers=0` |
-| 2 | Options › About PC5 | version 1.1.0 and the free space | |
+| 1 | Replace the `PPSA11018` folder with the new one, start PC5 | the tile shows the tower without lettering; the library | `PC5 start version=1.2.0 …`, `PC5 controller reset light=0 triggers=0` |
+| 2 | Options › About PC5 | version 1.2.0 and the free space | |
 | 3 | Options › Updates | "No PC5 release is published on GitHub yet" (until there is one) | `PC5 update state=2` (2: none published) |
 | 4 | Options › In games: change Vibration, Light bar and Adaptive triggers; Options › Overlay: turn Show FPS on, pick a corner | the values change and stay after restarting PC5; Trigger rumble / Trigger resistance appear only with their effect on | `PC5 settings fps=1 …`; `/data/prospero-win/pc5/settings.txt` |
 | 5 | Options › Install games from USB, tick two folders with □, press Options | "Getting ready 1 of 2", then the list with covers | `PC5 folder=… queue=1/2`, `PC5 cover choices=… queue=…` |
@@ -46,6 +46,22 @@ with `PC5 `.
 | 20 | In that game: something that rumbles, changes the light bar or sets the triggers | the motors at Vibration's strength; the game's colour on the light bar; the game's trigger effects | `PW_WINE64 dualsense output set=…`, `PC5 light bar the game's …`, `PC5 triggers game effects=… rc=0` |
 | 21 | DualSense: the touchpad and tilting the controller in a game that uses them | the game follows the finger and the tilt | |
 | 22 | Xbox controller, then a game that reads controllers through Windows.Gaming.Input (Deep Rock Galactic Survivor, other Unity games) | the game finds the controller: buttons, sticks and triggers work, and its rumble reaches the motors | `PW_WINE64 rumble left=… right=… status=ok` when it rumbles |
+
+## Frame generation
+
+| # | Do | Expect | Expect in the log |
+| --- | --- | --- | --- |
+| 23 | △ on a game › Frame generation: 30 → 60 fps, then start a game that keeps 30 fps or more, with Show FPS on | the game moves at 60; the overlay shows about 60 | `PC5 game … frame_generation=1`, `pw_framegen: on, 29.92 fps shown at 59.84`, `pw_framegen: swapchain …x… format …, … images`, then every 10 s `pw_framegen: frames=… generated=… late=… engaged=1` with generated close to frames |
+| 24 | In that game: a busy scene where it falls below 30, then back | no stutter beyond the game's own; at 30 again it goes back to 60 | `pw_framegen: frame … ms late; shown as it is`, later `engaged=1` again |
+| 25 | Frame generation Off, start the game again | the game at its own rate | `PC5 game … frame_generation=0`, no `pw_framegen:` lines |
+
+## Videos and sound
+
+| # | Do | Expect | Expect in the log |
+| --- | --- | --- | --- |
+| 26 | A game installed with PC5 1.1.1 or older, started for the first time with 1.2.0 | it starts as before | `PC5 prefix media registered`, once: not on the next start |
+| 27 | A game that plays a video through Windows at its start or in its menus (a `.wmv`, `.mp4`, `.avi` or `.mpg` among its files; not Bink `.bik`, which games decode themselves) | the video plays with its sound, and the game goes on after it | no `Unhandled page fault`; no `err:` lines from `winegstreamer` or `winedmo` |
+| 28 | A game whose music or speech is WMA or MP3 (`.wma`, `.mp3`, `.xwma` among its files) | it plays | no `Unhandled page fault` |
 
 A non-zero `rc=` on the light bar or triggers lines means the console refused that call; send
 that log.

@@ -18,6 +18,10 @@ console reads.
 4. APP_DIR/pc5/prefix.list lists every folder (ending in '/') and file: PC5 copies the
    prefix from that list when it installs a game (title/pc5_library.c), so it never has to
    list the app's own folder.
+5. APP_DIR/pc5/prefix-media.reg holds what registering winegstreamer.dll (64- and 32-bit)
+   adds to system.reg: the sections the prefix has that unregistering it takes away. A game
+   installed before winegstreamer was built has none of it, and wineboot cannot run on the
+   console, so PC5 appends these sections to that game's system.reg (title/pc5_game.c).
 """
 import argparse
 import os
@@ -56,6 +60,38 @@ def vkd3d_files(archive: Path) -> dict:
     return found
 
 
+def registry_sections(text: str) -> dict:
+    """system.reg's keys, each with its lines (the key's own time lines left out)."""
+    sections, current = {}, None
+    for line in text.splitlines():
+        if line.startswith("[") and "]" in line:
+            current = line[:line.rindex("]") + 1]
+            sections[current] = [line]
+        elif current is not None and line:
+            sections[current].append(line)
+    return sections
+
+
+def media_fragment(wine: Path, made: Path, work: Path, env: dict) -> str:
+    """The sections registering winegstreamer.dll adds, from a copy unregistered again."""
+    copy = work / "unregistered"
+    shutil.copytree(made, copy, symlinks=True)
+    unregister = dict(env, WINEPREFIX=str(copy))
+    for regsvr32 in ("regsvr32", "C:\\windows\\syswow64\\regsvr32.exe"):
+        subprocess.run([str(wine), regsvr32, "/u", "/s", "winegstreamer.dll"], check=True, env=unregister)
+    subprocess.run([str(wine.parent / "wineserver"), "-w"], check=True, env=unregister)
+    registered = registry_sections((made / "system.reg").read_text(encoding="latin-1"))
+    unregistered = registry_sections((copy / "system.reg").read_text(encoding="latin-1"))
+    shutil.rmtree(copy)
+    def body(lines):
+        return [line for line in lines[1:] if not line.startswith("#time=")]
+    added = [key for key, lines in registered.items()
+             if key not in unregistered or body(lines) != body(unregistered[key])]
+    if not any("winegstreamer.dll" in line for key in added for line in registered[key]):
+        sys.exit("make-prefix: registering winegstreamer.dll added nothing to system.reg")
+    return "".join("\n" + "\n".join(registered[key]) + "\n" for key in added)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--pw", type=Path, required=True, help="the prospero-win checkout")
@@ -85,6 +121,8 @@ def main() -> int:
     for dll in ("d3d9.dll", "d3d11.dll", "dxgi.dll"):
         if not (wow / dll).is_file() or not (system32 / dll).is_file():
             sys.exit(f"make-prefix: DXVK's {dll} is not in both system32 and syswow64")
+
+    media = media_fragment(args.wine, made, work, env)
 
     files, dirs, links = pw_prefix.local_tree(made)
     files[pw_prefix.CPU_DLL] = args.cpu_dll
@@ -119,10 +157,12 @@ def main() -> int:
     if b'@="wowprospero.dll"' not in (target / "system.reg").read_bytes():
         sys.exit("make-prefix: system.reg doesn't name wowprospero.dll as the WoW64 CPU")
     (args.out / "pc5" / "prefix.list").write_text("".join(f"{line}\n" for line in listed))
+    (args.out / "pc5" / "prefix-media.reg").write_bytes(media.encode("latin-1"))
     shutil.rmtree(work)
     shutil.rmtree(args.vkd3d.parent / (args.vkd3d.name + ".unpacked"), ignore_errors=True)
     size = sum((target / key).stat().st_size for key in listed if not key.endswith("/"))
-    print(f"make-prefix: {target}: {len(listed)} entries, {size >> 20} MB")
+    print(f"make-prefix: {target}: {len(listed)} entries, {size >> 20} MB; "
+          f"prefix-media.reg: {media.count(chr(10) + '[')} keys")
     return 0
 
 

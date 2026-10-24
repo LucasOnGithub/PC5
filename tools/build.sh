@@ -143,6 +143,12 @@ step_sources() {
     git -C "$PW" log --oneline -3
 
     fetch "$PW/.deps/wine/source" "$WINE_URL" "$(sed -n 's/^WINE_COMMIT=//p' "$PW/tools/build_wine_ps5.sh")"
+    # FFmpeg for the games' videos and sound (winedmo.prx, winegstreamer.prx).
+    fetch "$PW/.deps/ffmpeg/source" "$(value "$PW/tools/build_ffmpeg_ps5.sh" FFMPEG_URL)" \
+        "$(pin "$PW/tools/build_ffmpeg_ps5.sh" FFMPEG_COMMIT)"
+    # ps5-framegen's interpolator, linked into libvulkan.prx for Frame generation.
+    fetch "$B/ps5-framegen" "$(value "$PW/tools/link_radv_prx.sh" FRAMEGEN_URL)" \
+        "$(pin "$PW/tools/link_radv_prx.sh" FRAMEGEN_COMMIT)"
     fetch "$PW/.deps/ps5-native-app-boilerplate" "$BOILERPLATE_URL" "$(pin "$PW/tools/build_native.sh" pin)"
     fetch "$B/prx-foundation" "$BOILERPLATE_URL" "$(pin "$PW/tools/build_wine_ps5.sh" MODULE_EXPORTS_COMMIT)"
     fetch "$B/PS5_Vulkan" "$VULKAN_URL" "$VULKAN_COMMIT"
@@ -226,12 +232,14 @@ step_wineps5() {
     cd "$PW"
     PATH="$B/venv/bin:$PATH" tools/build_wine_ps5.sh --source "$PW/.deps/wine/source" \
         --host-tools "$PW/.deps/wine-host/build" --prx-foundation "$B/prx-foundation" \
-        --radv "$B/PS5_Vulkan" --jobs "$jobs"
+        --radv "$B/PS5_Vulkan" --ffmpeg-source "$PW/.deps/ffmpeg/source" --framegen "$B/ps5-framegen" --jobs "$jobs"
     # The link is skipped, not failed, when something it needs is missing: check what it made.
-    for module in ntdll win32u winevulkan libvulkan; do
+    for module in ntdll win32u winevulkan libvulkan winedmo winegstreamer; do
         [[ -f $PW/.deps/wine-ps5/prx/sce_module/$module.prx ]] ||
             { echo "no $module.prx: see the prx section of .deps/wine-ps5/report.json" >&2; return 1; }
     done
+    grep -q '"framegen": "[0-9a-f]\{40\}"' "$PW/.deps/wine-ps5/report.json" ||
+        { echo "libvulkan.prx was linked without frame generation: see .deps/wine-ps5/prx/libvulkan.link.log" >&2; return 1; }
     ls "$PW/.deps/wine-ps5/prx/sce_module"
 }
 
@@ -321,6 +329,10 @@ step_bundle() {
     part wine "$PW/.deps/wine/source" "$(sed -n 's/^WINE_COMMIT=//p' "$PW/tools/build_wine_ps5.sh")" "$WINE_URL"
     part ps5-native-app-boilerplate "$PW/.deps/ps5-native-app-boilerplate" "$(pin "$PW/tools/build_native.sh" pin)" "$BOILERPLATE_URL"
     part prx-foundation "$B/prx-foundation" "$(pin "$PW/tools/build_wine_ps5.sh" MODULE_EXPORTS_COMMIT)" "$BOILERPLATE_URL"
+    part ffmpeg "$PW/.deps/ffmpeg/source" "$(pin "$PW/tools/build_ffmpeg_ps5.sh" FFMPEG_COMMIT)" \
+        "$(value "$PW/tools/build_ffmpeg_ps5.sh" FFMPEG_URL) (FFmpeg $(value "$PW/tools/build_ffmpeg_ps5.sh" FFMPEG_VERSION), its LGPL parts built: winedmo.prx and winegstreamer.prx)"
+    part ps5-framegen "$B/ps5-framegen" "$(pin "$PW/tools/link_radv_prx.sh" FRAMEGEN_COMMIT)" \
+        "$(value "$PW/tools/link_radv_prx.sh" FRAMEGEN_URL) (its interpolator, in libvulkan.prx for Frame generation)"
     part PS5_Vulkan "$B/PS5_Vulkan" "$VULKAN_COMMIT" "$VULKAN_URL"
     part PS5_Mesa-radv "$B/PS5_Mesa" "$(pin "$B/PS5_Vulkan/tools/build-radv.sh" mesa_revision)" "$MESA_URL"
     part PS5_Mesa-zink "$B/mesa-zink-source" "$(pin "$zink" MESA_COMMIT)" "$MESA_URL"

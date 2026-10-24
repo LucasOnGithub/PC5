@@ -1,11 +1,13 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 /* PC5 in a game's process (pc5_game.h). */
 #include "pc5_game.h"
+#include "pc5_controls.h"
 #include "pw_pc5_hud.h"
 
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -47,6 +49,55 @@ static uint32_t cover_tint(const char *root, const char *prefix)
     return ((uint32_t)head[12] | (uint32_t)head[13] << 8 | (uint32_t)head[14] << 16) & 0xffffffu;
 }
 
+/* 1 when the file holds needle, 0 when not, -1 when it can't be read. */
+static int file_holds(const char *path, const char *needle)
+{
+    static char buffer[65536 + 64];   /* once, at a game's start */
+    size_t length = strlen(needle), kept = 0, got;
+    int found = 0;
+    FILE *file;
+
+    if (!length || length > 64 || !(file = fopen(path, "rb"))) return -1;
+    while (!found && (got = fread(buffer + kept, 1, 65536, file)) > 0) {
+        size_t total = kept + got;
+        for (size_t at = 0; !found && at + length <= total; at++)
+            found = buffer[at] == needle[0] && !memcmp(buffer + at, needle, length);
+        /* The needle may span two reads: keep the tail. */
+        kept = total < length - 1 ? total : length - 1;
+        memmove(buffer, buffer + total - kept, kept);
+    }
+    int failed = ferror(file);
+    fclose(file);
+    return failed ? -1 : found;
+}
+
+int pc5_prefix_media(const char *root, const char *prefix, const char *app)
+{
+    char system[PC5_PATH], media[PC5_PATH], chunk[16384];
+    FILE *in, *out;
+    size_t got;
+    int ok = 1;
+
+    if (!prefix[0] || !strcmp(prefix, "default")
+            ? pc5_format(system, sizeof(system), "%s/prefix/system.reg", root)
+            : pc5_format(system, sizeof(system), "%s/prefixes/%s/system.reg", root, prefix))
+        return -1;
+    int held = file_holds(system, "winegstreamer.dll");
+    if (held) return held > 0 ? 0 : -1;
+    if (pc5_format(media, sizeof(media), "%s/pc5/prefix-media.reg", app) || !(in = fopen(media, "rb")))
+        return -1;
+    if (!(out = fopen(system, "ab"))) {
+        fclose(in);
+        return -1;
+    }
+    while (ok && (got = fread(chunk, 1, sizeof(chunk), in)) > 0)
+        ok = fwrite(chunk, 1, got, out) == got;
+    ok = ok && !ferror(in);
+    fclose(in);
+    ok = !fclose(out) && ok;
+    return ok ? 1 : -1;
+}
+
 void pc5_game_begin(Pc5GameSession *game, const Pc5GameOps *ops, const char *root, const char *app,
                     const char *prefix, const char *title)
 {
@@ -59,11 +110,23 @@ void pc5_game_begin(Pc5GameSession *game, const Pc5GameOps *ops, const char *roo
     game->light_target = bright(game->cover_tint);
     game->trigger_amplitude = 0;
     game->resistance = game->settings.triggers == PC5_TRIGGERS_RESISTANCE || game->settings.triggers == PC5_TRIGGERS_BOTH;
+    if (prefix && app && app[0]) {
+        int media = pc5_prefix_media(root, prefix, app);
+        if (media) say(game, "PC5 prefix media %s", media > 0 ? "registered" : "registration failed");
+    }
+    /* Frame generation, which libvulkan.prx reads from the environment. */
+    if (prefix && prefix[0]) {
+        Pc5Controls controls;
+        pc5_controls_load(root, prefix, &controls);
+        game->frame_generation = controls.frame_generation;
+    }
+    if (game->frame_generation) setenv("PW_PC5_FRAMEGEN", "1", 1);
+    else unsetenv("PW_PC5_FRAMEGEN");
     say(game, "PC5 game fps=%d overlay=%#x corner=%d vibration=%d light=%d triggers=%d trigger_rumble=%d "
-        "trigger_resistance=%d tint=%06x", game->settings.fps, pc5_game_overlay_lines(&game->settings),
+        "trigger_resistance=%d tint=%06x frame_generation=%d", game->settings.fps, pc5_game_overlay_lines(&game->settings),
         (int)game->settings.fps_corner, game->settings.vibration,
         (int)game->settings.light_bar, (int)game->settings.triggers, game->settings.trigger_rumble,
-        game->settings.trigger_resistance, (unsigned)game->cover_tint);
+        game->settings.trigger_resistance, (unsigned)game->cover_tint, game->frame_generation);
 }
 
 const uint32_t *pc5_game_loading(Pc5GameSession *game, uint64_t now_ms)

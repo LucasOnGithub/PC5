@@ -1080,6 +1080,37 @@ static int fake_memory(uint64_t *used, uint64_t *total)
     return measured.memory_rc;
 }
 
+/* A game's prefix from before winegstreamer gets its registrations once. */
+static void test_prefix_media(void)
+{
+    char root[PC5_PATH], app[PC5_PATH], file[PC5_PATH], big[200000];
+    static const char fragment[] = "\n[Software\\\\Classes\\\\CLSID\\\\{1F1E273D-12C0-4B3A-8E9B-1933C2498AEA}"
+                                   "\\\\InprocServer32] 1792812437\n@=\"C:\\\\windows\\\\system32\\\\winegstreamer.dll\"\n";
+    Pc5Buf text = { 0 };
+
+    path(root, sizeof(root), "%s/media-root", work);
+    path(app, sizeof(app), "%s/media-app", work);
+    path(file, sizeof(file), "%s/prefixes/old/system.reg", root);
+    write_text(file, "WINE REGISTRY Version 2\n\n[Software\\\\Wine] 1\n");
+    CHECK(pc5_prefix_media(root, "old", app) == -1, "no fragment in the app: nothing done");
+    path(file, sizeof(file), "%s/pc5/prefix-media.reg", app);
+    write_text(file, fragment);
+    CHECK(pc5_prefix_media(root, "old", app) == 1, "an old prefix gets the registrations");
+    path(file, sizeof(file), "%s/prefixes/old/system.reg", root);
+    CHECK(!pc5_read_file(file, &text, 1u << 20) && text.len == strlen("WINE REGISTRY Version 2\n\n[Software\\\\Wine] 1\n") + strlen(fragment)
+          && !memcmp(text.data + text.len - strlen(fragment), fragment, strlen(fragment)), "appended at the end");
+    pc5_buf_free(&text);
+    CHECK(pc5_prefix_media(root, "old", app) == 0, "and only once");
+    /* The default prefix, and a name that spans two reads of a large file. */
+    memset(big, 'x', sizeof(big));
+    memcpy(big + 65536 - 5, "winegstreamer.dll", 17);
+    big[sizeof(big) - 1] = 0;
+    path(file, sizeof(file), "%s/prefix/system.reg", root);
+    write_text(file, big);
+    CHECK(pc5_prefix_media(root, "default", app) == 0, "found across two reads");
+    CHECK(pc5_prefix_media(root, "missing", app) == -1, "no prefix: nothing done");
+}
+
 static void test_game(const char *fonts_path)
 {
     char game_root[PC5_PATH], app[PC5_PATH], file[PC5_PATH];
@@ -1113,6 +1144,21 @@ static void test_game(const char *fonts_path)
     pc5_game_begin(&game, &ops, game_root, app, "liberty", "Liberty Town");
     CHECK(game.cover_tint == 0x203040u && game.settings.triggers == PC5_TRIGGERS_RUMBLE, "settings and colour: %06x",
           (unsigned)game.cover_tint);
+    CHECK(!game.frame_generation && !getenv("PW_PC5_FRAMEGEN"), "no frame generation by default");
+    {
+        Pc5Controls controls, again;
+        pc5_controls_load(game_root, "liberty", &controls);
+        controls.frame_generation = 1;
+        CHECK(!pc5_controls_save(game_root, "liberty", &controls) && !pc5_controls_load(game_root, "liberty", &again) &&
+              again.frame_generation == 1, "Frame generation is kept with the game");
+        pc5_game_begin(&game, &ops, game_root, app, "liberty", "Liberty Town");
+        const char *env = getenv("PW_PC5_FRAMEGEN");
+        CHECK(game.frame_generation && env && !strcmp(env, "1"), "a game with Frame generation on tells libvulkan.prx");
+        controls.frame_generation = 0;
+        pc5_controls_save(game_root, "liberty", &controls);
+        pc5_game_begin(&game, &ops, game_root, app, "liberty", "Liberty Town");
+        CHECK(!game.frame_generation && !getenv("PW_PC5_FRAMEGEN"), "and off again");
+    }
 
     /* The light bar: the cover's colour, brought up to a light bar's brightness, once. */
     pc5_game_pad(&game, 7, 1000, 0);
@@ -1577,10 +1623,10 @@ static void test_screens(const char *fonts)
     press(ui, PC5_KEY_DOWN, &canvas);        /* Updates */
     press(ui, PC5_KEY_ACCEPT, &canvas);
     press(ui, PC5_KEY_DOWN, &canvas);        /* Check now */
-    net.release = "{\"tag_name\":\"v1.2.0\",\"html_url\":\"https://github.com/bornaradusin/PC5/releases/tag/v1.2.0\"}";
+    net.release = "{\"tag_name\":\"v1.3.0\",\"html_url\":\"https://github.com/bornaradusin/PC5/releases/tag/v1.3.0\"}";
     press(ui, PC5_KEY_ACCEPT, &canvas);
     until_screen(ui, "settings", &canvas);
-    CHECK(console.notifications == 1 && strstr(console.told, "PC5 1.2.0 is available"), "told: %s", console.told);
+    CHECK(console.notifications == 1 && strstr(console.told, "PC5 1.3.0 is available"), "told: %s", console.told);
     press(ui, PC5_KEY_ACCEPT, &canvas);
     until_screen(ui, "settings", &canvas);
     CHECK(console.notifications == 1, "once per release");
@@ -1597,7 +1643,13 @@ static void test_screens(const char *fonts)
     press(ui, PC5_KEY_TRIANGLE, &canvas);
     CHECK(!strcmp(pc5_ui_screen(ui), "game-menu"), "game menu: %s", pc5_ui_screen(ui));
     press(ui, PC5_KEY_DOWN, &canvas);       /* past Controller (the Xbox controller: no Button mapping) */
-    press(ui, PC5_KEY_DOWN, &canvas);
+    press(ui, PC5_KEY_DOWN, &canvas);       /* Frame generation: on, then off again with right */
+    press(ui, PC5_KEY_ACCEPT, &canvas);
+    CHECK(!strcmp(pc5_ui_screen(ui), "game-menu") && controls_has("orbital-nine", "frame_generation = on\n"),
+          "Frame generation on: %s", pc5_ui_screen(ui));
+    press(ui, PC5_KEY_RIGHT, &canvas);
+    CHECK(controls_has("orbital-nine", "frame_generation = off\n"), "and off");
+    press(ui, PC5_KEY_DOWN, &canvas);       /* Change program */
     press(ui, PC5_KEY_ACCEPT, &canvas);
     until_screen(ui, "programs", &canvas);
     CHECK(!strcmp(pc5_ui_screen(ui), "programs"), "its programs: %s", pc5_ui_screen(ui));
@@ -1672,6 +1724,7 @@ int main(int argc, char **argv)
     test_update();
     test_logs();
     test_cover_fill();
+    test_prefix_media();
     test_game(fonts);
     test_screens(fonts);
     printf("test_pc5: %d checks, %d failed\n", checks, failures);

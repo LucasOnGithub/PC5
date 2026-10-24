@@ -80,10 +80,19 @@ typedef struct Pc5GameSession {
     PwPc5HudStats stats;          /* what PC5 measured last for the overlay */
     uint64_t stats_at, stats_cpu_us;
     int stats_logged;
+    int frame_generation;         /* the game's Frame generation (PW_PC5_FRAMEGEN for libvulkan.prx) */
 } Pc5GameSession;
 
-/* At the game's start: PC5's settings and the game's cover colour, from
- * root (/data/prospero-win), the game's prefix and the app's folder. */
+/* A game's Windows made before winegstreamer (the media decoders) was built
+ * has none of its registrations, and wineboot can't run on the console: the
+ * app's pc5/prefix-media.reg is appended to the prefix's system.reg, once
+ * (Wine reads a key given twice as one). prefix is the game's prefix name
+ * ("" or "default" for root/prefix). 1 appended, 0 already there, -1 when it
+ * couldn't be done. */
+int pc5_prefix_media(const char *root, const char *prefix, const char *app);
+/* At the game's start: PC5's settings, the game's cover colour and its
+ * prefix's media registrations, from root (/data/prospero-win), the game's
+ * prefix and the app's folder. */
 void pc5_game_begin(Pc5GameSession *game, const Pc5GameOps *ops, const char *root, const char *app,
                     const char *prefix, const char *title);
 /* The loading screen's next frame (PC5_MATRIX_WIDTH x HEIGHT, B,G,R,X), or

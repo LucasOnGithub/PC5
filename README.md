@@ -5,7 +5,7 @@
 A launcher for your own PC games on a PS5 that runs homebrew. PC5 shows your games as a row
 of covers, installs games from a USB drive in one copy each, and uninstalls them with their
 saves. It runs the games with [prospero-win](https://github.com/mpereiraesaa/prospero-win)
-(Wine on the PS5). The app is `PPSA11018`, its tile is called **PC5**. 
+(Wine on the PS5). The app is `PPSA11018`, its tile is called **PC5**. This is version 1.2.0.
 
 No game is part of PC5, and PC5 downloads none: you install the games you own.
 
@@ -33,8 +33,8 @@ No game is part of PC5, and PC5 downloads none: you install the games you own.
    **touchpad** and **Options** for two seconds: the game is asked to close (it can save),
    and if it hasn't after five seconds it is ended. You are back in PC5.
 
-Each game has a menu (**△**): Play, Controller, Change program (when PC5 started the wrong
-`.exe`) and Uninstall. Uninstalling deletes the game and everything it made: its saves, its settings,
+Each game has a menu (**△**): Play, Controller, Frame generation, Change program (when PC5
+started the wrong `.exe`) and Uninstall. Uninstalling deletes the game and everything it made: its saves, its settings,
 its shader cache, its cover. There is no backup and no undo. The USB drive is never
 written to.
 
@@ -65,6 +65,19 @@ that game:
 
 A change takes effect the next time the game starts. Holding the touchpad and Options for two
 seconds leaves the game whichever is chosen.
+
+## Frame generation
+
+Each game can be shown at 60 fps from 30 (**△** › Frame generation, kept for that game; off
+by default). The game is held at 30 fps, and before each of its frames PC5 shows one made
+between it and the one before, with [ps5-framegen](https://github.com/Swordpdf/ps5-framegen)'s
+interpolator (AMD FSR3's optical flow). It suits games that keep 30 fps or a little more:
+when a game falls below 30 its frames are shown as they come, without frames in between,
+until it keeps up again. Frames made in between can show smearing around fast movement and
+the screen's edges, and the game reacts a little later than without it. The overlay's FPS
+counts every frame shown, the made ones too. It applies to games drawn with Direct3D 8 to
+12, Vulkan or OpenGL, not to DirectDraw or plain Windows drawing, nor to 10-bit (HDR)
+output. A change takes effect the next time the game starts.
 
 ## Settings
 
@@ -101,7 +114,7 @@ or 64-bit and what it draws with, and writes the same kind of prospero-win profi
 
 Only a game whose program draws with Direct3D 12 gets VKD3D-Proton; every other game gets
 Wine's own Direct3D 12, as prospero-win's tested profiles have it (a library that only tries
-Direct3D 12, as GTA IV's does, stops there instead of going further and crashing).
+Direct3D 12 stops there instead of going further and crashing).
 
 What won't run: games that need Steam, Epic, EA or Ubisoft's launcher running, online DRM
 or anti-cheat; .NET Framework games (prospero-win has no .NET yet); programs that aren't
@@ -111,6 +124,10 @@ next time it opens, and keeps the log.
 
 **Launch options**: a `launch.txt` beside the game's `.exe` holds its options (its first
 line that isn't a `#` comment). PC5 reads it each time the game starts.
+
+**Videos and sound**: games' videos and compressed sound (Media Foundation, DirectShow,
+Windows Media and DMOs) are decoded with FFmpeg: H.264, WMV and VC-1, MPEG-1 and 2, AAC, WMA,
+MP3 and others. A game installed with an older PC5 gets them the next time it starts.
 
 **Language**: each game's Windows language is the PS5's, so a game that follows the Windows
 language follows the console.
@@ -146,6 +163,55 @@ Games already in `/data/prospero-win` (installed some other way) show up in PC5 
 a cover the first time PC5 opens. An install or uninstall cut short (the console switched
 off) is finished, by deleting, the next time PC5 starts.
 
+## Building
+
+On **Debian 13 or Ubuntu 24.04** (x86-64), as root:
+
+```sh
+apt-get install -y $(cat tools/packages.txt)
+tools/build.sh
+```
+
+The app is `release/PPSA11018/` and `release/PPSA11018.zip`, with the source of everything in
+it as `release/PPSA11018-sources.tar.xz`; or all three in the folder `PC5_RELEASE` names
+(`PC5_RELEASE=/mnt/media/builder/releases/PC5 tools/build.sh`). Everything else the build
+makes stays in the repo's `.build/`. Each step prints one line and writes
+`.build/logs/<step>.log`; run one step again with `tools/build.sh <step>`. Elsewhere the
+script runs itself in Docker (`tools/Dockerfile`). A first build takes a few hours, most of
+it Wine; Zink's link wants about 8 GB of memory per job (`PC5_ZINK_JOBS`, default 2).
+
+`tests/test.sh` runs the host checks (after `tools/build.sh sources`); `tests/test.sh
+--shots` also draws every screen into `.build/tests/shots/` with made-up games.
+`tests/PS5-CHECKLIST.md` is what to try on a console.
+
+**Releasing**: the update check reads the newest release of
+<https://github.com/bornaradusin/PC5>, by its tag (`v1.0.0`, `v1.1.0`, …). Publish each
+version as a GitHub release with that tag, with `PPSA11018.zip` and
+`PPSA11018-sources.tar.xz` attached, and raise `PC5_VERSION` in `title/pc5.h` and
+`contentVersion` in `sce_sys/param.json` with it.
+
+## How it is made
+
+- `title/`: PC5's own code, plain C built into prospero-win's title: the screens
+  (`pc5_ui.c`, drawn on the CPU by `pc5_draw.c`), the library, installing and uninstalling
+  (`pc5_library.c`), USB folders (`pc5_source.c`), reading Windows programs (`pc5_pe.c`),
+  covers (`pc5_cover.c`, `pc5_image.c`, `pc5_json.c`), HTTPS on Mbed TLS (`pc5_net.c`),
+  settings, updates and logs (`pc5_settings.c`, `pc5_update.c`, `pc5_logs.c`), the game's
+  side (`pc5_game.c`, the loading screen `pc5_matrix.c`) and the console's
+  (`pc5_console.c`, `pc5_net_ps5.c`, `pc5_game_ps5.c`).
+- `patches/prospero-win/`: patches to prospero-win v0.2.0, so its title shows PC5
+  instead of its launcher, holds 128 games, gives each game the PS5's language and its own
+  shader cache, and applies PC5's settings in games (with libvulkan's overlay and screen
+  colour); the sticks' directions as keys; the DualSense a game finds as on a PC (Wine's
+  xinput makes it in the game's process); Windows.Gaming.Input finding the Xbox
+  controller; the computer's name without wineboot; and Wine's XAudio2 keeping an effect
+  alive while a voice holds it, and ignoring calls on a voice the game destroyed; games'
+  videos and sound on FFmpeg (Wine's winegstreamer decoders on FFmpeg in place of
+  GStreamer, and winedmo); and Frame generation in RADV's `libvulkan.prx`.
+- `tools/`: the build, the Windows template (`make-prefix.py`), the font atlas
+  (`make-font.py`) and the app (`make-app.py`). `art/make-art.py` draws the icon and the
+  Home background.
+
 ## Credits and licence
 
 PC5's own code is free software under the GNU LGPL 2.1 or later (`LICENSE`), like
@@ -155,7 +221,8 @@ own release is; its source is `PPSA11018-sources.tar.xz`.
 
 It is built on prospero-win by mpereiraesaa and the projects it uses: Wine, DXVK, Mesa
 (RADV, Zink; including mihawk-99's PS5 work), the PS5 payload SDK and boilerplate, and the
-Lapy helper. Also VKD3D-Proton (LGPL 2.1 or later), Mbed TLS (Apache 2.0 or GPL 2.0 or
+Lapy helper. Also FFmpeg (LGPL 2.1 or later), ps5-framegen by Swordpdf (GPL 3.0 or later,
+its shaders from AMD's FSR3 under MIT), VKD3D-Proton (LGPL 2.1 or later), Mbed TLS (Apache 2.0 or GPL 2.0 or
 later), Mozilla's root certificates (MPL 2.0), stb_image (public domain / MIT) and the
 Inter font (SIL OFL 1.1, `fonts/OFL.txt`). Blur5, sahin and PS5_MihawkOS were inspiration
 only; no code was taken from them. See `NOTICE.md`.

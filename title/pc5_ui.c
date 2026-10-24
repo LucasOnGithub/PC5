@@ -107,8 +107,8 @@ static int page_rows(const Pc5Settings *set, int page, SettingRow rows[PAGE_ROWS
 }
 
 /* A game's menu: its rows; Button mapping only while it plays the keyboard and mouse. */
-typedef enum GameRow { GR_PLAY, GR_CONTROLLER, GR_BUTTONS, GR_PROGRAM, GR_UNINSTALL } GameRow;
-enum { GAME_ROWS = 5 };
+typedef enum GameRow { GR_PLAY, GR_CONTROLLER, GR_BUTTONS, GR_FRAMEGEN, GR_PROGRAM, GR_UNINSTALL } GameRow;
+enum { GAME_ROWS = 6 };
 
 static int game_rows(const Pc5Controls *controls, GameRow rows[GAME_ROWS])
 {
@@ -116,6 +116,7 @@ static int game_rows(const Pc5Controls *controls, GameRow rows[GAME_ROWS])
     rows[n++] = GR_PLAY;
     rows[n++] = GR_CONTROLLER;
     if (controls->mode == PC5_PAD_KEYBOARD) rows[n++] = GR_BUTTONS;
+    rows[n++] = GR_FRAMEGEN;
     rows[n++] = GR_PROGRAM;
     rows[n++] = GR_UNINSTALL;
     return n;
@@ -1136,8 +1137,9 @@ static void controls_changed(Pc5Ui *ui)
 {
     const Pc5Controls *k = &ui->controls;
     if (pc5_controls_save(ui->root, ui->launch_id, k)) say(ui, "PC5 problem controls %s: can't write them", ui->launch_id);
-    say(ui, "PC5 controls id=%s mode=%s left=%s right=%s speed=%d", ui->launch_id, pc5_pad_mode_name(k->mode),
-        pc5_stick_use_name(k->stick[0]), pc5_stick_use_name(k->stick[1]), k->speed);
+    say(ui, "PC5 controls id=%s mode=%s left=%s right=%s speed=%d frame_generation=%d", ui->launch_id,
+        pc5_pad_mode_name(k->mode), pc5_stick_use_name(k->stick[0]), pc5_stick_use_name(k->stick[1]), k->speed,
+        k->frame_generation);
 }
 
 /* A Button mapping row moves to its next (step 1) or previous (-1) value: 1 when it changed. */
@@ -1556,6 +1558,10 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
         else if ((k & (PC5_KEY_LEFT | PC5_KEY_RIGHT | accept)) && row == GR_CONTROLLER) {
             int step = (k & PC5_KEY_LEFT) ? -1 : 1;
             ui->controls.mode = (Pc5PadMode)((ui->controls.mode + PC5_PAD_MODES + step) % PC5_PAD_MODES);
+            controls_changed(ui);
+            ui->dirty = 1;
+        } else if ((k & (PC5_KEY_LEFT | PC5_KEY_RIGHT | accept)) && row == GR_FRAMEGEN) {
+            ui->controls.frame_generation = !ui->controls.frame_generation;
             controls_changed(ui);
             ui->dirty = 1;
         } else if (k & accept) {
@@ -2084,6 +2090,12 @@ static void game_menu_screen(Pc5Ui *ui, Pc5Canvas *c, int chosen)
             drawer_row(ui, c, x, y, 118, chosen == i, "Button mapping", "The key or mouse button each one sends",
                        "\xe2\x80\xba");
             break;
+        case GR_FRAMEGEN:
+            drawer_row(ui, c, x, y, 118, chosen == i, "Frame generation",
+                       ui->controls.frame_generation ? "Held at 30 fps and shown at 60"
+                                                     : "The game's frames as it makes them",
+                       ui->controls.frame_generation ? "30 \xe2\x86\x92 60 fps" : "Off");
+            break;
         case GR_PROGRAM: {
             const char *exe = strrchr(game->executable, '\\');
             snprintf(about, sizeof(about), "Now: %s", exe ? exe + 1 : game->executable);
@@ -2095,7 +2107,8 @@ static void game_menu_screen(Pc5Ui *ui, Pc5Canvas *c, int chosen)
             break;
         }
     }
-    Hint list[] = { { accept_glyph(ui), chosen < count && rows[chosen] == GR_CONTROLLER ? "Change" : "Choose" },
+    Hint list[] = { { accept_glyph(ui), chosen < count && (rows[chosen] == GR_CONTROLLER || rows[chosen] == GR_FRAMEGEN)
+                                            ? "Change" : "Choose" },
                     { back_glyph(ui), "Back" } };
     hints(ui, c, (int)x + 64, 1012, list, 2);
 }

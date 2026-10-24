@@ -40,6 +40,8 @@ def main() -> int:
         problems.append(f"sce_sys/param.json is {param.get('titleId')}, not {TITLE}")
     for needed in ("eboot.bin", "lapy.elf", "sce_sys/icon0.png", "sce_sys/pic0.png", "sce_module/libc.prx",
                    "pc5/fonts.bin", "pc5/ca-certificates.crt", "pc5/prefix.list", "pc5/prefix/system.reg",
+                   "pc5/prefix-media.reg", "win/wine/lib/wine/x86_64-unix/winedmo.prx",
+                   "win/wine/lib/wine/x86_64-unix/winegstreamer.prx", "LICENSES/ps5-framegen/COPYING",
                    "pc5/prefix/drive_c/windows/system32/d3d12core.dll",
                    "pc5/prefix/drive_c/windows/syswow64/d3d12core.dll",
                    "pc5/prefix/drive_c/windows/system32/d3d11.dll",
@@ -77,8 +79,8 @@ A launcher for your own PC games on a PS5 that runs homebrew. Put each game's in
 folder (the one with its .exe) at the top of an exFAT USB drive, then in PC5 press Options
 for Settings and choose Install games from USB: one game, or several ticked with Square.
 PC5 copies each once to /data/prospero-win, checks the copy, finds its cover online and
-adds it to the library. A game's menu (Triangle) changes its program or uninstalls it with
-its saves and settings. In a game, the touchpad and Options held for two seconds bring
+adds it to the library. A game's menu (Triangle) sets its controller and Frame generation,
+changes its program or uninstalls it with its saves and settings. In a game, the touchpad and Options held for two seconds bring
 you back to PC5. No game is part of this app.
 
 The app as a whole is under the GNU GPL 3.0 or later (the PS5 boilerplate's startup code
@@ -90,11 +92,14 @@ Built from <https://github.com/bornaradusin/PC5> at commit {repo_commit}:
 - prospero-win <https://github.com/mpereiraesaa/prospero-win> v0.2.0 (644e32e) with that
   repository's `patches/prospero-win` and `title/` (PC5's own code), as commit
   {git(args.pw, 'rev-parse', 'HEAD')}. SOURCES.txt names the rest: Wine, RADV, Mesa Zink,
-  the boilerplate, FreeType and the Lapy helper, built for {TITLE}.
+  the boilerplate, FreeType, FFmpeg, ps5-framegen (Frame generation, in libvulkan.prx) and
+  the Lapy helper, built for {TITLE}.
 - `pc5/prefix`: an empty Wine prefix made by prospero-win's `pw_install.py`, with DXVK
   2.6.2-prospero2 (<https://github.com/mpereiraesaa/dxvk>, zlib licence) and VKD3D-Proton
   2.14.1 (<https://github.com/HansKristian-Work/vkd3d-proton>, LGPL 2.1 or later, its
   release's DLLs unchanged). Each game PC5 installs gets its own copy.
+  `pc5/prefix-media.reg` is what registering Wine's media decoders adds to it, which PC5
+  adds to the prefix of a game installed before they were part of the app.
 - `pc5/fonts.bin`: Inter 4.1 (<https://github.com/rsms/inter>, SIL Open Font License 1.1)
   drawn into an atlas by `tools/make-font.py`.
 - `pc5/ca-certificates.crt`: Mozilla's root certificates as Debian's ca-certificates

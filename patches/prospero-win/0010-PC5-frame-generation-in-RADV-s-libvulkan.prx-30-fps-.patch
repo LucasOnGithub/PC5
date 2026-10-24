@@ -1,0 +1,1155 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bornaradusin <bornaradusin@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 05:06:50 +0100
+Subject: [PATCH] PC5: frame generation in RADV's libvulkan.prx, 30 fps shown
+ at 60
+
+With a ps5-framegen checkout (--framegen), libvulkan.prx links its
+interpolator (FSR3's optical flow and frame interpolation) and wraps the
+device, queues, swapchains and presents when PW_PC5_FRAMEGEN=1: the game is
+held at half the display's rate and a frame made between each two of its
+frames is presented before each one. It engages after 8 frames on time and
+shows the game's frames as they come when it falls behind.
+
+Without a checkout every entry point passes through, as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
+---
+ PUBLICATION_ALLOWLIST.txt   |   5 +
+ THIRD_PARTY.md              |  12 +
+ docs/WINE_PS5_BUILD.md      |  26 ++
+ tools/audit_publication.py  |   2 +-
+ tools/build_wine_ps5.sh     |  24 +-
+ tools/link_radv_prx.sh      |  35 +-
+ tools/package_release.sh    |   4 +
+ wine/ps5/pw_framegen.cpp    | 633 ++++++++++++++++++++++++++++++++++++
+ wine/ps5/pw_framegen.h      |  38 +++
+ wine/ps5/pw_framegen_none.c |  21 ++
+ wine/ps5/pw_framegen_vk.h   | 108 ++++++
+ wine/ps5/pw_vulkan_radv.c   |   9 +-
+ 12 files changed, 905 insertions(+), 12 deletions(-)
+ create mode 100644 wine/ps5/pw_framegen.cpp
+ create mode 100644 wine/ps5/pw_framegen.h
+ create mode 100644 wine/ps5/pw_framegen_none.c
+ create mode 100644 wine/ps5/pw_framegen_vk.h
+
+diff --git a/PUBLICATION_ALLOWLIST.txt b/PUBLICATION_ALLOWLIST.txt
+index 13b2934..df4842a 100644
+--- a/PUBLICATION_ALLOWLIST.txt
++++ b/PUBLICATION_ALLOWLIST.txt
+@@ -576,5 +576,10 @@ wine/patches/0878-crypt32-ps5-root-certificates-beside-the-runtime.patch
+ wine/ps5/pw_gnutls_libc.c
+ tools/build_ffmpeg_ps5.sh
+ wine/ps5/pw_ffmpeg_libc.c
++wine/ps5/pw_framegen.cpp
++wine/ps5/pw_framegen.h
++wine/ps5/pw_framegen_none.c
++wine/ps5/pw_framegen_vk.h
++wine/ps5/pw_pc5_hud.h
+ wine/patches/0877-secur32-log-gnutls-errors-and-the-clock-on-handshake-failure.patch
+ tests/test_build_tls_ps5.py
+diff --git a/THIRD_PARTY.md b/THIRD_PARTY.md
+index d9c3568..3129d78 100644
+--- a/THIRD_PARTY.md
++++ b/THIRD_PARTY.md
+@@ -174,6 +174,18 @@ revision in `SOURCES.txt`). It is linked for the console by
+ layer, both GPL-3.0-or-later, so `libvulkan.prx` as a whole is distributed
+ under the GPL, version 3.
+ 
++### Frame generation in `libvulkan.prx`
++
++A package built with a ps5-framegen checkout links into `libvulkan.prx`
++[ps5-framegen](https://github.com/Swordpdf/ps5-framegen) (© 2026 swordpdf),
++its frame interpolator, under the GNU General Public License version 3 or
++later (`LICENSES/ps5-framegen/COPYING`). Its shaders, compiled into it, are
++AMD FidelityFX SDK 2.3.0's FSR3 optical flow, some modified by its author,
++under the MIT licence (`LICENSES/ps5-framegen/shaders-LICENSE.txt`, which
++names the files and gives AMD's notice). `SOURCES.txt` names the commit.
++Like the RADV driver it is linked with, `libvulkan.prx` is then a GPL-3.0
++work as a whole.
++
+ ## OpenGL: Mesa WGL/Zink, `win/mesa-zink/`
+ 
+ OpenGL games draw through Mesa's Windows WGL frontend and its Zink driver,
+diff --git a/docs/WINE_PS5_BUILD.md b/docs/WINE_PS5_BUILD.md
+index abd5e07..064414c 100644
+--- a/docs/WINE_PS5_BUILD.md
++++ b/docs/WINE_PS5_BUILD.md
+@@ -734,6 +734,32 @@ game (PE) -> DXVK d3d11/dxgi/d3d9/d3d8/d3d10core (PE, beside the game) -> winevu
+   batching, showed its menu and cursor and played dust2 at 60 fps with the
+   fix (2026-10-09); the old workaround, `hl.exe`'s Direct3D
+   `renderer=no3d` AppDefault, is not needed with it.
++- **Frame generation.** `build_wine_ps5.sh --framegen DIR`, with DIR a
++  checkout of ps5-framegen at the commit `tools/link_radv_prx.sh` pins, links
++  its interpolator (AMD FSR3's optical flow and frame interpolation as
++  compute shaders, embedded as SPIR-V) into RADV's `libvulkan.prx`, with
++  `wine/ps5/pw_framegen.cpp`; without it `wine/ps5/pw_framegen_none.c`
++  passes every entry point through. The interpolator calls Vulkan through
++  a table filled from RADV's own entry points (`wine/ps5/pw_framegen_vk.h`),
++  since Mesa's archive exports none. With `PW_PC5_FRAMEGEN=1` in the
++  environment (PC5 sets it for a game whose Frame generation is on), the
++  resolver wraps the device, its queues, its swapchains and their presents:
++  a swapchain gets one image more, and transfer use, for the frame in
++  between; the game's presents are held to one each 1/29.92 s, half the
++  display's 59.94 Hz less a little so the hold never waits a whole refresh;
++  and each present copies the game's image to the interpolator, makes the
++  frame between it and the one before, and presents that frame, then the
++  game's. It engages after 8 frames on time and stops at a frame more than
++  a quarter of a period late, showing the game's frames as they come until
++  it keeps up again; a frame after a pause is not interpolated across. A
++  swapchain whose format is not 8-bit RGB, or for which the interpolator
++  cannot be made, presents as it is. Measured on the PC with lavapipe (the
++  same glue against Mesa's software driver, headless, with the validation
++  layers): every frame presented, the frames in between generated and no
++  validation errors; ps5-framegen's own checks of its interpolator (moving
++  scenes against their known midpoints) pass. ps5-framegen is
++  GPL-3.0-or-later and its shaders MIT, so a `libvulkan.prx` linked with it
++  is GPL-3.0-or-later.
+ - **DLLs.** DXVK's DLLs go beside the game, and its profile sets
+   `dll_overrides` (`d3d11,dxgi=n`, `d3d9=n`, `d3d8,d3d9=n` or
+   `d3d10core,d3d11,dxgi=n`). The unmodified Win32-WSI DXVK build is the one
+diff --git a/tools/audit_publication.py b/tools/audit_publication.py
+index b1949d1..414306e 100644
+--- a/tools/audit_publication.py
++++ b/tools/audit_publication.py
+@@ -19,7 +19,7 @@ from pathlib import Path
+ ROOT = Path(__file__).resolve().parents[1]
+ ALLOWLIST = ROOT / "PUBLICATION_ALLOWLIST.txt"
+ TEXT_SUFFIXES = {
+-    "", ".c", ".s", ".example", ".h", ".input", ".json", ".ld", ".md", ".patch", ".profile", ".py", ".sh", ".spec", ".svg", ".txt", ".yml",
++    "", ".c", ".cpp", ".s", ".example", ".h", ".input", ".json", ".ld", ".md", ".patch", ".profile", ".py", ".sh", ".spec", ".svg", ".txt", ".yml",
+ }
+ # Generated or vendored files that require an explicit provenance update.
+ # They are pinned by digest and exempt from the text scan so an accidental
+diff --git a/tools/build_wine_ps5.sh b/tools/build_wine_ps5.sh
+index 997857d..0ca5361 100755
+--- a/tools/build_wine_ps5.sh
++++ b/tools/build_wine_ps5.sh
+@@ -61,11 +61,16 @@
+ # reader). FFmpeg's licence texts travel with them for
+ # tools/package_release.sh. Without the checkout neither is linked.
+ #
++# Frame generation: with a ps5-framegen checkout (--framegen, or
++# PROSPERO_FRAMEGEN, at tools/link_radv_prx.sh's FRAMEGEN_COMMIT), RADV's
++# libvulkan.prx links its interpolator (wine/ps5/pw_framegen.h), and its
++# licence texts travel with the module. Without one it is not linked.
++#
+ # Usage:
+ #   tools/build_wine_ps5.sh [--check-patches] [--patches DIR] [--work DIR]
+ #       [--source DIR] [--host-tools DIR] [--foundation DIR] [--sdk DIR]
+ #       [--prx-foundation DIR] [--ps5vk-sdk DIR | --radv DIR]
+-#       [--ffmpeg-source DIR] [--jobs N]
++#       [--ffmpeg-source DIR] [--framegen DIR] [--jobs N]
+ set -eu
+ 
+ WINE_COMMIT=490f6d5dcbb2a5047345b8af88d114bbcaad69a8
+@@ -128,6 +133,7 @@ prx_foundation=${PS5_PRX_FOUNDATION:-}
+ ps5vk_sdk=${PS5VK_SDK:-}
+ radv=${PROSPERO_RADV:-}
+ ffmpeg_source=${PROSPERO_FFMPEG_SOURCE:-$root/.deps/ffmpeg/source}
++framegen=${PROSPERO_FRAMEGEN:-}
+ jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+ check_only=0
+ 
+@@ -145,6 +151,7 @@ while [ $# -gt 0 ]; do
+     --ps5vk-sdk) ps5vk_sdk=$2; shift ;;
+     --radv) radv=$2; shift ;;
+     --ffmpeg-source) ffmpeg_source=$2; shift ;;
++    --framegen) framegen=$2; shift ;;
+     --jobs) jobs=$2; shift ;;
+     *) fail "unknown argument $1" ;;
+     esac
+@@ -374,6 +381,7 @@ fi
+ # (tools/package_release.sh): report.json's "sources".
+ source_prx_foundation=$(git -C "$prx_foundation" rev-parse HEAD 2>/dev/null || true)
+ source_ps5_mesa= source_ps5_vulkan= source_radv_payload_sdk= source_ps5vk= source_ca_bundle= source_ffmpeg=
++source_framegen=
+ link_objects() {
+     python3 - "$work/make.log" "$1" <<'PY'
+ import shlex, sys
+@@ -633,12 +641,20 @@ if [ "$prx_status" = 0 ]; then
+     elif [ -n "$radv" ]; then
+         # RADV, from a PS5_Vulkan checkout's release archive and its own link
+         # recipe (tools/link_radv_prx.sh).
+-        if revision=$(bash "$root/tools/link_radv_prx.sh" "$radv" "$prx" "$tool" "$pie"); then
++        if revision=$(bash "$root/tools/link_radv_prx.sh" "$radv" "$prx" "$tool" "$pie" "$framegen"); then
+             vulkan_status="libvulkan.prx from RADV, PS5_Mesa $revision"
+             source_ps5_mesa=$revision
+             source_ps5_vulkan=$(git -C "$radv" rev-parse HEAD 2>/dev/null || true)
+             source_radv_payload_sdk=$(cat "$radv/.deps/native/ps5-payload-sdk/.ps5-sdk-revision" \
+                 2>/dev/null || true)
++            if [ -n "$framegen" ]; then
++                # ps5-framegen's licences: its own (GPL-3.0) and its shaders' (AMD's, MIT).
++                vulkan_status="$vulkan_status, with frame generation"
++                source_framegen=$(git -C "$framegen" rev-parse HEAD)
++                mkdir -p "$prx/licenses/ps5-framegen"
++                cp "$framegen/COPYING" "$prx/licenses/ps5-framegen/COPYING"
++                cp "$framegen/shaders/LICENSE.txt" "$prx/licenses/ps5-framegen/shaders-LICENSE.txt"
++            fi
+         else
+             prx_status=1
+             vulkan_status="RADV link failed (see $prx/libvulkan.link.log)"
+@@ -655,7 +671,7 @@ fi
+ if PW_SOURCE_PRX_FOUNDATION=${source_prx_foundation:-} PW_SOURCE_PS5_MESA=${source_ps5_mesa:-} \
+     PW_SOURCE_PS5_VULKAN=${source_ps5_vulkan:-} PW_SOURCE_RADV_PAYLOAD_SDK=${source_radv_payload_sdk:-} \
+     PW_SOURCE_PS5VK=${source_ps5vk:-} PW_SOURCE_CA_BUNDLE=${source_ca_bundle:-} \
+-    PW_SOURCE_FFMPEG=${source_ffmpeg:-} \
++    PW_SOURCE_FFMPEG=${source_ffmpeg:-} PW_SOURCE_FRAMEGEN=${source_framegen:-} \
+     python3 - "$build" "$work/make.log" "$work/report.json" "$sdk" "$WINE_COMMIT" "$prx" "$prx_status" \
+     $ordered <<'PY'
+ import hashlib, json, os, re, shutil, subprocess, sys
+@@ -769,7 +785,7 @@ result["pe"] = {str(path.relative_to(Path(prx).parent / "pe")): hashlib.sha256(p
+ # bundle staged for crypt32. Null when not linked or not recorded.
+ result["sources"] = {key: os.environ.get(f"PW_SOURCE_{key.upper()}") or None
+                      for key in ("prx_foundation", "ps5_mesa", "ps5_vulkan", "radv_payload_sdk", "ps5vk", "ca_bundle",
+-                                 "ffmpeg")}
++                                 "ffmpeg", "framegen")}
+ Path(report).write_text(json.dumps(result, indent=2) + "\n")
+ for target, entry in result["targets"].items():
+     print(f"{target}: built={entry['built']} malloc={entry.get('malloc', '-')} "
+diff --git a/tools/link_radv_prx.sh b/tools/link_radv_prx.sh
+index db992ca..667dc1a 100755
+--- a/tools/link_radv_prx.sh
++++ b/tools/link_radv_prx.sh
+@@ -12,11 +12,20 @@
+ # pw_vulkan_radv.c learns the output's handle for the hardware cursor, and
+ # its framebuffer registrations and flips for PC5's frame counter and light bar.
+ #
+-# Usage: tools/link_radv_prx.sh RADV_CHECKOUT PRX_DIR NATIVE_TOOL PIE_SCRIPT
++# With a ps5-framegen checkout at FRAMEGEN_COMMIT, its interpolator (AMD
++# FSR3's optical flow, GPL-3.0-or-later, its shaders MIT) is linked in, behind
++# wine/ps5/pw_framegen.cpp: frame generation for a game run with
++# PW_PC5_FRAMEGEN=1 (wine/ps5/pw_framegen.h). Without one, pw_framegen_none.c
++# leaves every entry point the driver's.
++#
++# Usage: tools/link_radv_prx.sh RADV_CHECKOUT PRX_DIR NATIVE_TOOL PIE_SCRIPT [FRAMEGEN_CHECKOUT]
+ set -euo pipefail
+ 
++FRAMEGEN_COMMIT=64362101757cdd6f7df9eeb984cb53f03f1fbfca
++FRAMEGEN_URL=https://github.com/Swordpdf/ps5-framegen.git
++
+ root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+-radv=$1 prx=$2 tool=$3 pie=$4
++radv=$1 prx=$2 tool=$3 pie=$4 framegen=${5:-}
+ sdk=$radv/.deps/native/ps5-payload-sdk
+ install=$radv/.deps/native/radv-release
+ archive=$install/lib/libvulkan_radeon.ps5.a
+@@ -54,9 +63,27 @@ for unit in pw_vk_radv_profile pw_vk_radv_profile_wrap; do
+     "$sdk/bin/prospero-clang" -std=c11 -O2 -Wall -Wextra -Werror -fPIC -I"$install/include" -I"$root/wine/ps5" \
+         -c "$root/wine/ps5/$unit.c" -o "$work/obj/$unit.o"
+ done
++# Frame generation: ps5-framegen's interpolator and the glue, or none.
++framegen_objects=()
++if [[ -n $framegen ]]; then
++    [[ $(git -C "$framegen" rev-parse HEAD 2>/dev/null) == "$FRAMEGEN_COMMIT" ]] ||
++        { echo "$framegen is not ps5-framegen $FRAMEGEN_COMMIT" >&2; exit 2; }
++    for source in "$framegen/src/ps5_framegen.cpp" "$root/wine/ps5/pw_framegen.cpp"; do
++        "$sdk/bin/prospero-clang++" -std=c++17 -O2 -Wall -Wno-missing-field-initializers -fPIC \
++            -I"$install/include" -I"$root/wine/ps5" -I"$framegen/src" \
++            '-DPS5_FRAMEGEN_VULKAN_HEADER="pw_framegen_vk.h"' \
++            -c "$source" -o "$work/obj/$(basename "$source" .cpp).o"
++        framegen_objects+=("$work/obj/$(basename "$source" .cpp).o")
++    done
++else
++    "$sdk/bin/prospero-clang" -std=c11 -O2 -Wall -Wextra -Werror -fPIC -I"$install/include" -I"$root/wine/ps5" \
++        -c "$root/wine/ps5/pw_framegen_none.c" -o "$work/obj/pw_framegen_none.o"
++    framegen_objects+=("$work/obj/pw_framegen_none.o")
++fi
+ python3 "$root/tools/gen_prx_descriptor.py" "$work/obj/libvulkan_desc.c" \
+     vkGetInstanceProcAddr vkGetDeviceProcAddr pw_videoout_idle pw_videoout_show_tiled pw_videoout_cursor \
+-    pw_vk_radv_profile_set_frame_hook pw_pc5_hud pw_pc5_hud_stats pw_pc5_hud_tick pw_pc5_screen_color
++    pw_vk_radv_profile_set_frame_hook pw_pc5_hud pw_pc5_hud_stats pw_pc5_hud_tick pw_pc5_screen_color \
++    pw_framegen_counts
+ "$sdk/bin/prospero-clang" -std=c11 -O2 -Wall -Wextra -Werror -fPIC -I"$root/wine/ps5" \
+     -c "$work/obj/libvulkan_desc.c" -o "$work/obj/libvulkan_desc.o"
+ 
+@@ -66,7 +93,7 @@ python3 "$root/tools/gen_prx_descriptor.py" "$work/obj/libvulkan_desc.c" \
+     --wrap=sceVideoOutUnregisterBuffers --wrap=sceVideoOutSubmitFlip \
+     --warn-unresolved-symbols -o "$prx/libvulkan.shared.elf" \
+     "$work/obj/pw_vulkan_radv.o" "$work/obj/pw_vk_radv_profile.o" "$work/obj/pw_vk_radv_profile_wrap.o" \
+-    "$work/obj/libvulkan_desc.o" \
++    "${framegen_objects[@]}" "$work/obj/libvulkan_desc.o" \
+     "$work/stubs/libSceAgc.so" "$work/stubs/libSceAgcDriver.so" \
+     "${radv_link_flags[@]}" "${radv_link_inputs[@]}" \
+     --as-needed "$sdk"/target/lib/*.so > "$log" 2>&1
+diff --git a/tools/package_release.sh b/tools/package_release.sh
+index 83ab6af..dbd26d2 100755
+--- a/tools/package_release.sh
++++ b/tools/package_release.sh
+@@ -164,6 +164,7 @@ if [ "$tls" = 1 ]; then
+     cp -R "$wine_ps5/prx/licenses/nettle" "$app/LICENSES/nettle"
+ fi
+ [ "$media" = 0 ] || cp -R "$wine_ps5/prx/licenses/ffmpeg" "$app/LICENSES/ffmpeg"
++[ ! -d "$wine_ps5/prx/licenses/ps5-framegen" ] || cp -R "$wine_ps5/prx/licenses/ps5-framegen" "$app/LICENSES/ps5-framegen"
+ 
+ # SOURCES.txt: the revision of each part, from the build's own records.
+ python3 - "$root" "$wine_ps5/report.json" "$lapy_release" "$app" <<'PY' || exit 2
+@@ -238,6 +239,9 @@ if (app / "win/wine/lib/wine/x86_64-unix/winegstreamer.prx").exists():
+               f"{pin('build_ffmpeg_ps5.sh', 'FFMPEG_URL')}  commit {sources['ffmpeg']}"]
+ else:
+     lines += ["FFmpeg (winedmo.prx, winegstreamer.prx)  not included"]
++if sources.get("framegen"):
++    lines += ["ps5-framegen (frame generation in libvulkan.prx)  "
++              f"{pin('link_radv_prx.sh', 'FRAMEGEN_URL')}  commit {sources['framegen']}"]
+ (app / "SOURCES.txt").write_text("\n".join(lines) + "\n")
+ PY
+ 
+diff --git a/wine/ps5/pw_framegen.cpp b/wine/ps5/pw_framegen.cpp
+new file mode 100644
+index 0000000..6767e2f
+--- /dev/null
++++ b/wine/ps5/pw_framegen.cpp
+@@ -0,0 +1,633 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/* Frame generation in libvulkan.prx (pw_framegen.h): ps5-framegen's
++ * interpolator (GPL-3.0-or-later, https://github.com/Swordpdf/ps5-framegen)
++ * between a game's swapchain and RADV's presents.
++ *
++ * For each frame of the game, on the queue it presents on and after what the
++ * game's present waited for: the frame is copied into the interpolator,
++ * which makes the frame halfway between it and the one before; that one is
++ * put in a second image of the swapchain and presented first, then the
++ * game's own. The swapchain is made with one image more for it, and with
++ * transfer usage. The game is held at half the display's rate, less 0.05 fps
++ * (ps5-framegen's latency hold), by sleeping before its present, so FIFO
++ * never queues: each of its frames is two refreshes, one of them generated.
++ * A game whose frames come later than that is shown as it is, and frames
++ * are generated again once eight in a row keep time; the first of those
++ * only primes the interpolator (its reset). */
++#include "pw_framegen.h"
++#include "pw_framegen_vk.h"
++#include "ps5_framegen.h"
++
++#include <pthread.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++
++#include <string>
++#include <vector>
++
++extern "C" PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char *name);
++extern "C" PFN_vkVoidFunction VKAPI_CALL vk_common_GetDeviceProcAddr(VkDevice device, const char *name);
++
++struct pw_framegen_vk pw_framegen_vk;
++
++namespace
++{
++constexpr double k_display_hz = 59.94;
++/* Half the display's rate, less 0.05 fps: the queue stays empty. */
++constexpr double k_period = 1.0 / (k_display_hz / 2.0 - 0.05);
++constexpr unsigned k_slots = 3;
++constexpr unsigned k_settle = 8;
++constexpr double k_log_every = 10.0;
++
++struct
++{
++    PFN_vkCreateDevice CreateDevice;
++    PFN_vkDestroyDevice DestroyDevice;
++    PFN_vkGetDeviceQueue GetDeviceQueue;
++    PFN_vkGetDeviceQueue2 GetDeviceQueue2;
++    PFN_vkCreateSwapchainKHR CreateSwapchainKHR;
++    PFN_vkDestroySwapchainKHR DestroySwapchainKHR;
++    PFN_vkQueuePresentKHR QueuePresentKHR;
++} next;
++
++pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
++int wanted = -1;
++VkInstance instance = VK_NULL_HANDLE;
++VkDevice table_device = VK_NULL_HANDLE;
++
++struct device_entry { VkDevice device; VkPhysicalDevice physical; };
++struct queue_entry { VkQueue queue; VkDevice device; uint32_t family; };
++std::vector<device_entry> devices;
++std::vector<queue_entry> queues;
++
++struct slot
++{
++    VkCommandBuffer cmd = VK_NULL_HANDLE;
++    VkFence fence = VK_NULL_HANDLE;
++    VkSemaphore acquired = VK_NULL_HANDLE, generated = VK_NULL_HANDLE, shown = VK_NULL_HANDLE;
++};
++
++struct swapchain
++{
++    VkDevice device = VK_NULL_HANDLE;
++    VkPhysicalDevice physical = VK_NULL_HANDLE;
++    VkSwapchainKHR handle = VK_NULL_HANDLE;
++    VkFormat format = VK_FORMAT_UNDEFINED;
++    VkExtent2D extent{};
++    std::vector<VkImage> images;
++    ps5::framegen::interpolator fg;
++    bool ready = false, failed = false;
++    VkCommandPool pool = VK_NULL_HANDLE;
++    uint32_t family = 0;
++    slot slots[k_slots];
++    uint64_t frames = 0, generated = 0, shown = 0, late = 0;
++    double next_due = 0.0, last = 0.0, logged = 0.0;
++    unsigned on_time = 0;
++    bool engaged = false, frames_general = false;
++};
++std::vector<swapchain *> swapchains;
++uint64_t total_frames, total_generated;   /* of swapchains already gone */
++
++double now_seconds()
++{
++    timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
++}
++
++void sleep_until(double when)
++{
++    double left = when - now_seconds();
++    if (left <= 0.0)
++        return;
++    timespec ts;
++    ts.tv_sec = (time_t)left;
++    ts.tv_nsec = (long)((left - (double)ts.tv_sec) * 1e9);
++    nanosleep(&ts, nullptr);
++}
++
++bool is_wanted()
++{
++    if (wanted < 0)
++    {
++        const char *value = getenv("PW_PC5_FRAMEGEN");
++        wanted = value && !strcmp(value, "1");
++        if (wanted)
++            fprintf(stderr, "pw_framegen: on, %.2f fps shown at %.2f\n", 1.0 / k_period, 2.0 / k_period);
++    }
++    return wanted > 0;
++}
++
++/* Under the lock. */
++VkPhysicalDevice physical_of(VkDevice device)
++{
++    for (const auto &entry : devices)
++        if (entry.device == device)
++            return entry.physical;
++    return VK_NULL_HANDLE;
++}
++
++bool family_of(VkQueue queue, VkDevice device, uint32_t &family)
++{
++    for (const auto &entry : queues)
++        if (entry.queue == queue && entry.device == device)
++        {
++            family = entry.family;
++            return true;
++        }
++    return false;
++}
++
++swapchain *find(VkSwapchainKHR handle)
++{
++    for (auto *sc : swapchains)
++        if (sc->handle == handle)
++            return sc;
++    return nullptr;
++}
++
++/* RADV's own entry points for the interpolator and this file, once. */
++bool load_table(VkDevice device)
++{
++    bool ok = true;
++
++    if (table_device == device)
++        return true;
++    if (!instance)
++        return false;
++#define PW_FRAMEGEN_LOAD_DEVICE(name) \
++    ok = (pw_framegen_vk.name = (PFN_vk##name)vk_common_GetDeviceProcAddr(device, "vk" #name)) && ok;
++#define PW_FRAMEGEN_LOAD_INSTANCE(name) \
++    ok = (pw_framegen_vk.name = (PFN_vk##name)vk_icdGetInstanceProcAddr(instance, "vk" #name)) && ok;
++    PW_FRAMEGEN_VK_DEVICE_COMMANDS(PW_FRAMEGEN_LOAD_DEVICE)
++    PW_FRAMEGEN_VK_INSTANCE_COMMANDS(PW_FRAMEGEN_LOAD_INSTANCE)
++#undef PW_FRAMEGEN_LOAD_DEVICE
++#undef PW_FRAMEGEN_LOAD_INSTANCE
++    if (ok)
++        table_device = device;
++    return ok;
++}
++
++bool format_supported(VkFormat format)
++{
++    return format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB
++        || format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_R8G8B8A8_SRGB;
++}
++
++void release(swapchain *sc)
++{
++    if (sc->ready)
++    {
++        for (auto &s : sc->slots)
++        {
++            if (s.fence)
++            {
++                vkWaitForFences(sc->device, 1, &s.fence, VK_TRUE, UINT64_MAX);
++                vkDestroyFence(sc->device, s.fence, nullptr);
++            }
++            if (s.acquired) vkDestroySemaphore(sc->device, s.acquired, nullptr);
++            if (s.generated) vkDestroySemaphore(sc->device, s.generated, nullptr);
++            if (s.shown) vkDestroySemaphore(sc->device, s.shown, nullptr);
++        }
++        if (sc->pool)
++            vkDestroyCommandPool(sc->device, sc->pool, nullptr);
++        sc->fg.destroy();
++    }
++    sc->ready = false;
++}
++
++/* At the swapchain's first present: its images, the interpolator, the
++ * command buffers on the queue's family. */
++bool setup(swapchain *sc, uint32_t family)
++{
++    std::string error;
++    uint32_t count = 0;
++
++    if (!load_table(sc->device))
++    {
++        fprintf(stderr, "pw_framegen: a Vulkan entry point is missing; off\n");
++        return false;
++    }
++    if (!format_supported(sc->format))
++    {
++        fprintf(stderr, "pw_framegen: swapchain format %d is not 8-bit RGB; off for it\n", (int)sc->format);
++        return false;
++    }
++    if (vkGetSwapchainImagesKHR(sc->device, sc->handle, &count, nullptr) != VK_SUCCESS || count < 2)
++        return false;
++    sc->images.resize(count);
++    if (vkGetSwapchainImagesKHR(sc->device, sc->handle, &count, sc->images.data()) != VK_SUCCESS)
++        return false;
++    if (!sc->fg.create(sc->physical, sc->device, sc->extent.width, sc->extent.height, error, sc->format))
++    {
++        fprintf(stderr, "pw_framegen: the interpolator could not be made (%s); off\n", error.c_str());
++        return false;
++    }
++
++    VkCommandPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
++    pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
++    pool_info.queueFamilyIndex = family;
++    if (vkCreateCommandPool(sc->device, &pool_info, nullptr, &sc->pool) != VK_SUCCESS)
++    {
++        sc->fg.destroy();
++        return false;
++    }
++    sc->family = family;
++    sc->ready = true;   /* release() undoes the rest from here */
++    for (auto &s : sc->slots)
++    {
++        VkCommandBufferAllocateInfo cmd_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
++        VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
++        VkSemaphoreCreateInfo semaphore_info{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
++
++        cmd_info.commandPool = sc->pool;
++        cmd_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
++        cmd_info.commandBufferCount = 1;
++        fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
++        if (vkAllocateCommandBuffers(sc->device, &cmd_info, &s.cmd) != VK_SUCCESS
++            || vkCreateFence(sc->device, &fence_info, nullptr, &s.fence) != VK_SUCCESS
++            || vkCreateSemaphore(sc->device, &semaphore_info, nullptr, &s.acquired) != VK_SUCCESS
++            || vkCreateSemaphore(sc->device, &semaphore_info, nullptr, &s.generated) != VK_SUCCESS
++            || vkCreateSemaphore(sc->device, &semaphore_info, nullptr, &s.shown) != VK_SUCCESS)
++        {
++            release(sc);
++            return false;
++        }
++    }
++    fprintf(stderr, "pw_framegen: swapchain %ux%u format %d, %u images\n", sc->extent.width, sc->extent.height,
++        (int)sc->format, count);
++    return true;
++}
++
++void barrier(VkCommandBuffer cmd, VkImage image, VkImageLayout from, VkImageLayout to, VkAccessFlags src_access,
++    VkAccessFlags dst_access, VkPipelineStageFlags src_stage, VkPipelineStageFlags dst_stage)
++{
++    VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
++    b.srcAccessMask = src_access;
++    b.dstAccessMask = dst_access;
++    b.oldLayout = from;
++    b.newLayout = to;
++    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++    b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++    b.image = image;
++    b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
++    vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &b);
++}
++
++void copy_whole(VkCommandBuffer cmd, VkImage from, VkImageLayout from_layout, VkImage to, VkImageLayout to_layout,
++    VkExtent2D extent)
++{
++    VkImageCopy region{};
++    region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
++    region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
++    region.extent = {extent.width, extent.height, 1};
++    vkCmdCopyImage(cmd, from, from_layout, to, to_layout, 1, &region);
++}
++
++void blit_whole(VkCommandBuffer cmd, VkImage from, VkImageLayout from_layout, VkImage to, VkImageLayout to_layout,
++    VkExtent2D extent)
++{
++    VkImageBlit region{};
++    region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
++    region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
++    region.srcOffsets[1] = {(int32_t)extent.width, (int32_t)extent.height, 1};
++    region.dstOffsets[1] = {(int32_t)extent.width, (int32_t)extent.height, 1};
++    vkCmdBlitImage(cmd, from, from_layout, to, to_layout, 1, &region, VK_FILTER_NEAREST);
++}
++
++void log_state(swapchain *sc, double now)
++{
++    double mean = 0.0, most = 0.0, flow = 0.0;
++    uint32_t timed = 0;
++
++    if (now - sc->logged < k_log_every)
++        return;
++    sc->logged = now;
++    if (sc->fg.take_gpu_time(mean, most, timed, flow))
++        fprintf(stderr, "pw_framegen: frames=%llu generated=%llu late=%llu engaged=%d gpu=%.2fms (flow %.2f) max=%.2fms\n",
++            (unsigned long long)sc->frames, (unsigned long long)sc->generated, (unsigned long long)sc->late,
++            (int)sc->engaged, mean, flow, most);
++    else
++        fprintf(stderr, "pw_framegen: frames=%llu generated=%llu late=%llu engaged=%d\n",
++            (unsigned long long)sc->frames, (unsigned long long)sc->generated, (unsigned long long)sc->late,
++            (int)sc->engaged);
++}
++
++/* The game's present with the frame before it generated; result is the game's. */
++VkResult present_generated(swapchain *sc, VkQueue queue, const VkPresentInfoKHR *info, bool reset)
++{
++    slot &s = sc->slots[sc->frames % k_slots];
++    uint32_t game = info->pImageIndices[0], extra = UINT32_MAX;
++    VkImage image = sc->images[game];
++    std::vector<VkSemaphore> waits(info->pWaitSemaphores, info->pWaitSemaphores + info->waitSemaphoreCount);
++    std::vector<VkPipelineStageFlags> stages(waits.size(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
++    VkSemaphore signals[2] = {s.shown, s.generated};
++    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
++    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
++    VkPresentInfoKHR present;
++    VkResult result;
++    bool made;
++
++    vkWaitForFences(sc->device, 1, &s.fence, VK_TRUE, UINT64_MAX);
++    /* The second image, for the generated frame: one refresh at most. */
++    if (!reset)
++    {
++        result = vkAcquireNextImageKHR(sc->device, sc->handle, 50000000ull, s.acquired, VK_NULL_HANDLE, &extra);
++        if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
++            extra = UINT32_MAX;
++    }
++    if (extra != UINT32_MAX)
++    {
++        waits.push_back(s.acquired);
++        stages.push_back(VK_PIPELINE_STAGE_TRANSFER_BIT);
++    }
++    vkResetFences(sc->device, 1, &s.fence);
++
++    vkResetCommandBuffer(s.cmd, 0);
++    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
++    vkBeginCommandBuffer(s.cmd, &begin);
++    barrier(s.cmd, image, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 0,
++        VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
++    /* The interpolator's two frames to GENERAL once (its own prepare() names
++     * a shader read without the compute stage, which the validation layer
++     * reports). */
++    if (!sc->frames_general)
++    {
++        barrier(s.cmd, sc->fg.frame_image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0,
++            VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
++            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
++        barrier(s.cmd, sc->fg.previous_image(), VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0,
++            VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
++            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
++        sc->frames_general = true;
++    }
++    copy_whole(s.cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, sc->fg.frame_image(), VK_IMAGE_LAYOUT_GENERAL,
++        sc->extent);
++    made = sc->fg.record(s.cmd, reset || extra == UINT32_MAX);
++    if (extra != UINT32_MAX)
++    {
++        VkImage target = sc->images[extra];
++
++        barrier(s.cmd, target, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
++            VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
++        /* Without a frame in between, the game's frame twice: the image was
++         * taken and is shown either way. */
++        if (made)
++            blit_whole(s.cmd, sc->fg.output_image(), VK_IMAGE_LAYOUT_GENERAL, target,
++                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, sc->extent);
++        else
++            copy_whole(s.cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target,
++                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, sc->extent);
++        barrier(s.cmd, target, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
++            VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
++    }
++    barrier(s.cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
++        VK_ACCESS_TRANSFER_READ_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
++    vkEndCommandBuffer(s.cmd);
++
++    submit.waitSemaphoreCount = (uint32_t)waits.size();
++    submit.pWaitSemaphores = waits.data();
++    submit.pWaitDstStageMask = stages.data();
++    submit.commandBufferCount = 1;
++    submit.pCommandBuffers = &s.cmd;
++    submit.signalSemaphoreCount = extra != UINT32_MAX ? 2 : 1;
++    submit.pSignalSemaphores = signals;
++    if ((result = vkQueueSubmit(queue, 1, &submit, s.fence)) != VK_SUCCESS)
++    {
++        fprintf(stderr, "pw_framegen: submit failed (%d); off for this swapchain\n", (int)result);
++        sc->failed = true;
++        return result;
++    }
++
++    if (extra != UINT32_MAX)
++    {
++        VkPresentInfoKHR between{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
++        between.waitSemaphoreCount = 1;
++        between.pWaitSemaphores = &s.generated;
++        between.swapchainCount = 1;
++        between.pSwapchains = &sc->handle;
++        between.pImageIndices = &extra;
++        next.QueuePresentKHR(queue, &between);
++        sc->generated += made;
++    }
++
++    present = *info;
++    present.waitSemaphoreCount = 1;
++    present.pWaitSemaphores = &s.shown;
++    result = next.QueuePresentKHR(queue, &present);
++    sc->fg.advance();
++    return result;
++}
++
++VKAPI_ATTR VkResult VKAPI_CALL wrap_CreateDevice(VkPhysicalDevice physical, const VkDeviceCreateInfo *info,
++    const VkAllocationCallbacks *allocator, VkDevice *device)
++{
++    VkResult result = next.CreateDevice(physical, info, allocator, device);
++
++    if (result == VK_SUCCESS)
++    {
++        pthread_mutex_lock(&lock);
++        devices.push_back({*device, physical});
++        pthread_mutex_unlock(&lock);
++    }
++    return result;
++}
++
++VKAPI_ATTR void VKAPI_CALL wrap_DestroyDevice(VkDevice device, const VkAllocationCallbacks *allocator)
++{
++    pthread_mutex_lock(&lock);
++    for (size_t i = 0; i < swapchains.size();)
++    {
++        if (swapchains[i]->device != device)
++        {
++            i++;
++            continue;
++        }
++        release(swapchains[i]);
++        delete swapchains[i];
++        swapchains.erase(swapchains.begin() + i);
++    }
++    for (size_t i = 0; i < devices.size();)
++        devices[i].device == device ? (void)devices.erase(devices.begin() + i) : (void)i++;
++    for (size_t i = 0; i < queues.size();)
++        queues[i].device == device ? (void)queues.erase(queues.begin() + i) : (void)i++;
++    if (table_device == device)
++        table_device = VK_NULL_HANDLE;
++    pthread_mutex_unlock(&lock);
++    next.DestroyDevice(device, allocator);
++}
++
++VKAPI_ATTR void VKAPI_CALL wrap_GetDeviceQueue(VkDevice device, uint32_t family, uint32_t index, VkQueue *queue)
++{
++    next.GetDeviceQueue(device, family, index, queue);
++    pthread_mutex_lock(&lock);
++    queues.push_back({*queue, device, family});
++    pthread_mutex_unlock(&lock);
++}
++
++VKAPI_ATTR void VKAPI_CALL wrap_GetDeviceQueue2(VkDevice device, const VkDeviceQueueInfo2 *info, VkQueue *queue)
++{
++    next.GetDeviceQueue2(device, info, queue);
++    if (*queue)
++    {
++        pthread_mutex_lock(&lock);
++        queues.push_back({*queue, device, info->queueFamilyIndex});
++        pthread_mutex_unlock(&lock);
++    }
++}
++
++VKAPI_ATTR VkResult VKAPI_CALL wrap_CreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR *info,
++    const VkAllocationCallbacks *allocator, VkSwapchainKHR *handle)
++{
++    VkSwapchainCreateInfoKHR ours = *info;
++    VkResult result;
++
++    if (!is_wanted())
++        return next.CreateSwapchainKHR(device, info, allocator, handle);
++    /* An image more for the generated frame, and copies in and out of them. */
++    ours.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
++    ours.minImageCount = info->minImageCount + 1;
++    if ((result = next.CreateSwapchainKHR(device, &ours, allocator, handle)) != VK_SUCCESS)
++    {
++        ours.minImageCount = info->minImageCount;
++        if ((result = next.CreateSwapchainKHR(device, &ours, allocator, handle)) != VK_SUCCESS)
++        {
++            fprintf(stderr, "pw_framegen: the swapchain could not be made for it (%d)\n", (int)result);
++            return next.CreateSwapchainKHR(device, info, allocator, handle);
++        }
++    }
++
++    auto *sc = new swapchain;
++    sc->device = device;
++    sc->handle = *handle;
++    sc->format = info->imageFormat;
++    sc->extent = info->imageExtent;
++    pthread_mutex_lock(&lock);
++    sc->physical = physical_of(device);
++    if (!sc->physical)
++        sc->failed = true;
++    swapchains.push_back(sc);
++    pthread_mutex_unlock(&lock);
++    return result;
++}
++
++VKAPI_ATTR void VKAPI_CALL wrap_DestroySwapchainKHR(VkDevice device, VkSwapchainKHR handle,
++    const VkAllocationCallbacks *allocator)
++{
++    swapchain *sc;
++
++    pthread_mutex_lock(&lock);
++    if ((sc = find(handle)))
++    {
++        for (size_t i = 0; i < swapchains.size(); i++)
++            if (swapchains[i] == sc)
++                swapchains.erase(swapchains.begin() + i);
++    }
++    pthread_mutex_unlock(&lock);
++    if (sc)
++    {
++        release(sc);
++        pthread_mutex_lock(&lock);
++        total_frames += sc->frames;
++        total_generated += sc->generated;
++        pthread_mutex_unlock(&lock);
++        delete sc;
++    }
++    next.DestroySwapchainKHR(device, handle, allocator);
++}
++
++VKAPI_ATTR VkResult VKAPI_CALL wrap_QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *info)
++{
++    swapchain *sc = nullptr;
++    uint32_t family = 0;
++    bool known;
++    double now, interval;
++
++    if (!is_wanted() || info->swapchainCount != 1)
++        return next.QueuePresentKHR(queue, info);
++    pthread_mutex_lock(&lock);
++    sc = find(info->pSwapchains[0]);
++    known = sc && family_of(queue, sc->device, family);
++    pthread_mutex_unlock(&lock);
++    if (!sc || sc->failed)
++        return next.QueuePresentKHR(queue, info);
++    if (!sc->ready && (!known || !setup(sc, family)))
++    {
++        sc->failed = true;
++        return next.QueuePresentKHR(queue, info);
++    }
++
++    /* The hold: a frame at most every k_period. */
++    sleep_until(sc->next_due);
++    now = now_seconds();
++    interval = sc->last ? now - sc->last : 0.0;
++    sc->last = now;
++    sc->next_due = (sc->next_due > now - k_period ? sc->next_due : now) + k_period;
++    if (sc->frames && interval > 1.25 * k_period)
++    {
++        if (sc->engaged)
++            fprintf(stderr, "pw_framegen: frame %.1f ms late; shown as it is\n", (interval - k_period) * 1e3);
++        sc->late++;
++        sc->on_time = 0;
++        sc->engaged = false;
++    }
++    else if (sc->on_time < k_settle)
++        sc->on_time++;
++    sc->frames++;
++    log_state(sc, now);
++
++    if (sc->on_time < k_settle)
++        return next.QueuePresentKHR(queue, info);
++    /* Engaging: the first frame only primes the interpolator. */
++    bool reset = !sc->engaged;
++    sc->engaged = true;
++    return present_generated(sc, queue, info, reset);
++}
++}
++
++extern "C" int pw_framegen_counts(uint64_t *frames, uint64_t *generated)
++{
++    int engaged = 0;
++
++    pthread_mutex_lock(&lock);
++    *frames = total_frames;
++    *generated = total_generated;
++    for (auto *sc : swapchains)
++    {
++        *frames += sc->frames;
++        *generated += sc->generated;
++        engaged |= sc->engaged;
++    }
++    pthread_mutex_unlock(&lock);
++    return engaged;
++}
++
++extern "C" void pw_framegen_instance(VkInstance new_instance)
++{
++    if (new_instance && !instance)
++        instance = new_instance;
++}
++
++extern "C" PFN_vkVoidFunction pw_framegen_resolve(const char *name, PFN_vkVoidFunction function)
++{
++    if (!name || !function || !is_wanted())
++        return function;
++#define PW_FRAMEGEN_WRAP(entry) \
++    if (!strcmp(name, "vk" #entry)) \
++    { \
++        if (!next.entry) \
++            next.entry = (PFN_vk##entry)function; \
++        return (PFN_vkVoidFunction)wrap_##entry; \
++    }
++    PW_FRAMEGEN_WRAP(CreateDevice)
++    PW_FRAMEGEN_WRAP(DestroyDevice)
++    PW_FRAMEGEN_WRAP(GetDeviceQueue)
++    PW_FRAMEGEN_WRAP(GetDeviceQueue2)
++    PW_FRAMEGEN_WRAP(CreateSwapchainKHR)
++    PW_FRAMEGEN_WRAP(DestroySwapchainKHR)
++    PW_FRAMEGEN_WRAP(QueuePresentKHR)
++#undef PW_FRAMEGEN_WRAP
++    return function;
++}
+diff --git a/wine/ps5/pw_framegen.h b/wine/ps5/pw_framegen.h
+new file mode 100644
+index 0000000..d5ef5a6
+--- /dev/null
++++ b/wine/ps5/pw_framegen.h
+@@ -0,0 +1,38 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/* Frame generation in libvulkan.prx (pw_framegen.cpp): with PW_PC5_FRAMEGEN=1
++ * in the environment (PC5 sets it for a game whose Frame generation is on),
++ * a game's swapchain is held at half the display's rate (30 fps on the
++ * console's 59.94 Hz) and each of its frames is shown after the frame
++ * between it and the one before, made by ps5-framegen's interpolator (AMD
++ * FSR3's optical flow): 30 fps is shown at 60. A game slower than that is
++ * shown as it is, without frames in between, until it keeps up again.
++ *
++ * The resolver wraps the entry points it needs (the device's, its queues',
++ * its swapchains' and their presents) around the ones it is given; every
++ * other name, and every name when frame generation is off, gets next. */
++#ifndef PW_FRAMEGEN_H
++#define PW_FRAMEGEN_H
++
++#ifndef VK_NO_PROTOTYPES
++#define VK_NO_PROTOTYPES
++#endif
++#include <vulkan/vulkan_core.h>
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* An instance Wine asked for an entry point of: the physical devices'
++ * commands come from it. */
++void pw_framegen_instance(VkInstance instance);
++PFN_vkVoidFunction pw_framegen_resolve(const char *name, PFN_vkVoidFunction next);
++/* The game's frames presented through it and the frames generated between
++ * them, over every swapchain so far; 1 while frames are being generated. */
++int pw_framegen_counts(uint64_t *frames, uint64_t *generated);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/wine/ps5/pw_framegen_none.c b/wine/ps5/pw_framegen_none.c
+new file mode 100644
+index 0000000..77256cb
+--- /dev/null
++++ b/wine/ps5/pw_framegen_none.c
+@@ -0,0 +1,21 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/* libvulkan.prx without frame generation (tools/link_radv_prx.sh given no
++ * ps5-framegen checkout): every entry point is the driver's own. */
++#include "pw_framegen.h"
++
++void pw_framegen_instance(VkInstance instance)
++{
++    (void)instance;
++}
++
++PFN_vkVoidFunction pw_framegen_resolve(const char *name, PFN_vkVoidFunction next)
++{
++    (void)name;
++    return next;
++}
++
++int pw_framegen_counts(uint64_t *frames, uint64_t *generated)
++{
++    *frames = *generated = 0;
++    return 0;
++}
+diff --git a/wine/ps5/pw_framegen_vk.h b/wine/ps5/pw_framegen_vk.h
+new file mode 100644
+index 0000000..a201c08
+--- /dev/null
++++ b/wine/ps5/pw_framegen_vk.h
+@@ -0,0 +1,108 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++/* The Vulkan commands ps5-framegen's interpolator calls, under their usual
++ * names, through a table libvulkan.prx fills from RADV's own entry points
++ * (pw_framegen.cpp): Mesa's archive exports no vk* functions, only its ICD
++ * interface. ps5_framegen.cpp is built with
++ * -DPS5_FRAMEGEN_VULKAN_HEADER='"pw_framegen_vk.h"'. */
++#ifndef PW_FRAMEGEN_VK_H
++#define PW_FRAMEGEN_VK_H
++
++#ifndef VK_NO_PROTOTYPES
++#define VK_NO_PROTOTYPES
++#endif
++#include <vulkan/vulkan_core.h>
++
++/* X(name): every command, the interpolator's and the glue's. */
++#define PW_FRAMEGEN_VK_DEVICE_COMMANDS(X) \
++    X(AllocateCommandBuffers) X(AllocateDescriptorSets) X(AllocateMemory) X(BeginCommandBuffer) \
++    X(BindBufferMemory) X(BindImageMemory) X(CmdBindDescriptorSets) X(CmdBindPipeline) X(CmdBlitImage) \
++    X(CmdClearColorImage) X(CmdCopyImage) X(CmdDispatch) X(CmdFillBuffer) X(CmdPipelineBarrier) \
++    X(CmdResetQueryPool) X(CreateBuffer) X(CreateCommandPool) X(CreateComputePipelines) \
++    X(CreateDescriptorPool) X(CreateDescriptorSetLayout) X(CreateFence) X(CreateImage) X(CreateImageView) \
++    X(CreatePipelineLayout) X(CreateQueryPool) X(CreateSampler) X(CreateSemaphore) X(CreateShaderModule) \
++    X(DestroyBuffer) X(DestroyCommandPool) X(DestroyDescriptorPool) X(DestroyDescriptorSetLayout) \
++    X(DestroyFence) X(DestroyImage) X(DestroyImageView) X(DestroyPipeline) X(DestroyPipelineLayout) \
++    X(DestroyQueryPool) X(DestroySampler) X(DestroySemaphore) X(DestroyShaderModule) X(DeviceWaitIdle) \
++    X(EndCommandBuffer) X(FreeMemory) X(GetBufferMemoryRequirements) X(GetDeviceProcAddr) \
++    X(GetImageMemoryRequirements) X(GetQueryPoolResults) X(GetSwapchainImagesKHR) X(MapMemory) \
++    X(QueueSubmit) X(ResetCommandBuffer) X(ResetFences) X(UnmapMemory) X(UpdateDescriptorSets) \
++    X(WaitForFences) X(AcquireNextImageKHR)
++#define PW_FRAMEGEN_VK_INSTANCE_COMMANDS(X) \
++    X(GetPhysicalDeviceMemoryProperties) X(GetPhysicalDeviceProperties)
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++struct pw_framegen_vk
++{
++#define PW_FRAMEGEN_VK_FIELD(name) PFN_vk##name name;
++    PW_FRAMEGEN_VK_DEVICE_COMMANDS(PW_FRAMEGEN_VK_FIELD)
++    PW_FRAMEGEN_VK_INSTANCE_COMMANDS(PW_FRAMEGEN_VK_FIELD)
++#undef PW_FRAMEGEN_VK_FIELD
++};
++extern struct pw_framegen_vk pw_framegen_vk;
++#ifdef __cplusplus
++}
++#endif
++
++#define vkAllocateCommandBuffers pw_framegen_vk.AllocateCommandBuffers
++#define vkAllocateDescriptorSets pw_framegen_vk.AllocateDescriptorSets
++#define vkAllocateMemory pw_framegen_vk.AllocateMemory
++#define vkBeginCommandBuffer pw_framegen_vk.BeginCommandBuffer
++#define vkBindBufferMemory pw_framegen_vk.BindBufferMemory
++#define vkBindImageMemory pw_framegen_vk.BindImageMemory
++#define vkCmdBindDescriptorSets pw_framegen_vk.CmdBindDescriptorSets
++#define vkCmdBindPipeline pw_framegen_vk.CmdBindPipeline
++#define vkCmdBlitImage pw_framegen_vk.CmdBlitImage
++#define vkCmdClearColorImage pw_framegen_vk.CmdClearColorImage
++#define vkCmdCopyImage pw_framegen_vk.CmdCopyImage
++#define vkCmdDispatch pw_framegen_vk.CmdDispatch
++#define vkCmdFillBuffer pw_framegen_vk.CmdFillBuffer
++#define vkCmdPipelineBarrier pw_framegen_vk.CmdPipelineBarrier
++#define vkCmdResetQueryPool pw_framegen_vk.CmdResetQueryPool
++#define vkCreateBuffer pw_framegen_vk.CreateBuffer
++#define vkCreateCommandPool pw_framegen_vk.CreateCommandPool
++#define vkCreateComputePipelines pw_framegen_vk.CreateComputePipelines
++#define vkCreateDescriptorPool pw_framegen_vk.CreateDescriptorPool
++#define vkCreateDescriptorSetLayout pw_framegen_vk.CreateDescriptorSetLayout
++#define vkCreateFence pw_framegen_vk.CreateFence
++#define vkCreateImage pw_framegen_vk.CreateImage
++#define vkCreateImageView pw_framegen_vk.CreateImageView
++#define vkCreatePipelineLayout pw_framegen_vk.CreatePipelineLayout
++#define vkCreateQueryPool pw_framegen_vk.CreateQueryPool
++#define vkCreateSampler pw_framegen_vk.CreateSampler
++#define vkCreateSemaphore pw_framegen_vk.CreateSemaphore
++#define vkCreateShaderModule pw_framegen_vk.CreateShaderModule
++#define vkDestroyBuffer pw_framegen_vk.DestroyBuffer
++#define vkDestroyCommandPool pw_framegen_vk.DestroyCommandPool
++#define vkDestroyDescriptorPool pw_framegen_vk.DestroyDescriptorPool
++#define vkDestroyDescriptorSetLayout pw_framegen_vk.DestroyDescriptorSetLayout
++#define vkDestroyFence pw_framegen_vk.DestroyFence
++#define vkDestroyImage pw_framegen_vk.DestroyImage
++#define vkDestroyImageView pw_framegen_vk.DestroyImageView
++#define vkDestroyPipeline pw_framegen_vk.DestroyPipeline
++#define vkDestroyPipelineLayout pw_framegen_vk.DestroyPipelineLayout
++#define vkDestroyQueryPool pw_framegen_vk.DestroyQueryPool
++#define vkDestroySampler pw_framegen_vk.DestroySampler
++#define vkDestroySemaphore pw_framegen_vk.DestroySemaphore
++#define vkDestroyShaderModule pw_framegen_vk.DestroyShaderModule
++#define vkDeviceWaitIdle pw_framegen_vk.DeviceWaitIdle
++#define vkEndCommandBuffer pw_framegen_vk.EndCommandBuffer
++#define vkFreeMemory pw_framegen_vk.FreeMemory
++#define vkGetBufferMemoryRequirements pw_framegen_vk.GetBufferMemoryRequirements
++#define vkGetDeviceProcAddr pw_framegen_vk.GetDeviceProcAddr
++#define vkGetImageMemoryRequirements pw_framegen_vk.GetImageMemoryRequirements
++#define vkGetQueryPoolResults pw_framegen_vk.GetQueryPoolResults
++#define vkGetSwapchainImagesKHR pw_framegen_vk.GetSwapchainImagesKHR
++#define vkMapMemory pw_framegen_vk.MapMemory
++#define vkQueueSubmit pw_framegen_vk.QueueSubmit
++#define vkResetCommandBuffer pw_framegen_vk.ResetCommandBuffer
++#define vkResetFences pw_framegen_vk.ResetFences
++#define vkUnmapMemory pw_framegen_vk.UnmapMemory
++#define vkUpdateDescriptorSets pw_framegen_vk.UpdateDescriptorSets
++#define vkWaitForFences pw_framegen_vk.WaitForFences
++#define vkAcquireNextImageKHR pw_framegen_vk.AcquireNextImageKHR
++#define vkGetPhysicalDeviceMemoryProperties pw_framegen_vk.GetPhysicalDeviceMemoryProperties
++#define vkGetPhysicalDeviceProperties pw_framegen_vk.GetPhysicalDeviceProperties
++
++#endif
+diff --git a/wine/ps5/pw_vulkan_radv.c b/wine/ps5/pw_vulkan_radv.c
+index d3457f1..1e3a22d 100644
+--- a/wine/ps5/pw_vulkan_radv.c
++++ b/wine/ps5/pw_vulkan_radv.c
+@@ -21,6 +21,7 @@
+ #endif
+ #include "pw_vk_radv_profile_wrap.h"
+ #include "pw_pc5_hud.h"
++#include "pw_framegen.h"
+ #include <time.h>
+ 
+ PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char *name);
+@@ -37,16 +38,18 @@ int pw_videoout_cursor(const uint32_t *argb, uint32_t width, uint32_t height, in
+  * device entry point through it, so both lookups go through the profile's
+  * resolver (pw_vk_radv_profile_wrap.c), which returns a timing wrapper for
+  * the entry points it times while the profile is on, and the driver's own
+- * pointer otherwise. */
++ * pointer otherwise; then through frame generation's (pw_framegen.h), which
++ * wraps the swapchain's entry points while it is on. */
+ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char *name)
+ {
+     if (name && !strcmp(name, "vkGetDeviceProcAddr")) return (PFN_vkVoidFunction)vkGetDeviceProcAddr;
+-    return pw_vk_radv_profile_resolve(name, vk_icdGetInstanceProcAddr(instance, name));
++    pw_framegen_instance(instance);
++    return pw_framegen_resolve(name, pw_vk_radv_profile_resolve(name, vk_icdGetInstanceProcAddr(instance, name)));
+ }
+ 
+ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char *name)
+ {
+-    return pw_vk_radv_profile_resolve(name, vk_common_GetDeviceProcAddr(device, name));
++    return pw_framegen_resolve(name, pw_vk_radv_profile_resolve(name, vk_common_GetDeviceProcAddr(device, name)));
+ }
+ 
+ /* 1 when a frame given to pw_videoout_show_tiled would show: the video
