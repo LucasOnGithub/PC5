@@ -10,8 +10,8 @@ with `PC5 `.
 
 | # | Do | Expect on screen | Expect in the log |
 | --- | --- | --- | --- |
-| 1 | Replace the `PPSA11018` folder with the new one, start PC5 | the tile shows the tower without lettering; the library | `PC5 start version=1.2.0 …`, `PC5 controller reset light=0 triggers=0` |
-| 2 | Options › About PC5 | version 1.2.0 and the free space | |
+| 1 | Replace the `PPSA11018` folder with the new one, start PC5 | the tile shows the tower without lettering; the library | `PC5 start version=1.2.1 …`, `PC5 controller reset light=0 triggers=0` |
+| 2 | Options › About PC5 | version 1.2.1 and the free space | |
 | 3 | Options › Updates | "No PC5 release is published on GitHub yet" (until there is one) | `PC5 update state=2` (2: none published) |
 | 4 | Options › In games: change Vibration, Light bar and Adaptive triggers; Options › Overlay: turn Show FPS on, pick a corner | the values change and stay after restarting PC5; Trigger rumble / Trigger resistance appear only with their effect on | `PC5 settings fps=1 …`; `/data/prospero-win/pc5/settings.txt` |
 | 5 | Options › Install games from USB, tick two folders with □, press Options | "Getting ready 1 of 2", then the list with covers | `PC5 folder=… queue=1/2`, `PC5 cover choices=… queue=…` |
@@ -59,8 +59,8 @@ with `PC5 `.
 
 | # | Do | Expect | Expect in the log |
 | --- | --- | --- | --- |
-| 26 | A game installed with PC5 1.1.1 or older, started for the first time with 1.2.0 | it starts as before | `PC5 prefix media registered`, once: not on the next start |
-| 27 | A game that plays a video through Windows at its start or in its menus (a `.wmv`, `.mp4`, `.avi` or `.mpg` among its files; not Bink `.bik`, which games decode themselves) | the video plays with its sound, and the game goes on after it | no `Unhandled page fault`; no `err:` lines from `winegstreamer` or `winedmo` |
+| 26 | A game installed with PC5 1.1.1 or older, started for the first time with 1.2.1 | it starts as before | `PC5 prefix media registered`, once: not on the next start |
+| 27 | A game that plays a video through Windows at its start or in its menus (a `.wmv`, `.mp4`, `.avi` or `.mpg` among its files; not Bink `.bik`, which games decode themselves) | the video plays with its sound, and the game goes on after it | no `Unhandled page fault`; no `couldn't load in-process dll` or `err:` lines for `winegstreamer` or `winedmo` |
 | 28 | A game whose music or speech is WMA or MP3 (`.wma`, `.mp3`, `.xwma` among its files) | it plays | no `Unhandled page fault` |
 
 A non-zero `rc=` on the light bar or triggers lines means the console refused that call; send

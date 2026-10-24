@@ -1,0 +1,90 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bornaradusin <bornaradusin@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 13:09:38 +0100
+Subject: [PATCH] PC5: the app carries winegstreamer.dll with the FFmpeg build
+
+package_release.sh left winegstreamer.dll out of every package, from when
+it needed the PC's GStreamer. With winegstreamer.prx (the FFmpeg build)
+games load the DLL, so it is packaged for both architectures, and a host
+Wine without it is refused. Without the FFmpeg build it still stays out.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
+---
+ tests/test_package_release.py | 30 +++++++++++++++++++++++++++++-
+ tools/package_release.sh      | 11 +++++++++--
+ 2 files changed, 38 insertions(+), 3 deletions(-)
+
+diff --git a/tests/test_package_release.py b/tests/test_package_release.py
+index 93abb1b..f39c1fa 100644
+--- a/tests/test_package_release.py
++++ b/tests/test_package_release.py
+@@ -178,6 +178,33 @@ def main() -> int:
+         assert run(*inputs, "--out", str(out)).returncode == 0
+         assert not (app / "stale.txt").exists()
+ 
++        # A build with FFmpeg: the media modules, FFmpeg's licences, and
++        # winegstreamer.dll for both architectures, which games load (without
++        # FFmpeg it stays out, above); a host Wine without it is refused.
++        for name in ("winegstreamer.prx", "winedmo.prx"):
++            write(ps5 / "prx" / "sce_module" / name, name)
++        for name in ("COPYING.LGPLv2.1", "LICENSE.md"):
++            write(ps5 / "prx" / "licenses" / "ffmpeg" / name, f"ffmpeg {name}")
++        report["sources"]["ffmpeg"] = "e" * 40
++        write(ps5 / "report.json", json.dumps(report))
++        result = run(*inputs, "--out", str(out))
++        assert result.returncode == 0, result.stderr
++        for arch in ("i386-windows", "x86_64-windows"):
++            assert (lib / arch / "winegstreamer.dll").read_text() == f"{arch}/winegstreamer.dll", arch
++        for name in ("winegstreamer.prx", "winedmo.prx"):
++            assert (lib / "x86_64-unix" / name).stat().st_mode & 0o777 == 0o755, name
++        assert (app / "LICENSES" / "ffmpeg" / "COPYING.LGPLv2.1").read_text() == "ffmpeg COPYING.LGPLv2.1"
++        assert f"commit {'e' * 40}" in (app / "SOURCES.txt").read_text()
++        missing = host / "lib" / "wine" / "i386-windows" / "winegstreamer.dll"
++        missing.rename(root / "winegstreamer.bak")
++        bad = run(*inputs, "--out", str(out))
++        assert bad.returncode == 2 and "i386-windows/winegstreamer.dll" in bad.stderr, bad.stderr
++        (root / "winegstreamer.bak").rename(missing)
++        for name in ("winegstreamer.prx", "winedmo.prx"):
++            (ps5 / "prx" / "sce_module" / name).unlink()
++        report["sources"]["ffmpeg"] = None
++        write(ps5 / "report.json", json.dumps(report))
++
+         # A build with schannel but without the bundle or the licence texts
+         # it must ship is refused, naming what is missing.
+         (ps5 / "prx" / "ca-certificates.crt").rename(ps5 / "prx" / "bundle.bak")
+@@ -227,7 +254,8 @@ def main() -> int:
+         bad = run(*inputs, "--out", str(out))
+         assert bad.returncode == 2 and "NOTICES.md" in bad.stderr, bad.stderr
+     print("package release passed: layout, dev.conf and PC-only modules left out, patched xinput, "
+-          "eboot and PRX modules executable, licences and source revisions, schannel's notices and "
++          "eboot and PRX modules executable, licences and source revisions, winegstreamer.dll with "
++          "FFmpeg and not without, schannel's notices and "
+           "bundle with it and not without, Mesa Zink packaged, non-RADV Vulkan refused, a clean "
+           "folder each time, missing inputs and Zink named")
+     return 0
+diff --git a/tools/package_release.sh b/tools/package_release.sh
+index dbd26d2..21ccf1b 100755
+--- a/tools/package_release.sh
++++ b/tools/package_release.sh
+@@ -121,11 +121,18 @@ for arch in i386-windows x86_64-windows; do
+         name=${file##*/}
+         case $name in
+         # Import libraries, and what needs the PC's own libraries: X11,
+-        # GStreamer, pcap, SANE and libgphoto2.
+-        *.a|winex11.drv|winegstreamer.dll|wpcap.dll|sane.ds|gphoto2.ds) continue ;;
++        # pcap, SANE and libgphoto2.
++        *.a|winex11.drv|wpcap.dll|sane.ds|gphoto2.ds) continue ;;
++        # winegstreamer: games load the DLL, which calls winegstreamer.prx,
++        # the console's FFmpeg build. Without that build it needs the PC's
++        # GStreamer, so it stays out.
++        winegstreamer.dll) [ "$media" = 1 ] || continue ;;
+         esac
+         cp "$file" "$lib/$arch/$name"
+     done
++    if [ "$media" = 1 ] && [ ! -f "$lib/$arch/winegstreamer.dll" ]; then
++        fail "--host-wine: no $arch/winegstreamer.dll beside winegstreamer.prx: no game could load it"
++    fi
+     # The PE modules the PS5 patches change (the xinput DLLs).
+     if [ -d "$wine_ps5/pe/$arch" ]; then cp "$wine_ps5/pe/$arch"/*.dll "$lib/$arch/"; fi
+ done

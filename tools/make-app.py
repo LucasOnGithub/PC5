@@ -42,6 +42,8 @@ def main() -> int:
                    "pc5/fonts.bin", "pc5/ca-certificates.crt", "pc5/prefix.list", "pc5/prefix/system.reg",
                    "pc5/prefix-media.reg", "win/wine/lib/wine/x86_64-unix/winedmo.prx",
                    "win/wine/lib/wine/x86_64-unix/winegstreamer.prx", "LICENSES/ps5-framegen/COPYING",
+                   "win/wine/lib/wine/x86_64-windows/winegstreamer.dll",
+                   "win/wine/lib/wine/i386-windows/winegstreamer.dll",
                    "pc5/prefix/drive_c/windows/system32/d3d12core.dll",
                    "pc5/prefix/drive_c/windows/syswow64/d3d12core.dll",
                    "pc5/prefix/drive_c/windows/system32/d3d11.dll",

@@ -5,7 +5,7 @@
 A launcher for your own PC games on a PS5 that runs homebrew. PC5 shows your games as a row
 of covers, installs games from a USB drive in one copy each, and uninstalls them with their
 saves. It runs the games with [prospero-win](https://github.com/mpereiraesaa/prospero-win)
-(Wine on the PS5). The app is `PPSA11018`, its tile is called **PC5**. This is version 1.2.0.
+(Wine on the PS5). The app is `PPSA11018`, its tile is called **PC5**. This is version 1.2.1.
 
 No game is part of PC5, and PC5 downloads none: you install the games you own.
 
