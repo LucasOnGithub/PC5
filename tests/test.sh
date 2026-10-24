@@ -26,7 +26,7 @@ common=(-std=c11 -Wall -Wextra -Wpedantic -Werror -D_DEFAULT_SOURCE -Ititle -I"$
 cc "${common[@]}" -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -DPC5_HEAP_ONLY \
     tests/test_pc5.c title/pc5_base.c title/pc5_controls.c title/pc5_cover.c title/pc5_draw.c title/pc5_game.c title/pc5_image.c title/pc5_json.c \
     title/pc5_library.c title/pc5_logs.c title/pc5_matrix.c title/pc5_pe.c title/pc5_settings.c title/pc5_source.c \
-    title/pc5_stb.c title/pc5_ui.c title/pc5_update.c \
+    title/pc5_stb.c title/pc5_ui.c title/pc5_update.c title/pc5_home.c title/pc5_psfwd.c \
     "${upstream[@]}" -lm \
     -o "$out/test_pc5"
 "$out/test_pc5" "$out/work" tests/fixtures "$out/programs" "$out/covers" "$out/fonts.bin"
@@ -74,8 +74,8 @@ done
 if [[ ${1:-} == --shots ]]; then
     cc "${common[@]}" -O2 tests/shots.c title/pc5_base.c title/pc5_controls.c title/pc5_cover.c title/pc5_draw.c title/pc5_game.c \
         title/pc5_image.c title/pc5_json.c title/pc5_library.c title/pc5_logs.c title/pc5_matrix.c title/pc5_pe.c \
-        title/pc5_settings.c title/pc5_source.c title/pc5_stb.c title/pc5_ui.c title/pc5_update.c \
-        "${upstream[@]}" -lm -o "$out/draw-shots"
+        title/pc5_settings.c title/pc5_source.c title/pc5_stb.c title/pc5_ui.c title/pc5_update.c title/pc5_home.c \
+        title/pc5_psfwd.c "${upstream[@]}" -lm -o "$out/draw-shots"
     mkdir -p "$out/shots" "$out/shotwork"
     "$out/draw-shots" "$out/shots" "$out/shotwork" "$out/covers" "$out/programs" "$out/fonts.bin"
     python3 -c "import sys, pathlib; from PIL import Image

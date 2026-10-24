@@ -15,6 +15,7 @@
 #             makes PC5's empty Windows template
 #   wineps5   Wine's PS5 side (PRX modules)
 #   cpu       wowprospero and the native WoW64 CPU (32-bit games)
+#   dxvk      DXVK 2.6.2-prospero2 with patches/dxvk, 64- and 32-bit, for the Windows template
 #   zink      Mesa's WGL/Zink, OpenGL for the games that draw with it
 #   package   prospero-win's tools/package_release.sh, with Zink
 #   app       release/PPSA11018/ (art, fonts, the Windows template) and release/PPSA11018.zip
@@ -53,11 +54,20 @@ VKD3D_SHA256=ac70ccfe01d610b51ca67a0a44e4f24f5da29c665facc0c2faf47e0818d23168
 MBEDTLS_VERSION=3.6.7                                     # LTS: the covers' HTTPS
 MBEDTLS_URL=https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-$MBEDTLS_VERSION/mbedtls-$MBEDTLS_VERSION.tar.bz2
 MBEDTLS_SHA256=a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6
+# DXVK: the release prospero-win's pw_install.py pins (2.6.2-prospero2), built here with
+# patches/dxvk; app/pc5/dxvk.txt names the result, and PC5 gives installed games its DLLs.
+DXVK_URL=https://github.com/mpereiraesaa/dxvk.git
+DXVK_COMMIT=a6f6dcc1eaa67946482ebdded0d1d5dc13293133      # tag v2.6.2-prospero2
+DXVK_NAME=2.6.2-prospero2-pc5.1
+# The PS5 Forwarder Format: the home screen tiles' program (template/) and psfwd, which
+# title/third_party/psfwd holds unchanged.
+FORWARDER_URL=https://github.com/heydemoura/ps5-forwarder-format.git
+FORWARDER_COMMIT=22e8762ad7dbd01e18bd8c0e95f86461fdf8aaf4
 VKD3D_SOURCE_URL=https://github.com/HansKristian-Work/vkd3d-proton.git
 VKD3D_SOURCE_COMMIT=0d66699b1b1e250ef19d793f2649d9288b0808ff   # tag v2.14.1, the release's build
 
 TITLE=PPSA11018
-STEPS="sources title radv hostwine wineps5 cpu zink package app bundle"
+STEPS="sources title radv hostwine wineps5 cpu dxvk zink package app bundle"
 
 # ---- here on Debian 13 or Ubuntu 24.04, else in the build image ----------------------
 supported() {
@@ -136,7 +146,8 @@ step_sources() {
     git -C "$PW" "${id[@]}" am -q --committer-date-is-author-date "$here"/patches/prospero-win/*.patch
     cp "$here"/title/pc5*.c "$here"/title/pc5*.h "$PW/native/"
     mkdir -p "$PW/native/third_party"
-    cp "$here/title/third_party/stb_image.h" "$PW/native/third_party/"
+    cp "$here/title/third_party/stb_image.h" "$here/title/third_party/stb_image_write.h" "$PW/native/third_party/"
+    cp -r "$here/title/third_party/psfwd" "$PW/native/third_party/"
     git -C "$PW" add native/pc5* native/third_party
     GIT_AUTHOR_DATE="2026-10-22T17:00:00+0100" GIT_COMMITTER_DATE="2026-10-22T17:00:00+0100" \
         git -C "$PW" "${id[@]}" commit -q -m "PC5: its screens (title/ of the PC5 repo)"
@@ -155,6 +166,20 @@ step_sources() {
     fetch "$B/PS5_Mesa" "$MESA_URL" "$(pin "$B/PS5_Vulkan/tools/build-radv.sh" mesa_revision)"
     fetch "$B/PS5_PayloadSDK" "$SDK_FORK_URL" "$(pin "$B/PS5_Vulkan/tools/setup-native-dependencies.sh" sdk_revision)"
     fetch "$B/lapy" "$LAPY_URL" "$LAPY_COMMIT"
+    # DXVK with PC5's patch (step dxvk), committed with fixed names and dates.
+    fetch "$B/dxvk-source" "$DXVK_URL" "$DXVK_COMMIT"
+    git -C "$B/dxvk-source" reset -q --hard "$DXVK_COMMIT"
+    git -C "$B/dxvk-source" clean -q -fdx
+    git -C "$B/dxvk-source" submodule -q update --init --recursive
+    git -C "$B/dxvk-source" "${id[@]}" am -q --committer-date-is-author-date "$here"/patches/dxvk/*.patch
+    # The home screen tiles: psfwd in title/third_party must be the format's own, unchanged.
+    fetch "$B/ps5-forwarder-format" "$FORWARDER_URL" "$FORWARDER_COMMIT"
+    local pair
+    for pair in src/psfwd.c:psfwd.c include/psfwd.h:psfwd.h LICENSE:LICENSE; do
+        cmp -s "$B/ps5-forwarder-format/${pair%%:*}" "$here/title/third_party/psfwd/${pair##*:}" ||
+            { echo "title/third_party/psfwd/${pair##*:} differs from the PS5 Forwarder Format at $FORWARDER_COMMIT" >&2
+              return 1; }
+    done
     # Zink's Mesa and compiler, as tools/build_mesa_zink.sh pins them.
     local zink=$PW/tools/build_mesa_zink.sh llvm
     fetch "$B/mesa-zink-source" "$MESA_URL" "$(pin "$zink" MESA_COMMIT)"
@@ -243,6 +268,33 @@ step_wineps5() {
     ls "$PW/.deps/wine-ps5/prx/sce_module"
 }
 
+step_dxvk() {
+    # 64- and 32-bit, each into $B/dxvk/x64 and $B/dxvk/x32, as DXVK's own releases lay them out;
+    # not again while the source (the release with patches/dxvk, step sources) is the same.
+    local arch out=$B/dxvk tree
+    tree=$(git -C "$B/dxvk-source" rev-parse HEAD)
+    if [[ -f $out/NAME && $(cat "$out/SOURCE" 2>/dev/null) == "$tree" ]]; then
+        echo "DXVK $(cat "$out/NAME") already built from $tree"
+        return 0
+    fi
+    rm -rf "$out"
+    for arch in 64 32; do
+        rm -rf "$B/dxvk-build.w$arch"
+        (cd "$B/dxvk-source" && "$B/venv/bin/meson" setup --cross-file "build-win$arch.txt" --buildtype release --strip \
+            --prefix "$out" --bindir "x$arch" --libdir "x$arch" -Dbuild_id=false "$B/dxvk-build.w$arch")
+        ninja -C "$B/dxvk-build.w$arch" -j"$jobs" install
+    done
+    for arch in 64 32; do
+        for dll in d3d8 d3d9 d3d10core d3d11 dxgi; do
+            [[ -f $out/x$arch/$dll.dll ]] || { echo "no x$arch/$dll.dll" >&2; return 1; }
+        done
+    done
+    rm -f "$out"/x*/*.dll.a
+    echo "$tree" > "$out/SOURCE"
+    echo "$DXVK_NAME" > "$out/NAME"
+    ls -l "$out"/x64 "$out"/x32
+}
+
 step_cpu() {
     cd "$PW"
     local build=$PW/.deps/wine-host/build sdk=$PW/.deps/ps5-native-app-boilerplate/.deps/native/ps5-payload-sdk
@@ -298,12 +350,22 @@ EOF_SOURCES
     fi
     cp "$here/sce_sys/param.json" "$here/art/icon0.png" "$here/art/pic0.png" "$app/sce_sys/"
     mkdir -p "$app/pc5"
+    # The home screen tiles' program, which PC5 copies into each tile (pc5_home.c), and its licence.
+    mkdir -p "$app/pc5/forwarder/sce_module" "$app/LICENSES/ps5-forwarder-format"
+    cp "$B/ps5-forwarder-format/template/eboot.bin" "$app/pc5/forwarder/"
+    cp "$B/ps5-forwarder-format/template/sce_module/libc.prx" "$app/pc5/forwarder/sce_module/"
+    chmod 755 "$app/pc5/forwarder/eboot.bin" "$app/pc5/forwarder/sce_module/libc.prx"
+    cp "$B/ps5-forwarder-format/LICENSE" "$app/LICENSES/ps5-forwarder-format/LICENSE"
     python3 "$here/tools/make-font.py" "$app/pc5/fonts.bin"
     # Mozilla's roots as Debian ships them, for the covers' HTTPS (the console's own come first).
     for root in /usr/share/ca-certificates/mozilla/*.crt; do cat "$root"; echo; done > "$app/pc5/ca-certificates.crt"
     python3 "$here/tools/make-prefix.py" --pw "$PW" --wine "$PW/.deps/wine-host/install/usr/bin/wine" \
         --cpu-dll "$PW/.deps/wine-host/build/dlls/wowprospero/x86_64-windows/wowprospero.dll" \
-        --vkd3d "$B/downloads/vkd3d-proton-$VKD3D_VERSION.tar.zst" --out "$app"
+        --vkd3d "$B/downloads/vkd3d-proton-$VKD3D_VERSION.tar.zst" --dxvk "$B/dxvk" --out "$app"
+    # The DXVK the template has, which PC5 gives games installed with an earlier one (pc5_game.c).
+    cp "$B/dxvk/NAME" "$app/pc5/dxvk.txt"
+    mkdir -p "$app/LICENSES/dxvk"
+    cp "$B/dxvk-source/LICENSE" "$app/LICENSES/dxvk/LICENSE"
     python3 "$here/tools/make-app.py" "$app" "$release/$TITLE.zip" --repo "$here" --pw "$PW"
 }
 
@@ -338,6 +400,8 @@ step_bundle() {
     part PS5_Mesa-zink "$B/mesa-zink-source" "$(pin "$zink" MESA_COMMIT)" "$MESA_URL"
     part PS5_PayloadSDK "$B/PS5_PayloadSDK" "$(pin "$B/PS5_Vulkan/tools/setup-native-dependencies.sh" sdk_revision)" "$SDK_FORK_URL"
     part PS5-Lapy-JB-Daemon "$B/lapy" "$LAPY_COMMIT" "$LAPY_URL"
+    part ps5-forwarder-format "$B/ps5-forwarder-format" "$FORWARDER_COMMIT" \
+        "$FORWARDER_URL (the home screen tiles' program and psfwd)"
     mkdir -p "$stage/vkd3d-proton"
     tar -C "$B/vkd3d-proton-source" --exclude=.git -cf - . | tar -x -C "$stage/vkd3d-proton"
     printf '%-28s %s at %s, with its submodules\n' "vkd3d-proton/" "$VKD3D_SOURCE_URL" "$VKD3D_SOURCE_COMMIT" >> "$stage/PARTS.txt"
@@ -353,7 +417,10 @@ step_bundle() {
     printf '%-28s %s\n' "zlib/" "zlib, the subproject RADV's shader cache was built with" >> "$stage/PARTS.txt"
     cp "$B/downloads/mbedtls-$MBEDTLS_VERSION.tar.bz2" "$stage/"
     printf '%-28s %s\n' "mbedtls-$MBEDTLS_VERSION.tar.bz2" "$MBEDTLS_URL" >> "$stage/PARTS.txt"
-    printf '\nDXVK 2.6.2-prospero2 (zlib licence): https://github.com/mpereiraesaa/dxvk, tag v2.6.2-prospero2.\n' >> "$stage/PARTS.txt"
+    mkdir -p "$stage/dxvk"
+    tar -C "$B/dxvk-source" --exclude=.git -cf - . | tar -x -C "$stage/dxvk"
+    printf '%-28s %s at %s (tag v2.6.2-prospero2), with its submodules and PC5'"'"'s patches/dxvk applied\n' \
+        "dxvk/" "$DXVK_URL" "$DXVK_COMMIT" >> "$stage/PARTS.txt"
     printf 'PC5/README.md says how to build the app from these with PC5/tools/build.sh.\n' >> "$stage/PARTS.txt"
     rm -f "$out" "$out.part"
     tar -C "$B/bundle" --sort=name --owner=0 --group=0 --numeric-owner --mtime=2026-10-22 -cf - PPSA11018-sources |

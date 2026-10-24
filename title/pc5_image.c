@@ -12,6 +12,9 @@ extern unsigned char *stbi_load_from_memory(const unsigned char *buffer, int len
                                             int *channels_in_file, int desired_channels);
 extern int stbi_info_from_memory(const unsigned char *buffer, int len, int *x, int *y, int *comp);
 extern void stbi_image_free(void *retval_from_stbi_load);
+/* stb_image_write's (pc5_stb.c). */
+extern int stbi_write_png_to_func(void (*func)(void *context, void *data, int size), void *context, int w, int h,
+                                  int comp, const void *data, int stride_in_bytes);
 
 int pc5_image_decode(const void *bytes, size_t size, Pc5Image *out)
 {
@@ -34,6 +37,39 @@ int pc5_image_decode(const void *bytes, size_t size, Pc5Image *out)
     }
     stbi_image_free(rgba);
     return 0;
+}
+
+/* ---- PNG writing ---------------------------------------------------------------- */
+
+typedef struct PngSink {
+    Pc5Buf *out;
+    int failed;
+} PngSink;
+
+static void png_put(void *context, void *data, int size)
+{
+    PngSink *sink = context;
+    if (!sink->failed && pc5_buf_put(sink->out, data, (size_t)size)) sink->failed = 1;
+}
+
+int pc5_image_png(const Pc5Image *image, Pc5Buf *out)
+{
+    PngSink sink = { out, 0 };
+    unsigned char *rgb;
+    size_t n;
+
+    if (!image || !image->px || image->w <= 0 || image->h <= 0 || !out) return -1;
+    n = (size_t)image->w * (size_t)image->h;
+    if (!(rgb = pc5_alloc(n * 3))) return -1;
+    for (size_t i = 0; i < n; i++) {
+        rgb[3 * i] = (unsigned char)(image->px[i] >> 16);
+        rgb[3 * i + 1] = (unsigned char)(image->px[i] >> 8);
+        rgb[3 * i + 2] = (unsigned char)image->px[i];
+    }
+    out->len = 0;
+    int written = stbi_write_png_to_func(png_put, &sink, image->w, image->h, 3, rgb, image->w * 3);
+    pc5_free(rgb);
+    return written && !sink.failed ? 0 : -1;
 }
 
 /* ---- resizing ------------------------------------------------------------------- */

@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 /* PC5: finding a game's cover online, from public sources only, with no
  * account and no key: Steam's store, GOG's catalogue and Wikipedia, in that
- * order. Each lookup is one request, so the screen can move between them. */
+ * order, after the player's own picture when there is one. Each lookup is one
+ * request, so the screen can move between them. */
 #ifndef PC5_COVER_H
 #define PC5_COVER_H
 #include "pc5.h"
@@ -21,14 +22,18 @@ typedef struct Pc5CoverHint {
     char product[PC5_NAME];     /* the program's ProductName, or "" */
     char program[PC5_NAME];     /* the .exe's name without .exe */
     uint32_t steam_appid;       /* from a steam_appid.txt in the folder, or 0 */
+    /* The player's own picture for it (a JPEG or PNG file), offered first;
+     * with picture_only nothing is asked online. "" for none. */
+    char picture[PC5_PATH];
+    int picture_only;
 } Pc5CoverHint;
 
 enum { PC5_COVER_CHOICES = 12 };
 
 typedef struct Pc5CoverChoice {
-    char source[16];            /* "Steam", "GOG", "Wikipedia" */
+    char source[16];            /* "Steam", "GOG", "Wikipedia", or "your picture" */
     char title[128];            /* the game's name there */
-    char url[512];              /* its cover picture */
+    char url[PC5_PATH];         /* its cover picture: https://..., or the player's file */
     uint32_t steam_appid;       /* Steam: the app, for its asset list */
     int score;
 } Pc5CoverChoice;
@@ -58,6 +63,11 @@ int pc5_cover_search_step(Pc5CoverSearch *search, const Pc5Http *http);
 int pc5_cover_fetch(const Pc5CoverChoice *choice, const Pc5Http *http, Pc5Image *cover, Pc5Buf *original);
 /* Where a game's downloaded picture is kept, by its kind: "cover-original.jpg" or ".png". */
 const char *pc5_picture_name(const Pc5Buf *original);
+
+/* The player's own cover in dir: a file named one of names (NULL-terminated)
+ * with .jpg, .jpeg or .png, matched without regard to case, into out. 0, or -1
+ * when there is none. */
+int pc5_cover_own(const char *dir, const char *const *names, char *out, size_t size);
 
 /* text with everything but letters, digits and -._~ as %XX. */
 int pc5_url_encode(const char *text, char *out, size_t size);

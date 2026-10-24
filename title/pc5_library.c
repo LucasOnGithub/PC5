@@ -341,6 +341,12 @@ int pc5_library_load(const char *root, Pc5Library *library)
                      entry->file);
             pc5_copy(game->title, sizeof(game->title), game->id);
             snprintf(game->problem, sizeof(game->problem), "Its profile has a mistake (%s).", pw_result_name(entry->status));
+            /* A game PC5 installed has its own folder, named after it: uninstalling
+             * it deletes that folder too, not only the profile. */
+            if (!pc5_info_read(root, game->id, &info)) {
+                pc5_copy(game->prefix, sizeof(game->prefix), game->id);
+                pc5_copy(game->title, sizeof(game->title), info.title[0] ? info.title : game->id);
+            }
             continue;
         }
         const PwAppProfile *app = &entry->profile.app;

@@ -36,6 +36,7 @@ typedef struct Pc5Folder {
     int exe_count;
     uint32_t imports;         /* every program and library in the game's folders */
     uint32_t steam_appid;     /* a steam_appid.txt at the top, or 0 */
+    char picture[PC5_PATH];   /* the player's cover: cover.jpg, .jpeg or .png at the top, or "" */
     char problem[PC5_ERROR];  /* why it can't be installed, or "" */
 } Pc5Folder;
 

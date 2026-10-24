@@ -152,15 +152,25 @@ static void until(Pc5Ui *ui, const char *screen)
 static Pc5Ui *open_ui(const char *root, int network)
 {
     static const char *roots[2];
-    static char usb[PC5_PATH], template_prefix[PC5_PATH];
+    static char usb[PC5_PATH], template_prefix[PC5_PATH], tiles[PC5_PATH], tile_template[PC5_PATH];
     static Pc5Platform platform;
+    char file[PC5_PATH];
     Pc5UiConfig config;
 
     fmt(usb, sizeof(usb), "%s/usb0", work);
     roots[0] = usb;
     fmt(template_prefix, sizeof(template_prefix), "%s/app0/pc5/prefix", work);
+    /* The home screen tiles' folder, and the tile's program as the app has it */
+    fmt(tiles, sizeof(tiles), "%s/data/homebrew", work);
+    fmt(tile_template, sizeof(tile_template), "%s/app0/pc5/forwarder/sce_module", work);
+    pc5_mkdirs(tile_template);
+    fmt(file, sizeof(file), "%s/libc.prx", tile_template);
+    pc5_write_file(file, "libc", 4);
+    fmt(tile_template, sizeof(tile_template), "%s/app0/pc5/forwarder", work);
+    fmt(file, sizeof(file), "%s/eboot.bin", tile_template);
+    pc5_write_file(file, "eboot", 5);
     platform = (Pc5Platform){ NULL, { NULL, network ? sample_net : offline }, fake_clock, fake_play, NULL, NULL, NULL, 0 };
-    config = (Pc5UiConfig){ root, template_prefix, fonts, roots };
+    config = (Pc5UiConfig){ root, template_prefix, fonts, roots, tiles, tile_template, NULL };
     Pc5Ui *ui = pc5_ui_create(&config, &platform);
     until(ui, "library");
     settle(ui);
@@ -244,6 +254,18 @@ int main(int argc, char **argv)
     settle(ui);
     save("15e-game-menu-frame-generation");
     step(ui, PC5_KEY_ACCEPT, 1);           /* and off again */
+    step(ui, PC5_KEY_DOWN, 1);
+    step(ui, PC5_KEY_DOWN, 1);
+    step(ui, PC5_KEY_ACCEPT, 1);           /* Home screen tile on */
+    settle(ui);
+    save("15f-home-tile-added");
+    step(ui, PC5_KEY_ACCEPT, 1);
+    settle(ui);
+    save("15g-game-menu-home-tile");
+    step(ui, PC5_KEY_ACCEPT, 1);           /* and off again */
+    settle(ui);
+    save("15h-home-tile-removed");
+    step(ui, PC5_KEY_ACCEPT, 1);
     step(ui, PC5_KEY_BACK, 1);
     step(ui, PC5_KEY_OPTIONS, 1);
     settle(ui);

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
-/* PC5: pictures. JPEG and PNG decoding (stb_image), resizing, covers filling
- * the 2:3 frame, and the stored cover file. */
+/* PC5: pictures. JPEG and PNG decoding (stb_image), PNG writing
+ * (stb_image_write), resizing, covers filling the 2:3 frame, and the stored
+ * cover file. */
 #ifndef PC5_IMAGE_H
 #define PC5_IMAGE_H
 #include "pc5.h"
@@ -19,6 +20,9 @@ int pc5_cover_compose(const Pc5Image *src, Pc5Image *cover);
 uint32_t pc5_image_tint(const Pc5Image *image);
 /* Box blur, three passes. */
 void pc5_image_blur(Pc5Image *image, int radius);
+
+/* image as a PNG file in out (RGB, its alpha dropped); 0, or -1 out of memory. */
+int pc5_image_png(const Pc5Image *image, Pc5Buf *out);
 
 /* The cover file: "PC5D", width, height, tint, then the pixels. */
 int pc5_cover_save(const char *path, const Pc5Image *cover, uint32_t tint);

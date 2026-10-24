@@ -48,7 +48,9 @@ def main() -> int:
                    "pc5/prefix/drive_c/windows/syswow64/d3d12core.dll",
                    "pc5/prefix/drive_c/windows/system32/d3d11.dll",
                    "win/wine/lib/wine/x86_64-unix/ntdll.prx", "win/wine/lib/wine/x86_64-unix/libvulkan.prx",
-                   "win/mesa-zink/x86_64-windows/opengl32.dll", "win/mesa-zink/i386-windows/opengl32.dll"):
+                   "win/mesa-zink/x86_64-windows/opengl32.dll", "win/mesa-zink/i386-windows/opengl32.dll",
+                   "pc5/forwarder/eboot.bin", "pc5/forwarder/sce_module/libc.prx",
+                   "LICENSES/ps5-forwarder-format/LICENSE", "pc5/dxvk.txt", "LICENSES/dxvk/LICENSE"):
         if not (app / needed).is_file():
             problems.append(f"no {needed}")
     if (app / "dev.conf").exists():
@@ -97,9 +99,11 @@ Built from <https://github.com/bornaradusin/PC5> at commit {repo_commit}:
   the boilerplate, FreeType, FFmpeg, ps5-framegen (Frame generation, in libvulkan.prx) and
   the Lapy helper, built for {TITLE}.
 - `pc5/prefix`: an empty Wine prefix made by prospero-win's `pw_install.py`, with DXVK
-  2.6.2-prospero2 (<https://github.com/mpereiraesaa/dxvk>, zlib licence) and VKD3D-Proton
-  2.14.1 (<https://github.com/HansKristian-Work/vkd3d-proton>, LGPL 2.1 or later, its
-  release's DLLs unchanged). Each game PC5 installs gets its own copy.
+  2.6.2-prospero2 (<https://github.com/mpereiraesaa/dxvk>, zlib licence) built with that
+  repository's `patches/dxvk` (textures shared within the game's process; `pc5/dxvk.txt`
+  names the build) and VKD3D-Proton 2.14.1 (<https://github.com/HansKristian-Work/vkd3d-proton>,
+  LGPL 2.1 or later, its release's DLLs unchanged). Each game PC5 installs gets its own
+  copy, and a game installed with an earlier DXVK gets this one's DLLs when it next starts.
   `pc5/prefix-media.reg` is what registering Wine's media decoders adds to it, which PC5
   adds to the prefix of a game installed before they were part of the app.
 - `pc5/fonts.bin`: Inter 4.1 (<https://github.com/rsms/inter>, SIL Open Font License 1.1)
@@ -108,8 +112,13 @@ Built from <https://github.com/bornaradusin/PC5> at commit {repo_commit}:
   {ca_version} ships them (MPL 2.0), which PC5 trusts for the covers' HTTPS along with the
   console's own; they are fetched over TLS with Mbed TLS 3.6.7
   (<https://github.com/Mbed-TLS/mbedtls>, Apache 2.0), built into the eboot.
-- PC5 decodes covers with stb_image 2.30 (<https://github.com/nothings/stb>, public domain
-  or MIT), built into the eboot.
+- PC5 decodes covers with stb_image 2.30 and writes the home screen tiles' pictures with
+  stb_image_write 1.16 (<https://github.com/nothings/stb>, public domain or MIT), built
+  into the eboot.
+- `pc5/forwarder`: the PS5 Forwarder Format's program (`template/eboot.bin` and
+  `sce_module/libc.prx`, <https://github.com/heydemoura/ps5-forwarder-format>, GNU GPL 3.0
+  or later), unchanged, which PC5 copies into each home screen tile it makes; its library,
+  psfwd, is built into the eboot.
 - The icon and the Home background are drawn by `art/make-art.py` in that repository.
 
 Covers are looked up on Steam's store, GOG's catalogue and Wikipedia, which need no

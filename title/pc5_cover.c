@@ -14,6 +14,7 @@
 #include "pc5_image.h"
 #include "pc5_json.h"
 
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -261,6 +262,15 @@ void pc5_cover_search_start(Pc5CoverSearch *search, const Pc5CoverHint *hint)
     memset(search, 0, sizeof(*search));
     search->hint = *hint;
     search->query_count = pc5_cover_queries(hint, search->queries);
+    /* The player's own picture comes before anything found online. */
+    if (hint->picture[0]) {
+        Pc5CoverChoice *own = &search->choices[search->count++];
+        *own = (Pc5CoverChoice){ .score = 1000000 };
+        pc5_copy(own->source, sizeof(own->source), "your picture");
+        pc5_copy(own->title, sizeof(own->title), hint->folder);
+        pc5_copy(own->url, sizeof(own->url), hint->picture);
+        search->answered = 1;
+    }
 }
 
 static void add_choice(Pc5CoverSearch *search, const char *source, const char *title, const char *url,
@@ -435,7 +445,7 @@ static int by_score(const void *a, const void *b)
 int pc5_cover_search_step(Pc5CoverSearch *search, const Pc5Http *http)
 {
     int query = 0;
-    Plan what = plan(search, search->step, &query);
+    Plan what = search->hint.picture_only ? PLAN_DONE : plan(search, search->step, &query);
 
     if (what == PLAN_DONE) {
         qsort(search->choices, (size_t)search->count, sizeof(search->choices[0]), by_score);
@@ -514,13 +524,31 @@ static int download_picture(const Pc5Http *http, const char *url, Pc5Image *pict
     return result;
 }
 
+/* The player's own picture, from its file. */
+static int read_picture(const char *path, Pc5Image *picture, Pc5Buf *original)
+{
+    Pc5Buf data = { 0 };
+    int result = -1;
+
+    if (!pc5_read_file(path, &data, PICTURE_MAX)) result = pc5_image_decode(data.data, data.len, picture);
+    if (!result && original) {
+        pc5_buf_free(original);
+        *original = data;
+    } else {
+        pc5_buf_free(&data);
+    }
+    return result;
+}
+
 int pc5_cover_fetch(const Pc5CoverChoice *choice, const Pc5Http *http, Pc5Image *cover, Pc5Buf *original)
 {
     Pc5Image picture = { 0 };
     int status;
 
     *cover = (Pc5Image){ 0 };
-    if (download_picture(http, choice->url, &picture, original)) {
+    if (choice->url[0] == '/') {
+        if (read_picture(choice->url, &picture, original)) return -1;
+    } else if (download_picture(http, choice->url, &picture, original)) {
         char other[512];
         if (!choice->steam_appid || steam_asset_url(http, choice->steam_appid, other, sizeof(other)) ||
             download_picture(http, other, &picture, original))
@@ -529,6 +557,34 @@ int pc5_cover_fetch(const Pc5CoverChoice *choice, const Pc5Http *http, Pc5Image 
     status = pc5_cover_compose(&picture, cover);
     pc5_image_free(&picture);
     return status;
+}
+
+int pc5_cover_own(const char *dir, const char *const *names, char *out, size_t size)
+{
+    static const char *const kinds[] = { ".jpg", ".jpeg", ".png" };
+    DIR *folder;
+    struct dirent *entry;
+    int found = -1;
+
+    if (!dir || !names || !(folder = opendir(dir))) return -1;
+    while (found && (entry = readdir(folder))) {
+        const char *dot = strrchr(entry->d_name, '.');
+        if (!dot || entry->d_name[0] == '.') continue;
+        for (size_t k = 0; k < sizeof(kinds) / sizeof(kinds[0]) && found; k++) {
+            if (pc5_casecmp(dot, kinds[k])) continue;
+            for (size_t n = 0; names[n] && found; n++) {
+                size_t length = strlen(names[n]);
+                char base[PC5_PATH];
+                if (!length || length != (size_t)(dot - entry->d_name) || length >= sizeof(base)) continue;
+                memcpy(base, entry->d_name, length);
+                base[length] = 0;
+                if (!pc5_casecmp(base, names[n]) && !pc5_join(out, size, dir, entry->d_name) && pc5_is_file(out))
+                    found = 0;
+            }
+        }
+    }
+    closedir(folder);
+    return found;
 }
 
 const char *pc5_picture_name(const Pc5Buf *original)

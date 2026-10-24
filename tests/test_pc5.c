@@ -9,6 +9,7 @@
 #include "pc5.h"
 #include "pc5_cover.h"
 #include "pc5_game.h"
+#include "pc5_home.h"
 #include "pc5_image.h"
 #include "pc5_json.h"
 #include "pc5_library.h"
@@ -671,6 +672,38 @@ static void test_uninstall(void)
     path(file, sizeof(file), "%s/prefix/system.reg", root);
     CHECK(pc5_exists(file), "shared prefix kept");
 
+    /* A PC5 game whose profile can't be read: uninstalling it deletes its folder too. */
+    {
+        Pc5Info info = { "Broken Game", "Broken", "Broken.exe", 64, PC5_API_D3D11, 5, 1, "" };
+        char text[1024];
+        path(file, sizeof(file), "%s/broken/system.reg", prefixes);
+        write_text(file, "registry");
+        path(file, sizeof(file), "%s/broken/drive_c/Games/Broken/data.pak", prefixes);
+        write_text(file, "a big file");
+        CHECK(!pc5_info_text(&info, text, sizeof(text)), "its info");
+        path(file, sizeof(file), "%s/broken/pc5/info.txt", prefixes);
+        write_text(file, text);
+        path(file, sizeof(file), "%s/profiles/broken.profile", root);
+        write_text(file, "[application]\nid = broken\nname = Broken Game\nlaunch_options = -x\n");
+        path(file, sizeof(file), "%s/profiles/profiles.lst", root);
+        write_text(file, "neondrift-2.profile\norbital-nine.profile\nstarfall.profile\nbroken.profile\n");
+        pc5_library_load(root, &library);
+        i = pc5_library_find(&library, "broken");
+        CHECK(i >= 0 && library.games[i].problem[0] && !library.games[i].playable &&
+              !strcmp(library.games[i].prefix, "broken") && !strcmp(library.games[i].title, "Broken Game"),
+              "listed with its problem and its folder: %s", i >= 0 ? library.games[i].prefix : "-");
+        if (i >= 0) {
+            CHECK(!pc5_remove_begin(&remove, root, &library.games[i], &library), "broken one begins");
+            while (pc5_remove_step(&remove, 1)) {}
+            CHECK(remove.done && !remove.failed, "broken one removed (%s)", remove.error);
+            pc5_remove_end(&remove);
+        }
+        path(file, sizeof(file), "%s/broken", prefixes);
+        CHECK(!pc5_exists(file) && count_entries(prefixes, ".removing-") == 0, "its folder deleted");
+        path(file, sizeof(file), "%s/profiles/broken.profile", root);
+        CHECK(!pc5_exists(file), "its profile deleted");
+    }
+
     /* Cut short: the folder moved aside but not deleted; and an install's staging. */
     pc5_library_load(root, &library);
     i = pc5_library_find(&library, "neondrift-2");
@@ -1081,6 +1114,56 @@ static int fake_memory(uint64_t *used, uint64_t *total)
 }
 
 /* A game's prefix from before winegstreamer gets its registrations once. */
+/* An installed game's DXVK follows the app's: replaced once when the app names another. */
+static void test_prefix_dxvk(void)
+{
+    char root[PC5_PATH], app[PC5_PATH], file[PC5_PATH];
+    static const char *const dlls[] = { "d3d8", "d3d9", "d3d10core", "d3d11", "dxgi" };
+    Pc5Buf text = { 0 };
+
+    path(root, sizeof(root), "%s/dxvk-root", work);
+    path(app, sizeof(app), "%s/dxvk-app", work);
+    for (int f = 0; f < 2; f++)
+        for (int d = 0; d < 5; d++) {
+            char data[64];
+            snprintf(data, sizeof(data), "old %s %d", dlls[d], f);
+            path(file, sizeof(file), "%s/prefixes/game/drive_c/windows/%s/%s.dll", root, f ? "syswow64" : "system32", dlls[d]);
+            if (!(f == 1 && d == 0)) write_text(file, data);   /* a Windows without the 32-bit d3d8.dll */
+            snprintf(data, sizeof(data), "new %s %d", dlls[d], f);
+            path(file, sizeof(file), "%s/pc5/prefix/drive_c/windows/%s/%s.dll", app, f ? "syswow64" : "system32", dlls[d]);
+            write_text(file, data);
+        }
+    CHECK(pc5_prefix_dxvk(root, "game", app) == 0, "an app that doesn't name its DXVK: nothing done");
+    path(file, sizeof(file), "%s/pc5/dxvk.txt", app);
+    write_text(file, "2.6.2-prospero2-pc5\n");
+    CHECK(pc5_prefix_dxvk(root, "game", app) == 1, "replaced");
+    path(file, sizeof(file), "%s/prefixes/game/drive_c/windows/syswow64/d3d11.dll", root);
+    CHECK(!pc5_read_file(file, &text, 4096) && text.len == 11 && !memcmp(text.data, "new d3d11 1", 11), "the app's DLL");
+    pc5_buf_free(&text);
+    path(file, sizeof(file), "%s/prefixes/game/drive_c/windows/syswow64/d3d8.dll", root);
+    CHECK(!pc5_exists(file), "none added where the game's Windows had none");
+    path(file, sizeof(file), "%s/prefixes/game/drive_c/windows/system32/d3d11.dll.pc5-part", root);
+    CHECK(!pc5_exists(file), "nothing half-written left");
+    path(file, sizeof(file), "%s/prefixes/game/pc5/dxvk.txt", root);
+    CHECK(!pc5_read_file(file, &text, 4096) && text.len == 20 && !memcmp(text.data, "2.6.2-prospero2-pc5\n", 20), "noted");
+    pc5_buf_free(&text);
+    /* once: a DLL changed by hand afterwards stays */
+    path(file, sizeof(file), "%s/prefixes/game/drive_c/windows/system32/d3d9.dll", root);
+    write_text(file, "the player's");
+    CHECK(pc5_prefix_dxvk(root, "game", app) == 0 && pc5_read_file(file, &text, 4096) == 0 && text.len == 12, "only once");
+    pc5_buf_free(&text);
+    CHECK(pc5_prefix_dxvk(root, "default", app) == 0, "the default prefix is left alone");
+    /* an app missing one of its DLLs: not done, and tried again */
+    path(file, sizeof(file), "%s/pc5/dxvk.txt", app);
+    write_text(file, "next\n");
+    path(file, sizeof(file), "%s/pc5/prefix/drive_c/windows/system32/dxgi.dll", app);
+    unlink(file);
+    CHECK(pc5_prefix_dxvk(root, "game", app) == -1, "a missing DLL fails");
+    path(file, sizeof(file), "%s/prefixes/game/pc5/dxvk.txt", root);
+    CHECK(!pc5_read_file(file, &text, 4096) && !memcmp(text.data, "2.6.2", 5), "and isn't noted");
+    pc5_buf_free(&text);
+}
+
 static void test_prefix_media(void)
 {
     char root[PC5_PATH], app[PC5_PATH], file[PC5_PATH], big[200000];
@@ -1109,6 +1192,170 @@ static void test_prefix_media(void)
     write_text(file, big);
     CHECK(pc5_prefix_media(root, "default", app) == 0, "found across two reads");
     CHECK(pc5_prefix_media(root, "missing", app) == -1, "no prefix: nothing done");
+}
+
+/* A picture of one colour, as a PNG file. */
+static void write_png(const char *file, int w, int h, uint32_t color)
+{
+    Pc5Image image = { 0 };
+    Pc5Buf png = { 0 };
+    char dir[PC5_PATH];
+
+    pc5_copy(dir, sizeof(dir), file);
+    *strrchr(dir, '/') = 0;
+    pc5_mkdirs(dir);
+    if (!pc5_image_new(&image, w, h)) {
+        for (int i = 0; i < w * h; i++) image.px[i] = color;
+        if (!pc5_image_png(&image, &png)) pc5_write_file(file, png.data, png.len);
+    }
+    pc5_image_free(&image);
+    pc5_buf_free(&png);
+}
+
+/* The forwarder program a tile is made from, as the app carries it. */
+static void make_tile_template(char *dir, size_t size)
+{
+    char file[PC5_PATH];
+    path(dir, size, "%s/app/pc5/forwarder", work);
+    path(file, sizeof(file), "%s/eboot.bin", dir);
+    write_text(file, "forwarder program");
+    path(file, sizeof(file), "%s/sce_module/libc.prx", dir);
+    write_text(file, "its libc");
+}
+
+static int has_text(const char *file, const char *text)
+{
+    Pc5Buf buf = { 0 };
+    int found = !pc5_read_file(file, &buf, 1u << 20) && !pc5_buf_terminate(&buf) && strstr((char *)buf.data, text);
+    pc5_buf_free(&buf);
+    return found;
+}
+
+/* A game's home screen tile: made in the PS5 Forwarder Format, found again,
+ * kept when made twice, taken away; another app's tile left alone. */
+static void test_home(void)
+{
+    char root[PC5_PATH], tiles[PC5_PATH], template_dir[PC5_PATH], file[PC5_PATH], id[PC5_HOME_ID], again[PC5_HOME_ID];
+    char error[PC5_ERROR] = "", missing[PC5_PATH];
+    Pc5Image cover = { 0 }, icon = { 0 };
+    Pc5Buf png = { 0 };
+
+    path(root, sizeof(root), "%s/home-root", work);
+    path(tiles, sizeof(tiles), "%s/homebrew", work);
+    make_tile_template(template_dir, sizeof(template_dir));
+    /* The game's cover: blue at the top, orange below. */
+    if (!pc5_image_new(&cover, PC5_COVER_WIDTH, PC5_COVER_HEIGHT)) {
+        for (int y = 0; y < PC5_COVER_HEIGHT; y++)
+            for (int x = 0; x < PC5_COVER_WIDTH; x++)
+                cover.px[y * PC5_COVER_WIDTH + x] = y < PC5_COVER_HEIGHT / 2 ? 0xff2050e0u : 0xffe08020u;
+        path(file, sizeof(file), "%s/prefixes/neon/pc5/cover.bin", root);
+        path(missing, sizeof(missing), "%s/prefixes/neon/pc5", root);
+        pc5_mkdirs(missing);
+        pc5_cover_save(file, &cover, 0xff2050e0u);
+    }
+    pc5_image_free(&cover);
+
+    CHECK(!pc5_home_find(tiles, "neon", id) && !id[0], "no tile yet");
+    CHECK(!pc5_home_add(tiles, template_dir, root, "neon", "neon", "Neon Drift", id, error, sizeof(error)),
+          "tile made: %s", error);
+    CHECK(strlen(id) == 9 && !strncmp(id, "PPSA99", 6) && atoi(id + 4) >= 99200 && atoi(id + 4) <= 99899,
+          "in the forwarders' range: %s", id);
+    path(file, sizeof(file), "%s/%s/eboot.bin", tiles, id);
+    CHECK(has_text(file, "forwarder program"), "the forwarder program, byte for byte");
+    path(file, sizeof(file), "%s/%s/sce_module/libc.prx", tiles, id);
+    CHECK(has_text(file, "its libc"), "and its libc");
+    path(file, sizeof(file), "%s/%s/forwarder.json", tiles, id);
+    CHECK(has_text(file, "\"target\": \"" PC5_TITLE_ID "\"") && has_text(file, "\"--rom\"") &&
+          has_text(file, "\"neon\"") && has_text(file, "\"--exit-after-game\"") &&
+          has_text(file, "\"format\": \"ps5-forwarder/1\"") && has_text(file, "PC5 " PC5_VERSION),
+          "it starts PC5 with the game, closing after it");
+    path(file, sizeof(file), "%s/%s/sce_sys/param.json", tiles, id);
+    CHECK(has_text(file, "\"titleName\": \"Neon Drift\"") && has_text(file, id) &&
+          has_text(file, "PS5FORWARDER0000"), "named after the game");
+    path(file, sizeof(file), "%s/%s/sce_sys/icon0.png", tiles, id);
+    CHECK(!pc5_read_file(file, &png, 4u << 20) && !pc5_image_decode(png.data, png.len, &icon) && icon.w == 512 &&
+          icon.h == 512, "a 512 x 512 PNG picture: %dx%d", icon.w, icon.h);
+    if (icon.px) {
+        uint32_t top = icon.px[100 * 512 + 256], bottom = icon.px[400 * 512 + 256], edge = icon.px[256 * 512 + 4];
+        CHECK((top & 0xff) > 0xc0 && ((top >> 16) & 0xff) < 0x40, "the cover in front, its blue top: %08x", top);
+        CHECK(((bottom >> 16) & 0xff) > 0xc0, "its orange bottom: %08x", bottom);
+        CHECK(((edge >> 16) & 0xff) < 0xa0 && (edge & 0xff) < 0xa0, "a dimmed copy behind: %08x", edge);
+    }
+    pc5_image_free(&icon);
+    pc5_buf_free(&png);
+    CHECK(pc5_home_find(tiles, "neon", again) && !strcmp(again, id), "found again: %s", again);
+    CHECK(!pc5_home_find(tiles, "neo", again), "only that game's");
+    CHECK(!pc5_home_add(tiles, template_dir, root, "neon", "neon", "Neon Drift", again, error, sizeof(error)) &&
+          !strcmp(again, id), "made twice: the same tile");
+    /* Another app's tile for a game of the same name is left alone. */
+    path(file, sizeof(file), "%s/PPSA99300/forwarder.json", tiles);
+    write_text(file, "{\"format\": \"ps5-forwarder/1\", \"target\": \"PPSA99008\", \"args\": [\"--rom\", \"neon\"]}");
+    path(file, sizeof(file), "%s/PPSA99300/eboot.bin", tiles);
+    write_text(file, "x");
+    /* A game without a cover gets a plain picture. */
+    CHECK(!pc5_home_add(tiles, template_dir, root, "plain", "plain", "Plain", again, error, sizeof(error)) &&
+          strcmp(again, id), "a game without a cover: its own tile %s", again);
+    CHECK(pc5_home_remove(tiles, "neon") == 1, "taken away");
+    CHECK(!pc5_home_find(tiles, "neon", again), "gone");
+    path(file, sizeof(file), "%s/%s", tiles, id);
+    CHECK(!pc5_exists(file), "its folder deleted");
+    path(file, sizeof(file), "%s/PPSA99300/forwarder.json", tiles);
+    CHECK(pc5_exists(file), "another app's tile stays");
+    CHECK(pc5_home_remove(tiles, "neon") == 0 && pc5_home_remove(tiles, "plain") == 1, "each game's own");
+    path(missing, sizeof(missing), "%s/nowhere", work);
+    CHECK(pc5_home_add(tiles, missing, root, "neon", "neon", "Neon Drift", id, error, sizeof(error)) == -1 &&
+          strstr(error, "pc5/forwarder") && !id[0], "no tile program: %s", error);
+}
+
+/* The player's own covers: a cover.jpg/.png at the top of a game's folder,
+ * offered before anything online; one in a folder of pictures by name. */
+static void test_own_covers(void)
+{
+    char dir[PC5_PATH], file[PC5_PATH], found[PC5_PATH];
+    Pc5Folder *folder = pc5_alloc(sizeof(*folder));
+    Pc5CoverHint hint = { 0 };
+    Pc5CoverSearch *search = pc5_alloc(sizeof(*search));
+    Pc5Image cover = { 0 };
+    Pc5Buf original = { 0 };
+
+    path(dir, sizeof(dir), "%s/own/Hollow Knight", work);
+    path(file, sizeof(file), "%s/COVER.PNG", dir);
+    write_png(file, 300, 450, 0xff33aa55u);
+    path(file, sizeof(file), "%s/sub/cover.png", dir);
+    write_png(file, 10, 10, 0xff000000u);
+    pc5_folder_inspect(dir, "Hollow Knight", folder);
+    path(file, sizeof(file), "%s/COVER.PNG", dir);
+    CHECK(!strcmp(folder->picture, file), "the picture at the top, whatever its case: %s", folder->picture);
+    pc5_copy(hint.folder, sizeof(hint.folder), "Hollow Knight");
+    pc5_copy(hint.picture, sizeof(hint.picture), folder->picture);
+    pc5_cover_search_start(search, &hint);
+    CHECK(search->count == 1 && !strcmp(search->choices[0].source, "your picture") && search->answered,
+          "offered first: %d %s", search->count, search->choices[0].source);
+    hint.picture_only = 1;
+    pc5_cover_search_start(search, &hint);
+    CHECK(!pc5_cover_search_step(search, NULL) && search->count == 1, "nothing asked online when it's all there is");
+    CHECK(!pc5_cover_fetch(&search->choices[0], NULL, &cover, &original) && cover.w == PC5_COVER_WIDTH &&
+          original.len > 8 && original.data[1] == 'P', "read from its file and made a cover");
+    if (cover.px) CHECK(cover.px[cover.w * cover.h / 2 + cover.w / 2] == 0xff33aa55u, "its colour: %08x",
+                        cover.px[cover.w * cover.h / 2 + cover.w / 2]);
+    pc5_image_free(&cover);
+    pc5_buf_free(&original);
+    /* A folder of covers, by name, without regard to case or picture kind. */
+    path(dir, sizeof(dir), "%s/own/covers", work);
+    path(file, sizeof(file), "%s/hollow knight.JPEG", dir);
+    write_text(file, "not checked here");
+    path(file, sizeof(file), "%s/Hollow.png", dir);
+    write_text(file, "another game");
+    {
+        const char *const names[] = { "", "Hollow Knight", "hollow-knight", NULL };
+        CHECK(!pc5_cover_own(dir, names, found, sizeof(found)) && strstr(found, "hollow knight.JPEG"), "found: %s", found);
+    }
+    {
+        const char *const names[] = { "Silksong", NULL };
+        CHECK(pc5_cover_own(dir, names, found, sizeof(found)) == -1, "none for another game");
+    }
+    pc5_free(folder);
+    pc5_free(search);
 }
 
 static void test_game(const char *fonts_path)
@@ -1472,13 +1719,83 @@ static void test_controller_screens(Pc5Ui *ui, Pc5Canvas *canvas)
     press(ui, PC5_KEY_BACK, canvas);
 }
 
+/* PC5 started from a home screen tile: the tile's game starts at once, and a
+ * game no longer there says so. The player's own picture in the covers folder
+ * becomes an installed game's cover when PC5 opens. */
+static void test_tile_start(const char *fonts)
+{
+    FakeConsole console = { 0 };
+    FakeNet net = { 0 };
+    Pc5Platform platform = { &console, { &net, fake_get }, fake_clock, fake_play, NULL, fake_notify, fake_time, 0 };
+    const char *roots[] = { usb, NULL };
+    Pc5Canvas canvas = { pc5_alloc(1920u * 1080u * 4u), 1920, 1080, 1920 };
+    Pc5Library library;
+    char file[PC5_PATH], tiles[PC5_PATH], tile_template[PC5_PATH];
+
+    path(tiles, sizeof(tiles), "%s/screens-homebrew", work);
+    make_tile_template(tile_template, sizeof(tile_template));
+    pc5_library_load(root, &library);
+    CHECK(library.count > 0, "games to start");
+    if (!library.count) return;
+    {
+        Pc5UiConfig config = { root, template_prefix, fonts, roots, tiles, tile_template, library.games[0].id };
+        Pc5Ui *ui = pc5_ui_create(&config, &platform);
+        for (int i = 0; i < 2000 && !console.plays; i++) frames(ui, 0, 0, 1, &canvas);
+        CHECK(console.plays == 1 && !strcmp(console.played, library.games[0].id), "the tile's game started: %d %s",
+              console.plays, console.played);
+        pc5_ui_destroy(ui);
+    }
+    {
+        Pc5UiConfig config = { root, template_prefix, fonts, roots, tiles, tile_template, "not-installed" };
+        Pc5Ui *ui = pc5_ui_create(&config, &platform);
+        until_screen(ui, "message", &canvas);
+        CHECK(!strcmp(pc5_ui_screen(ui), "message") && console.plays == 1, "a game no longer there: %s",
+              pc5_ui_screen(ui));
+        press(ui, PC5_KEY_ACCEPT, &canvas);
+        CHECK(!strcmp(pc5_ui_screen(ui), "library"), "then the library: %s", pc5_ui_screen(ui));
+        pc5_ui_destroy(ui);
+    }
+    /* An installed game's cover from the covers folder, by the game's name. */
+    {
+        Pc5Image cover = { 0 };
+        uint32_t tint = 0;
+        char saved[PC5_PATH];
+        struct timeval later[2];
+        path(file, sizeof(file), "%s/covers/%s.png", root, library.games[0].title);
+        write_png(file, 400, 600, 0xff8844ccu);
+        /* newer than the cover it replaces */
+        gettimeofday(&later[0], NULL);
+        later[0].tv_sec += 60;
+        later[1] = later[0];
+        utimes(file, later);
+        Pc5UiConfig config = { root, template_prefix, fonts, roots, tiles, tile_template, NULL };
+        Pc5Ui *ui = pc5_ui_create(&config, &platform);
+        until_screen(ui, "library", &canvas);
+        path(saved, sizeof(saved), "%s/prefixes/%s/pc5/cover.bin", root, library.games[0].prefix);
+        CHECK(!pc5_cover_load(saved, &cover, &tint) && cover.px &&
+              cover.px[cover.w * cover.h / 2 + cover.w / 2] == 0xff8844ccu, "the player's picture is its cover");
+        pc5_image_free(&cover);
+        path(saved, sizeof(saved), "%s/prefixes/%s/pc5/cover-original.png", root, library.games[0].prefix);
+        CHECK(pc5_is_file(saved), "kept as it was");
+        pc5_ui_destroy(ui);
+        /* once: the next start leaves it */
+        ui = pc5_ui_create(&config, &platform);
+        until_screen(ui, "library", &canvas);
+        pc5_ui_destroy(ui);
+    }
+    pc5_free(canvas.px);
+}
+
 static void test_screens(const char *fonts)
 {
     FakeConsole console = { 0 };
     FakeNet net = { 0 };
     Pc5Platform platform = { &console, { &net, fake_get }, fake_clock, fake_play, NULL, fake_notify, fake_time, 0 };
     const char *roots[] = { usb, NULL };
-    Pc5UiConfig config = { root, template_prefix, fonts, roots };
+    char tiles[PC5_PATH], tile_template[PC5_PATH], tile[PC5_HOME_ID];
+    path(tiles, sizeof(tiles), "%s/screens-homebrew", work);
+    make_tile_template(tile_template, sizeof(tile_template));
+    Pc5UiConfig config = { root, template_prefix, fonts, roots, tiles, tile_template, NULL };
     Pc5Canvas canvas = { pc5_alloc(1920u * 1080u * 4u), 1920, 1080, 1920 };
     Pc5Ui *ui = pc5_ui_create(&config, &platform);
     Pc5Library library;
@@ -1544,6 +1861,14 @@ static void test_screens(const char *fonts)
     CHECK(!strcmp(pc5_ui_screen(ui), "uninstall-list"), "cancel keeps the game");
     pc5_library_load(root, &library);
     CHECK(library.count == 3, "still three: %d", library.count);
+    /* The game uninstalled next has a home screen tile: it goes with it. */
+    char gone[PC5_ID];
+    {
+        char error[PC5_ERROR] = "";
+        pc5_copy(gone, sizeof(gone), library.games[0].id);
+        CHECK(!pc5_home_add(tiles, tile_template, root, gone, library.games[0].prefix, library.games[0].title, tile,
+                            error, sizeof(error)), "a tile for %s: %s", gone, error);
+    }
     press(ui, PC5_KEY_ACCEPT, &canvas);
     frames(ui, 0, 0, 30, &canvas);
     press(ui, PC5_KEY_RIGHT, &canvas);
@@ -1552,6 +1877,7 @@ static void test_screens(const char *fonts)
     press(ui, PC5_KEY_ACCEPT, &canvas);
     pc5_library_load(root, &library);
     CHECK(library.count == 2, "one uninstalled: %d", library.count);
+    CHECK(pc5_library_find(&library, gone) < 0 && !pc5_home_find(tiles, gone, tile), "%s and its tile gone", gone);
 
     /* Settings: In games, a value changed with Cross and with right; saved. */
     press(ui, PC5_KEY_OPTIONS, &canvas);
@@ -1623,10 +1949,10 @@ static void test_screens(const char *fonts)
     press(ui, PC5_KEY_DOWN, &canvas);        /* Updates */
     press(ui, PC5_KEY_ACCEPT, &canvas);
     press(ui, PC5_KEY_DOWN, &canvas);        /* Check now */
-    net.release = "{\"tag_name\":\"v1.3.0\",\"html_url\":\"https://github.com/bornaradusin/PC5/releases/tag/v1.3.0\"}";
+    net.release = "{\"tag_name\":\"v1.4.0\",\"html_url\":\"https://github.com/bornaradusin/PC5/releases/tag/v1.4.0\"}";
     press(ui, PC5_KEY_ACCEPT, &canvas);
     until_screen(ui, "settings", &canvas);
-    CHECK(console.notifications == 1 && strstr(console.told, "PC5 1.3.0 is available"), "told: %s", console.told);
+    CHECK(console.notifications == 1 && strstr(console.told, "PC5 1.4.0 is available"), "told: %s", console.told);
     press(ui, PC5_KEY_ACCEPT, &canvas);
     until_screen(ui, "settings", &canvas);
     CHECK(console.notifications == 1, "once per release");
@@ -1668,6 +1994,19 @@ static void test_screens(const char *fonts)
     }
     press(ui, PC5_KEY_ACCEPT, &canvas);
     test_controller_screens(ui, &canvas);
+
+    /* A game's menu: Home screen tile, made, then taken away. */
+    press(ui, PC5_KEY_TRIANGLE, &canvas);
+    for (int i = 0; i < 4; i++) press(ui, PC5_KEY_DOWN, &canvas);   /* Play, Controller, Frame generation, Change program */
+    press(ui, PC5_KEY_ACCEPT, &canvas);
+    CHECK(!strcmp(pc5_ui_screen(ui), "message") && pc5_home_find(tiles, "orbital-nine", tile), "tile made: %s %s",
+          pc5_ui_screen(ui), tile);
+    press(ui, PC5_KEY_ACCEPT, &canvas);
+    CHECK(!strcmp(pc5_ui_screen(ui), "game-menu"), "back to its menu: %s", pc5_ui_screen(ui));
+    press(ui, PC5_KEY_ACCEPT, &canvas);
+    CHECK(!strcmp(pc5_ui_screen(ui), "message") && !pc5_home_find(tiles, "orbital-nine", tile), "taken away");
+    press(ui, PC5_KEY_ACCEPT, &canvas);
+    press(ui, PC5_KEY_BACK, &canvas);
 
     /* Several games in a row: two ticked folders, read, then installed one after the other. */
     pc5_library_load(root, &library);
@@ -1725,8 +2064,12 @@ int main(int argc, char **argv)
     test_logs();
     test_cover_fill();
     test_prefix_media();
+    test_home();
+    test_own_covers();
+    test_prefix_dxvk();
     test_game(fonts);
     test_screens(fonts);
+    test_tile_start(fonts);
     printf("test_pc5: %d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

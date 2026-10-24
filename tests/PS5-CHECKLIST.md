@@ -63,5 +63,33 @@ with `PC5 `.
 | 27 | A game that plays a video through Windows at its start or in its menus (a `.wmv`, `.mp4`, `.avi` or `.mpg` among its files; not Bink `.bik`, which games decode themselves) | the video plays with its sound, and the game goes on after it | no `Unhandled page fault`; no `couldn't load in-process dll` or `err:` lines for `winegstreamer` or `winedmo` |
 | 28 | A game whose music or speech is WMA or MP3 (`.wma`, `.mp3`, `.xwma` among its files) | it plays | no `Unhandled page fault` |
 
+| 29 | A game installed before 1.3.0, started the first time with 1.3.0 | it starts as before | `PC5 prefix DXVK updated`, once: not on the next start; DXVK's log line `DXVK: v2.6.2-prospero2-1-g…` |
+| 30 | A game whose movie player shares a picture from Direct3D 9 to Direct3D 11 (a game that loads both `d3d9.dll` and `d3d11.dll`, with `MFReadWrite.dll`) | its movies play | `D3D9: Sharing the Direct3D 11 device's Vulkan device…`; no `Failed to create shared resource` or `OpenSharedResourceGeneric: Handle not found` |
+
+## Home screen tiles and covers
+
+With ShadowMountPlus and elfldr running.
+
+| # | Do | Expect | Expect in the log |
+| --- | --- | --- | --- |
+| 31 | △ on a game › Home screen tile | "Added to the home screen", the row says On with the tile's ID; the tile appears on the home screen with the game's cover | `PC5 home tile added …`; `/data/homebrew/PPSA99xxx/forwarder.json` |
+| 32 | Start the game from its tile, play, then hold the touchpad and Options | PC5 opens straight into the game (no library); leaving the game goes back to the home screen, not to PC5 | `PW_WINE64 args … tile=<game> exit_after=1`, `PW_WINE64 exit to the home screen: started from a tile` |
+| 33 | △ › Home screen tile again (Off), and uninstall a game that has a tile | the tile's folder is gone from `/data/homebrew` (delete the tile on the home screen if it stays) | `PC5 home tile removed …` |
+| 34 | Without internet: install a game whose USB folder has a `cover.png` | the review screen offers "your picture" first; the library shows it | `PC5 cover choices=…` |
+| 35 | Put `<game's name>.png` in `/data/prospero-win/covers/`, open PC5 | that game's cover becomes the picture, and its tile's picture too if it has one, after the tile is turned on again | |
+
+## Pop-ups
+
+| # | Do | Expect | Expect in the log |
+| --- | --- | --- | --- |
+| 36 | Xbox controller or DualSense: a game that shows a Windows warning box before it starts | ✕ presses its highlighted button, the D-pad moves between Yes / No; the game then starts and the controller works in it as before | |
+| 37 | In that game after the box: press ✕ and the D-pad during play | the game sees them as controller buttons only (no Enter or arrow keys, e.g. no text box reacting) | |
+
+## Crash report
+
+| # | Do | Expect | Expect in the log |
+| --- | --- | --- | --- |
+| 38 | A game that crashes at start (its `issue-…` log has `Unhandled page fault`) | PC5 says it crashed, as before | after `Unhandled …`: `wine: crash report: eax=…` (or `rax=…`), `wine: crash report: at L"…"+0x…` and `wine: crash report: stack+0x… L"<game>.exe"+0x…` lines |
+
 A non-zero `rc=` on the light bar or triggers lines means the console refused that call; send
 that log.

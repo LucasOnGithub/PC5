@@ -98,6 +98,71 @@ int pc5_prefix_media(const char *root, const char *prefix, const char *app)
     return ok ? 1 : -1;
 }
 
+/* The first line of a small text file, or "" when there is none. */
+static void first_line(const char *path, char *out, size_t size)
+{
+    Pc5Buf text = { 0 };
+    out[0] = 0;
+    if (pc5_read_file(path, &text, 4096) || pc5_buf_terminate(&text)) {
+        pc5_buf_free(&text);
+        return;
+    }
+    char *end = strchr((char *)text.data, '\n');
+    if (end) *end = 0;
+    pc5_copy(out, size, (char *)text.data);
+    pc5_buf_free(&text);
+}
+
+/* A copy of from at to, in chunks (a title's heap is small): 0, or -1. */
+static int copy_file(const char *from, const char *to)
+{
+    static char chunk[65536];   /* once, at a game's start */
+    FILE *in = fopen(from, "rb"), *out = in ? fopen(to, "wb") : NULL;
+    size_t got;
+    int ok = in && out;
+
+    while (ok && (got = fread(chunk, 1, sizeof(chunk), in)) > 0)
+        ok = fwrite(chunk, 1, got, out) == got;
+    ok = ok && in && !ferror(in);
+    if (in) fclose(in);
+    if (out) ok = !fclose(out) && ok;
+    return ok ? 0 : -1;
+}
+
+int pc5_prefix_dxvk(const char *root, const char *prefix, const char *app)
+{
+    static const char *const dlls[] = { "d3d8.dll", "d3d9.dll", "d3d10core.dll", "d3d11.dll", "dxgi.dll" };
+    static const char *const folders[] = { "system32", "syswow64" };
+    char wanted[128], has[128], note[PC5_PATH];
+
+    if (!prefix || !prefix[0] || !strcmp(prefix, "default") || !app || !app[0]) return 0;
+    if (pc5_format(note, sizeof(note), "%s/pc5/dxvk.txt", app)) return -1;
+    first_line(note, wanted, sizeof(wanted));
+    if (!wanted[0]) return 0;   /* an app that doesn't name its DXVK */
+    if (pc5_format(note, sizeof(note), "%s/prefixes/%s/pc5/dxvk.txt", root, prefix)) return -1;
+    first_line(note, has, sizeof(has));
+    if (!strcmp(has, wanted)) return 0;
+    for (size_t f = 0; f < 2; f++) {
+        for (size_t d = 0; d < sizeof(dlls) / sizeof(dlls[0]); d++) {
+            char from[PC5_PATH], to[PC5_PATH], part[PC5_PATH];
+            if (pc5_format(from, sizeof(from), "%s/pc5/prefix/drive_c/windows/%s/%s", app, folders[f], dlls[d]) ||
+                pc5_format(to, sizeof(to), "%s/prefixes/%s/drive_c/windows/%s/%s", root, prefix, folders[f], dlls[d]) ||
+                pc5_format(part, sizeof(part), "%s.pc5-part", to))
+                return -1;
+            if (!pc5_is_file(to)) continue;   /* a Windows without this one: nothing to replace */
+            /* Written beside the old one and renamed over it: a cut-short copy leaves the old DLL. */
+            if (copy_file(from, part) || rename(part, to)) {
+                unlink(part);
+                return -1;
+            }
+        }
+    }
+    char text[160], folder[PC5_PATH];
+    snprintf(text, sizeof(text), "%s\n", wanted);
+    if (pc5_format(folder, sizeof(folder), "%s/prefixes/%s/pc5", root, prefix) || pc5_mkdirs(folder)) return -1;
+    return pc5_write_file(note, text, strlen(text)) ? -1 : 1;
+}
+
 void pc5_game_begin(Pc5GameSession *game, const Pc5GameOps *ops, const char *root, const char *app,
                     const char *prefix, const char *title)
 {
@@ -113,6 +178,8 @@ void pc5_game_begin(Pc5GameSession *game, const Pc5GameOps *ops, const char *roo
     if (prefix && app && app[0]) {
         int media = pc5_prefix_media(root, prefix, app);
         if (media) say(game, "PC5 prefix media %s", media > 0 ? "registered" : "registration failed");
+        int dxvk = pc5_prefix_dxvk(root, prefix, app);
+        if (dxvk) say(game, "PC5 prefix DXVK %s", dxvk > 0 ? "updated" : "update failed");
     }
     /* Frame generation, which libvulkan.prx reads from the environment. */
     if (prefix && prefix[0]) {

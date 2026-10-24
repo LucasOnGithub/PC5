@@ -43,6 +43,13 @@ typedef struct Pc5UiConfig {
     const char *template_prefix;   /* the app's empty prefix (with its .list) */
     const char *fonts;             /* the app's fonts.bin */
     const char *const *usb_roots;  /* NULL-terminated */
+    /* Home screen tiles (pc5_home.h): where they go (PC5_HOME_ROOT), and the
+     * app's forwarder program (its pc5/forwarder). NULL: no tiles. */
+    const char *tiles_root;
+    const char *tile_template;
+    /* The game a home screen tile asked for (its "--rom"), started at once;
+     * NULL or "" for none. */
+    const char *start;
 } Pc5UiConfig;
 
 typedef struct Pc5Ui Pc5Ui;

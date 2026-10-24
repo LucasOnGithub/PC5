@@ -1,0 +1,303 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bornaradusin <bornaradusin@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 15:30:48 +0100
+Subject: [PATCH] PC5: the controller answers a game's pop-up (Wine patch 0911)
+
+With the controller as the game's XInput controller or DualSense there
+is no keyboard, so a pop-up a game shows (a minimum-specs warning, a
+Yes/No question) could not be answered. Cross and the D-pad now also go
+to Wine as dialog keys, Enter and the arrows: Wine's PS5 driver sends
+them only while a dialog box is in front, drops them otherwise, and
+always sends a key's release once it sent its press.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
+---
+ PUBLICATION_ALLOWLIST.txt                     |  1 +
+ native/pw_wine_display.c                      | 17 ++++
+ native/pw_wine_display.h                      |  7 ++
+ native/wine64_main.c                          | 11 +++
+ tests/test_pw_wine_display.c                  | 22 ++++-
+ tests/test_pw_wine_sink.c                     |  6 +-
+ .../patches/0911-win32u-ps5-dialog-keys.patch | 83 +++++++++++++++++++
+ wine/ps5/pw_wine_sink.c                       |  3 +-
+ wine/ps5/pw_wine_sink.h                       |  7 +-
+ 9 files changed, 152 insertions(+), 5 deletions(-)
+ create mode 100644 wine/patches/0911-win32u-ps5-dialog-keys.patch
+
+diff --git a/PUBLICATION_ALLOWLIST.txt b/PUBLICATION_ALLOWLIST.txt
+index df4842a..b86e654 100644
+--- a/PUBLICATION_ALLOWLIST.txt
++++ b/PUBLICATION_ALLOWLIST.txt
+@@ -552,6 +552,7 @@ docs/wine-worker-desktop.md
+ 
+ 
+ wine/patches/0910-win32u-ps5-worker-desktop-cache.patch
++wine/patches/0911-win32u-ps5-dialog-keys.patch
+ 
+ 
+ 
+diff --git a/native/pw_wine_display.c b/native/pw_wine_display.c
+index 6113ac6..58fab4d 100644
+--- a/native/pw_wine_display.c
++++ b/native/pw_wine_display.c
+@@ -95,6 +95,23 @@ size_t pw_wine_game_inputs(const PwGameInput *input, uint32_t pressed, uint32_t
+     return add_edges(input, pressed, 1, out, used, max);
+ }
+ 
++/* Cross: Enter; the D-pad: the arrows (Windows virtual keys). */
++static const struct { uint32_t button, vk; } dialog_buttons[] = {
++    { 0x4000u, 0x0du }, { 0x10u, 0x26u }, { 0x40u, 0x28u }, { 0x80u, 0x25u }, { 0x20u, 0x27u },
++};
++
++size_t pw_wine_dialog_inputs(uint32_t pressed, uint32_t released, PwWineInput *out, size_t max)
++{
++    size_t used = 0;
++
++    if (!out) return 0;
++    for (uint32_t down = 0; down <= 1; down++)
++        for (size_t i = 0; i < sizeof(dialog_buttons) / sizeof(dialog_buttons[0]) && used < max; i++)
++            if ((down ? pressed : released) & dialog_buttons[i].button)
++                out[used++] = (PwWineInput){ PW_WINE_INPUT_DIALOG_KEY, dialog_buttons[i].vk, 0, 0, down };
++    return used;
++}
++
+ static const struct { uint32_t dualsense; uint16_t xinput; } pad_buttons[] = {
+     { 0x4000u, 0x1000u }, { 0x2000u, 0x2000u }, { 0x8000u, 0x4000u }, { 0x1000u, 0x8000u },
+     { 0x400u, 0x0100u }, { 0x800u, 0x0200u }, { 0x2u, 0x0040u }, { 0x4u, 0x0080u },
+diff --git a/native/pw_wine_display.h b/native/pw_wine_display.h
+index d2aa275..a80671f 100644
+--- a/native/pw_wine_display.h
++++ b/native/pw_wine_display.h
+@@ -52,6 +52,13 @@ int pw_wine_frame_box_take(PwWineFrameBox *box, uint64_t *seen, uint8_t *out,
+ size_t pw_wine_game_inputs(const PwGameInput *input, uint32_t pressed, uint32_t released,
+                            PwWineInput *out, size_t max);
+ 
++/* xinput and dualsense modes, where the controller is no keyboard: Cross
++ * and the D-pad also answer a game's pop-up, as Enter and the arrow keys.
++ * They go as dialog keys, which Wine's driver sends only while a dialog box
++ * is in front, so the game never sees them as keys. Releases first, then
++ * presses; returns how many were written (at most max). */
++size_t pw_wine_dialog_inputs(uint32_t pressed, uint32_t released, PwWineInput *out, size_t max);
++
+ /* The DualSense as an XInput gamepad: its held buttons (Cross A, Circle B,
+  * Square X, Triangle Y, L1/R1 shoulders, L3/R3 thumbs, Options Start,
+  * Create Back, the touchpad Guide), the analog triggers, and the sticks
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+index 3a8bcdb..f9cc3bf 100644
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -1678,6 +1678,17 @@ int main(int argc, char **argv)
+                 if (post_input(&events[i]) == 0) posted++;
+                 else refused++;
+             }
++            /* The controller as the game's controller: Cross and the D-pad
++             * answer its pop-ups too (a dialog box only). */
++            if (game_input.mode != PW_GAME_INPUT_KEYBOARD) {
++                PwWineInput dialog[10];
++                size_t keys = pw_wine_dialog_inputs(pad.core.pressed_edges, pad.core.released_edges, dialog,
++                                                    sizeof(dialog) / sizeof(dialog[0]));
++                for (size_t i = 0; i < keys; i++) {
++                    if (post_input(&dialog[i]) == 0) posted++;
++                    else refused++;
++                }
++            }
+             /* The rumble the game asked for: XInput's left motor is the
+              * DualSense's large one, speeds 0..65535 become 0..255. */
+             uint32_t left, right;
+diff --git a/tests/test_pw_wine_display.c b/tests/test_pw_wine_display.c
+index f195db0..dcce4d8 100644
+--- a/tests/test_pw_wine_display.c
++++ b/tests/test_pw_wine_display.c
+@@ -115,6 +115,24 @@ static void test_inputs(void)
+     assert(pw_wine_game_inputs(NULL, L1, 0, events, 8) == 0 && pw_wine_game_inputs(&input, L1, 0, NULL, 8) == 0);
+ }
+ 
++/* Cross and the D-pad as dialog keys: Enter and the arrows, releases first;
++ * other buttons send none. */
++static void test_dialog_inputs(void)
++{
++    enum { UP = 0x10u, RIGHT = 0x20u, DOWN = 0x40u, LEFT = 0x80u };
++    PwWineInput events[10];
++
++    assert(pw_wine_dialog_inputs(CROSS, 0, events, 10) == 1);
++    assert(events[0].type == PW_WINE_INPUT_DIALOG_KEY && events[0].code == 0x0d && events[0].down == 1);
++    assert(pw_wine_dialog_inputs(LEFT | UP, CROSS, events, 10) == 3);
++    assert(events[0].code == 0x0d && !events[0].down);
++    assert(events[1].code == 0x26 && events[1].down && events[2].code == 0x25 && events[2].down);
++    assert(pw_wine_dialog_inputs(RIGHT | DOWN, 0, events, 10) == 2 && events[0].code == 0x28 && events[1].code == 0x27);
++    assert(pw_wine_dialog_inputs(L1 | CIRCLE | SQUARE | R2, 0, events, 10) == 0);
++    assert(pw_wine_dialog_inputs(CROSS | UP, 0, events, 1) == 1 && events[0].code == 0x0d);
++    assert(pw_wine_dialog_inputs(CROSS, 0, NULL, 10) == 0);
++}
++
+ static void test_pointer(void)
+ {
+     PwWinePointer pointer = { 0, 0 };
+@@ -403,6 +421,7 @@ int main(void)
+     test_frames();
+     test_threads();
+     test_inputs();
++    test_dialog_inputs();
+     test_pointer();
+     test_pointer_fraction();
+     test_pad();
+@@ -410,7 +429,8 @@ int main(void)
+     test_stick_buttons();
+     test_script_pad();
+     printf("wine display passed: frame box copy, newest frame, refusals, concurrent put/take, "
+-           "profile bindings to keys and mouse buttons, stick pointer, resized frames, "
++           "profile bindings to keys and mouse buttons, Cross and the D-pad as dialog keys, stick pointer, "
++           "resized frames, "
+            "DualSense as XInput, stick directions as keys, scripted controller added to it\n");
+     return 0;
+ }
+diff --git a/tests/test_pw_wine_sink.c b/tests/test_pw_wine_sink.c
+index 27df79f..b7f7282 100644
+--- a/tests/test_pw_wine_sink.c
++++ b/tests/test_pw_wine_sink.c
+@@ -287,7 +287,11 @@ int main(void)
+     assert(pw_wine_next_input(&out) && out.type==PW_WINE_INPUT_KEY && out.code==0x0d && out.down==1);
+     assert(pw_wine_next_input(&out) && out.type==PW_WINE_INPUT_MOUSE_BUTTON && out.code==1 && !out.down);
+     assert(!pw_wine_next_input(&out));
++    /* A dialog key is a key the driver sends only to a dialog box: validated as one. */
++    e=(PwWineInput){PW_WINE_INPUT_DIALOG_KEY,0x0d,0,0,1};assert(!pw_wine_post_input(&e));
++    assert(pw_wine_next_input(&out) && out.type==PW_WINE_INPUT_DIALOG_KEY && out.code==0x0d && out.down==1);
+     PwWineInput bad[]={{0,1,0,0,1},{PW_WINE_INPUT_KEY,0,0,0,1},{PW_WINE_INPUT_KEY,256,0,0,1},
++                       {PW_WINE_INPUT_DIALOG_KEY,0,0,0,1},{PW_WINE_INPUT_DIALOG_KEY,300,0,0,1},
+                        {PW_WINE_INPUT_KEY,65,0,0,2},{PW_WINE_INPUT_MOUSE_BUTTON,3,0,0,1},{99,0,0,0,0}};
+     for(unsigned i=0;i<sizeof(bad)/sizeof(bad[0]);i++)assert(pw_wine_post_input(&bad[i])==-1);
+     assert(pw_wine_post_input(NULL)==-1);
+@@ -297,7 +301,7 @@ int main(void)
+     for(int i=0;i<PW_WINE_INPUT_QUEUE;i++)assert(pw_wine_next_input(&out) && out.x==1 && out.y==2);
+     assert(!pw_wine_next_input(&out));
+     pw_wine_sink_stats(&s);
+-    assert(s.inputs_posted==2+PW_WINE_INPUT_QUEUE && s.inputs_delivered==s.inputs_posted);
++    assert(s.inputs_posted==3+PW_WINE_INPUT_QUEUE && s.inputs_delivered==s.inputs_posted);
+     assert(s.inputs_dropped==sizeof(bad)/sizeof(bad[0])+2);
+ 
+     /* The wake pipe: readable after a post, empty once drained. */
+diff --git a/wine/patches/0911-win32u-ps5-dialog-keys.patch b/wine/patches/0911-win32u-ps5-dialog-keys.patch
+new file mode 100644
+index 0000000..8d63949
+--- /dev/null
++++ b/wine/patches/0911-win32u-ps5-dialog-keys.patch
+@@ -0,0 +1,83 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: prospero-win <prospero-win@invalid>
++Date: Sat, 24 Oct 2026 16:00:00 +0200
++Subject: [PATCH] win32u: Let the PS5 driver send keys that only a dialog box
++ takes.
++
++A game started with the controller as its XInput controller or its
++DualSense has no keyboard: a pop-up it shows before it starts (a
++minimum-specs warning, a "Yes/No" question) cannot be answered without
++one. Input type 4 is a key for a dialog box: the driver sends it as a
++key while the foreground window is a dialog box (the class DialogBox
++and MessageBox give their windows), and drops the press otherwise, so
++the game itself never sees it. A key sent down is always sent up, even
++once its dialog has closed, so no key stays held.
++---
++ dlls/win32u/ps5drv.c | 33 ++++++++++++++++++++++++++++++++-
++ 1 file changed, 32 insertions(+), 1 deletion(-)
++
++diff --git a/dlls/win32u/ps5drv.c b/dlls/win32u/ps5drv.c
++--- a/dlls/win32u/ps5drv.c
+++++ b/dlls/win32u/ps5drv.c
++@@ -65,7 +65,7 @@
++ /* the layout of PwWineInput in wine/ps5/pw_wine_sink.h */
++ struct ps5_input
++ {
++-    UINT type;              /* 1 key, 2 mouse move, 3 mouse button */
+++    UINT type;              /* 1 key, 2 mouse move, 3 mouse button, 4 dialog key */
++     UINT code;              /* virtual key, or button 0 left 1 right 2 middle */
++     INT  x, y;              /* mouse move: relative motion in desktop pixels */
++     UINT down;
++@@ -546,6 +546,39 @@
++     return FALSE;
++ }
++ 
+++/* A dialog box: the class of every window DialogBox and MessageBox make. */
+++static BOOL is_dialog( HWND hwnd )
+++{
+++    static const WCHAR dialogW[] = {'#','3','2','7','7','0'};
+++    WCHAR buffer[16];
+++    UNICODE_STRING name = {0, sizeof(buffer), buffer};
+++
+++    return hwnd && NtUserGetClassName( hwnd, FALSE, &name ) == ARRAY_SIZE(dialogW) &&
+++           !memcmp( buffer, dialogW, sizeof(dialogW) );
+++}
+++
+++/* The dialog keys sent down, so that each one's release is sent too, even
+++ * once the dialog it pressed has gone. */
+++static pthread_mutex_t dialog_lock = PTHREAD_MUTEX_INITIALIZER;
+++static BYTE dialog_down[256];
+++
+++/* A dialog key (the title's controller buttons on a game's pop-up) is a
+++ * key only while a dialog box is in front; a press is dropped otherwise. */
+++static BOOL dialog_key( HWND hwnd, const struct ps5_input *event )
+++{
+++    BOOL send;
+++
+++    pthread_mutex_lock( &dialog_lock );
+++    if (event->down) send = dialog_down[event->code] = is_dialog( hwnd );
+++    else
+++    {
+++        send = dialog_down[event->code];
+++        dialog_down[event->code] = 0;
+++    }
+++    pthread_mutex_unlock( &dialog_lock );
+++    return send;
+++}
+++
++ static BOOL ps5_ProcessEvents( DWORD mask )
++ {
++     static const DWORD button_flags[3][2] =
++@@ -584,6 +617,9 @@
++         processed++;
++         switch (event.type)
++         {
+++        case 4:
+++            if (event.code > 255 || !dialog_key( hwnd, &event )) break;
+++            /* fall through */
++         case 1:
++             input.ki.wVk = event.code;
++             input.ki.wScan = NtUserMapVirtualKeyEx( event.code, MAPVK_VK_TO_VSC, NtUserGetKeyboardLayout( 0 ));
++-- 
++2.43.0
++
+diff --git a/wine/ps5/pw_wine_sink.c b/wine/ps5/pw_wine_sink.c
+index d2adce4..4219d62 100644
+--- a/wine/ps5/pw_wine_sink.c
++++ b/wine/ps5/pw_wine_sink.c
+@@ -100,7 +100,8 @@ int pw_wine_present(const void *bgra,uint32_t width,uint32_t height,uint32_t str
+ static int valid(const PwWineInput *e)
+ {
+     switch(e->type) {
+-    case PW_WINE_INPUT_KEY:return e->code>0 && e->code<256 && e->down<=1;
++    case PW_WINE_INPUT_KEY:
++    case PW_WINE_INPUT_DIALOG_KEY:return e->code>0 && e->code<256 && e->down<=1;
+     case PW_WINE_INPUT_MOUSE_MOVE:return 1;
+     case PW_WINE_INPUT_MOUSE_BUTTON:return e->code<=2 && e->down<=1;
+     default:return 0;
+diff --git a/wine/ps5/pw_wine_sink.h b/wine/ps5/pw_wine_sink.h
+index 6022422..0d0d0f7 100644
+--- a/wine/ps5/pw_wine_sink.h
++++ b/wine/ps5/pw_wine_sink.h
+@@ -24,11 +24,14 @@
+ typedef int (*PwWinePresentSink)(void *context,const void *bgra,uint32_t width,uint32_t height,
+                                  uint32_t stride);
+ 
+-enum { PW_WINE_INPUT_KEY=1,PW_WINE_INPUT_MOUSE_MOVE,PW_WINE_INPUT_MOUSE_BUTTON,
++/* DIALOG_KEY: a key the driver sends only while a dialog box is in front
++ * (Wine patch 0911), for answering a game's pop-up with the controller; a
++ * press is dropped otherwise, and a key sent down is always sent up. */
++enum { PW_WINE_INPUT_KEY=1,PW_WINE_INPUT_MOUSE_MOVE,PW_WINE_INPUT_MOUSE_BUTTON,PW_WINE_INPUT_DIALOG_KEY,
+        PW_WINE_INPUT_QUEUE=256 };
+ typedef struct PwWineInput {
+     uint32_t type;
+-    uint32_t code;      /* KEY: Windows virtual key; MOUSE_BUTTON: 0 left, 1 right, 2 middle */
++    uint32_t code;      /* KEY, DIALOG_KEY: Windows virtual key; MOUSE_BUTTON: 0 left, 1 right, 2 middle */
+     int32_t x,y;        /* MOUSE_MOVE: relative motion in desktop pixels */
+     uint32_t down;      /* KEY, MOUSE_BUTTON: 1 pressed, 0 released */
+ } PwWineInput;

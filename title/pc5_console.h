@@ -14,6 +14,9 @@ typedef struct Pc5Console {
      * when it could not. */
     void (*play)(const char *id);
     void (*log)(const char *line);
+    /* The game a home screen tile started the title for ("--rom"), or NULL:
+     * PC5 starts it at once. */
+    const char *start;
 } Pc5Console;
 
 /* Shows PC5 until a game is started. Returns only when the screen can't be

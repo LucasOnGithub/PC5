@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 /* PC5: the launcher's screens (pc5_ui.h). */
 #include "pc5_ui.h"
+#include "pc5_home.h"
 #include "pc5_image.h"
 #include "pc5_library.h"
 #include "pc5_logs.h"
@@ -107,8 +108,8 @@ static int page_rows(const Pc5Settings *set, int page, SettingRow rows[PAGE_ROWS
 }
 
 /* A game's menu: its rows; Button mapping only while it plays the keyboard and mouse. */
-typedef enum GameRow { GR_PLAY, GR_CONTROLLER, GR_BUTTONS, GR_FRAMEGEN, GR_PROGRAM, GR_UNINSTALL } GameRow;
-enum { GAME_ROWS = 6 };
+typedef enum GameRow { GR_PLAY, GR_CONTROLLER, GR_BUTTONS, GR_FRAMEGEN, GR_PROGRAM, GR_HOME, GR_UNINSTALL } GameRow;
+enum { GAME_ROWS = 7 };
 
 static int game_rows(const Pc5Controls *controls, GameRow rows[GAME_ROWS])
 {
@@ -118,6 +119,7 @@ static int game_rows(const Pc5Controls *controls, GameRow rows[GAME_ROWS])
     if (controls->mode == PC5_PAD_KEYBOARD) rows[n++] = GR_BUTTONS;
     rows[n++] = GR_FRAMEGEN;
     rows[n++] = GR_PROGRAM;
+    rows[n++] = GR_HOME;
     rows[n++] = GR_UNINSTALL;
     return n;
 }
@@ -217,6 +219,9 @@ struct Pc5Ui {
     char message_title[160], message_body[700];
     int message_good;
     char launch_id[PC5_ID];
+    char start[PC5_ID];               /* a home screen tile's game, until it is started */
+    int removing_tiles;               /* the game being uninstalled had a tile, deleted with it */
+    char tile[PC5_HOME_ID];           /* the game menu's game's home screen tile, or "" */
     char select_after[PC5_ID];
 
     Pc5Settings settings;
@@ -498,6 +503,7 @@ Pc5Ui *pc5_ui_create(const Pc5UiConfig *config, const Pc5Platform *platform)
     ui->config = *config;
     pc5_copy(ui->root, sizeof(ui->root), config->root);
     pc5_copy(ui->template_prefix, sizeof(ui->template_prefix), config->template_prefix);
+    if (config->start) pc5_copy(ui->start, sizeof(ui->start), config->start);
     ui->usb_roots = config->usb_roots;
     ui->platform = *platform;
     if (pc5_fonts_load(&ui->fonts, config->fonts)) say(ui, "PC5 fonts missing: %s", config->fonts);
@@ -628,6 +634,20 @@ static void hint_for_folder(const Pc5Folder *folder, int exe, Pc5CoverHint *hint
     if (exe >= 0 && exe < folder->exe_count) pc5_copy(hint->product, sizeof(hint->product), folder->exes[exe].pe.product);
     snprintf(hint->program, sizeof(hint->program), "%.*s", (int)(strlen(name) > 4 ? strlen(name) - 4 : 0), name);
     hint->steam_appid = folder->steam_appid;
+    pc5_copy(hint->picture, sizeof(hint->picture), folder->picture);
+}
+
+/* The player's own cover for an installed game: a picture in the covers
+ * folder named after the game's folder, its name or its id. 0, or -1. */
+static int own_cover(Pc5Ui *ui, const Pc5Game *game, char *out, size_t size)
+{
+    char dir[PC5_PATH], folder[PC5_PATH];
+    const char *base = "";
+
+    if (pc5_format(dir, sizeof(dir), "%s/covers", ui->root) || !pc5_is_dir(dir)) return -1;
+    if (!pc5_game_folder(ui->root, game->id, folder, sizeof(folder)) && strrchr(folder, '/')) base = strrchr(folder, '/') + 1;
+    const char *const names[] = { base, game->title, game->id, NULL };
+    return pc5_cover_own(dir, names, out, size);
 }
 
 static void hint_for_game(Pc5Ui *ui, const Pc5Game *game, Pc5CoverHint *hint)
@@ -641,16 +661,30 @@ static void hint_for_game(Pc5Ui *ui, const Pc5Game *game, Pc5CoverHint *hint)
     if (!game_program(ui, game, program, sizeof(program)) && !pc5_pe_read(program, &pe))
         pc5_copy(hint->product, sizeof(hint->product), pe.product);
     snprintf(hint->program, sizeof(hint->program), "%.*s", (int)(strlen(name) > 4 ? strlen(name) - 4 : 0), name);
+    /* The player's own picture takes the place of anything found online. */
+    hint->picture_only = !own_cover(ui, game, hint->picture, sizeof(hint->picture));
+}
+
+/* 1 when the player's own picture for game is newer than its cover. */
+static int own_cover_new(Pc5Ui *ui, const Pc5Game *game, const char *cover)
+{
+    char picture[PC5_PATH];
+    struct stat own, saved;
+
+    if (own_cover(ui, game, picture, sizeof(picture)) || stat(picture, &own)) return 0;
+    return stat(cover, &saved) || own.st_mtime > saved.st_mtime;
 }
 
 /* At start: the games that have no cover yet, or one from PC5 1.00 (which
- * could have bands): it is looked for again, kept while there is no answer. */
+ * could have bands): it is looked for again, kept while there is no answer.
+ * And those the player gave a picture of their own since. */
 static void queue_missing_covers(Pc5Ui *ui)
 {
     ui->cover_count = ui->cover_at = 0;
     for (int i = 0; i < ui->library.count; i++) {
         char path[PC5_PATH];
-        if (!cover_path(ui, &ui->library.games[i], path, sizeof(path)) && !pc5_cover_current(path))
+        if (!cover_path(ui, &ui->library.games[i], path, sizeof(path)) &&
+            (!pc5_cover_current(path) || own_cover_new(ui, &ui->library.games[i], path)))
             ui->cover_queue[ui->cover_count++] = i;
     }
 }
@@ -1167,8 +1201,44 @@ static void game_menu_open(Pc5Ui *ui, const char *id)
 {
     pc5_copy(ui->launch_id, sizeof(ui->launch_id), id);
     pc5_controls_load(ui->root, id, &ui->controls);
+    if (!ui->config.tiles_root || !pc5_home_find(ui->config.tiles_root, id, ui->tile)) ui->tile[0] = 0;
     ui->menu = 0;
     go(ui, S_GAME_MENU);
+}
+
+/* The game's home screen tile: made, or taken away when it has one. */
+static void home_toggle(Pc5Ui *ui, const Pc5Game *game)
+{
+    char error[PC5_ERROR] = "", body[600];
+
+    if (!ui->config.tiles_root || !ui->config.tile_template) {
+        message(ui, 0, "Home screen tiles aren't available", "This copy of PC5 has no tile program.", S_GAME_MENU);
+        return;
+    }
+    if (ui->tile[0]) {
+        int removed = pc5_home_remove(ui->config.tiles_root, game->id);
+        say(ui, "PC5 home tile removed id=%s tile=%s count=%d", game->id, ui->tile, removed);
+        if (removed < 0) {
+            snprintf(body, sizeof(body), "PC5 can't delete its folder, %s/%s.", ui->config.tiles_root, ui->tile);
+            message(ui, 0, "The tile wasn't taken away", body, S_GAME_MENU);
+            return;
+        }
+        ui->tile[0] = 0;
+        message(ui, 1, "Taken off the home screen",
+                "The tile's folder is deleted. If the tile is still on the home screen, delete it there.", S_GAME_MENU);
+        return;
+    }
+    if (pc5_home_add(ui->config.tiles_root, ui->config.tile_template, ui->root, game->id, game->prefix, game->title,
+                     ui->tile, error, sizeof(error))) {
+        say(ui, "PC5 problem home tile %s: %s", game->id, error);
+        message(ui, 0, "The tile wasn't made", error, S_GAME_MENU);
+        return;
+    }
+    say(ui, "PC5 home tile added id=%s tile=%s", game->id, ui->tile);
+    snprintf(body, sizeof(body),
+             "Its tile, %s, appears on the home screen once ShadowMountPlus finds it in %s. It starts the game "
+             "straight away, and leaving the game goes back to the home screen.", ui->tile, ui->config.tiles_root);
+    message(ui, 1, "Added to the home screen", body, S_GAME_MENU);
 }
 
 static void settings_open(Pc5Ui *ui, int page, int row)
@@ -1286,6 +1356,22 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
                 int issues = pc5_logs_tidy(ui->root, ui->settings.keep_logs, now, offset, &ui->issue);
                 ui->issue_pending = issues > 0 && ui->issue.problem != PC5_LOG_PC5_PROBLEM;
                 if (issues) say(ui, "PC5 logs kept=%d newest=%s problem=%d", issues, ui->issue.file, (int)ui->issue.problem);
+            }
+            /* Started from a home screen tile: its game, now. */
+            if (ui->start[0]) {
+                int index = pc5_library_find(&ui->library, ui->start);
+                say(ui, "PC5 tile game=%s found=%d", ui->start, index >= 0);
+                if (index >= 0 && ui->library.games[index].playable) {
+                    pc5_copy(ui->launch_id, sizeof(ui->launch_id), ui->start);
+                    ui->start[0] = 0;
+                    go(ui, S_LAUNCH);
+                    break;
+                }
+                message(ui, 0, "This tile's game can't start",
+                        index < 0 ? "It isn't in PC5 any more. Take the tile off the home screen, or install the "
+                                    "game again." : ui->library.games[index].problem, S_LIBRARY);
+                ui->start[0] = 0;
+                break;
             }
             queue_missing_covers(ui);
             if (ui->settings.check_updates && (now <= 0 || now - ui->update.checked >= PC5_UPDATE_EVERY_S ||
@@ -1564,6 +1650,8 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
             ui->controls.frame_generation = !ui->controls.frame_generation;
             controls_changed(ui);
             ui->dirty = 1;
+        } else if ((k & accept) && row == GR_HOME) {
+            home_toggle(ui, game);
         } else if (k & accept) {
             if (row == GR_PLAY) {
                 if (game->playable) go(ui, S_LAUNCH);
@@ -1717,6 +1805,9 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
                 const Pc5Game *game = &ui->library.games[ui->menu];
                 pc5_copy(ui->removing_title, sizeof(ui->removing_title), game->title);
                 say(ui, "PC5 uninstall id=%s prefix=%s", game->id, game->prefix);
+                /* Its home screen tile would start nothing now. */
+                ui->removing_tiles = ui->config.tiles_root ? pc5_home_remove(ui->config.tiles_root, game->id) : 0;
+                if (ui->removing_tiles) say(ui, "PC5 home tile removed id=%s count=%d", game->id, ui->removing_tiles);
                 pc5_remove_begin(&ui->remove, ui->root, game, &ui->library);
                 covers_clear(ui);
                 go(ui, S_REMOVING);
@@ -1730,7 +1821,9 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
             int failed = ui->remove.failed;
             snprintf(title, sizeof(title), failed ? "%s wasn't fully uninstalled" : "%s is uninstalled", ui->removing_title);
             if (failed) snprintf(body, sizeof(body), "%s PC5 finishes deleting it the next time it starts.", ui->remove.error);
-            else snprintf(body, sizeof(body), "The game, its saves and its settings were deleted.");
+            else snprintf(body, sizeof(body), "The game, its saves and its settings were deleted.%s",
+                          ui->removing_tiles > 0 ? " So was its home screen tile's folder: if the tile is still on "
+                                                   "the home screen, delete it there." : "");
             if (failed) say(ui, "PC5 problem uninstall %s: %s", ui->removing_title, ui->remove.error);
             say(ui, "PC5 uninstall done failed=%d removed=%u", failed, (unsigned)ui->remove.removed);
             pc5_remove_end(&ui->remove);
@@ -2072,26 +2165,27 @@ static void game_menu_screen(Pc5Ui *ui, Pc5Canvas *c, int chosen)
     GameRow rows[GAME_ROWS];
     int count = game_rows(&ui->controls, rows);
 
+    float pitch = count > 6 ? 104 : 118;   /* seven rows fit above the hints */
     pc5_text(c, &ui->fonts, PC5_FACE_SMALL, (int)x + 64, 182, C_DIM, game->playable ? game->detail : game->problem, 760 - 128, 0);
     for (int i = 0; i < count; i++) {
-        float y = 226 + 118 * i;
+        float y = 226 + pitch * i;
         switch (rows[i]) {
         case GR_PLAY:
-            drawer_row(ui, c, x, y, 118, chosen == i, "Play", "To leave it, hold the touchpad and OPTIONS for 2 s", "");
+            drawer_row(ui, c, x, y, pitch, chosen == i, "Play", "To leave it, hold the touchpad and OPTIONS for 2 s", "");
             break;
         case GR_CONTROLLER:
-            drawer_row(ui, c, x, y, 118, chosen == i, "Controller",
+            drawer_row(ui, c, x, y, pitch, chosen == i, "Controller",
                        ui->controls.mode == PC5_PAD_DUALSENSE ? "The game sees a DualSense, as one plugged into a PC"
                        : ui->controls.mode == PC5_PAD_KEYBOARD ? "The buttons press keys, the sticks move the mouse"
                                                                : "Games with controller support see an Xbox controller",
                        pc5_pad_mode_name(ui->controls.mode));
             break;
         case GR_BUTTONS:
-            drawer_row(ui, c, x, y, 118, chosen == i, "Button mapping", "The key or mouse button each one sends",
+            drawer_row(ui, c, x, y, pitch, chosen == i, "Button mapping", "The key or mouse button each one sends",
                        "\xe2\x80\xba");
             break;
         case GR_FRAMEGEN:
-            drawer_row(ui, c, x, y, 118, chosen == i, "Frame generation",
+            drawer_row(ui, c, x, y, pitch, chosen == i, "Frame generation",
                        ui->controls.frame_generation ? "Held at 30 fps and shown at 60"
                                                      : "The game's frames as it makes them",
                        ui->controls.frame_generation ? "30 \xe2\x86\x92 60 fps" : "Off");
@@ -2099,15 +2193,21 @@ static void game_menu_screen(Pc5Ui *ui, Pc5Canvas *c, int chosen)
         case GR_PROGRAM: {
             const char *exe = strrchr(game->executable, '\\');
             snprintf(about, sizeof(about), "Now: %s", exe ? exe + 1 : game->executable);
-            drawer_row(ui, c, x, y, 118, chosen == i, "Change program", about, "");
+            drawer_row(ui, c, x, y, pitch, chosen == i, "Change program", about, "");
             break;
         }
+        case GR_HOME:
+            if (ui->tile[0]) snprintf(about, sizeof(about), "Its tile, %s, starts the game", ui->tile);
+            drawer_row(ui, c, x, y, pitch, chosen == i, "Home screen tile",
+                       ui->tile[0] ? about : "A tile on the PS5's home screen that starts it", ui->tile[0] ? "On" : "Off");
+            break;
         case GR_UNINSTALL:
-            drawer_row(ui, c, x, y, 118, chosen == i, "Uninstall", "Deletes the game with its saves and settings", "");
+            drawer_row(ui, c, x, y, pitch, chosen == i, "Uninstall", "Deletes the game with its saves and settings", "");
             break;
         }
     }
-    Hint list[] = { { accept_glyph(ui), chosen < count && (rows[chosen] == GR_CONTROLLER || rows[chosen] == GR_FRAMEGEN)
+    Hint list[] = { { accept_glyph(ui), chosen < count && (rows[chosen] == GR_CONTROLLER || rows[chosen] == GR_FRAMEGEN ||
+                                                           rows[chosen] == GR_HOME)
                                             ? "Change" : "Choose" },
                     { back_glyph(ui), "Back" } };
     hints(ui, c, (int)x + 64, 1012, list, 2);

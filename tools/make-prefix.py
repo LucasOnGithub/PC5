@@ -4,13 +4,15 @@
 console reads.
 
     tools/make-prefix.py --pw PROSPERO_WIN --wine HOST_WINE --cpu-dll WOWPROSPERO_DLL \\
-                         --vkd3d VKD3D_PROTON_TAR_ZST --out APP_DIR
+                         --vkd3d VKD3D_PROTON_TAR_ZST --dxvk DXVK_DIR --out APP_DIR
 
 1. prospero-win's tools/pw_install.py makes the prefix from profile/template-prefix.yml
    with the host Wine (the console's revision and patches, built for the PC), as the user
    "prospero", with DXVK 2.6.2-prospero2 for 64- and 32-bit programs.
 2. VKD3D-Proton's d3d12.dll and d3d12core.dll go beside DXVK (x64 in system32, x86 in
-   syswow64): Direct3D 12 on Vulkan. Profiles load them with d3d12,d3d12core=n.
+   syswow64): Direct3D 12 on Vulkan. Profiles load them with d3d12,d3d12core=n. DXVK's own
+   DLLs are then replaced by the ones tools/build.sh built (DXVK_DIR/x64 and x32): the same
+   release with PC5's patches/dxvk.
 3. It is written to APP_DIR/pc5/prefix the way prospero-win's tools/pw_prefix.py pushes a
    prefix to the console (its own functions are used for that): links become
    .pw-symlinks tables (a title can't make links), the registry names the console's WoW64
@@ -98,6 +100,7 @@ def main() -> int:
     parser.add_argument("--wine", type=Path, required=True, help="host Wine (build_host_wine.sh's bin/wine)")
     parser.add_argument("--cpu-dll", type=Path, required=True, help="build_wowprospero.sh's wowprospero.dll")
     parser.add_argument("--vkd3d", type=Path, required=True, help="vkd3d-proton-<version>.tar.zst")
+    parser.add_argument("--dxvk", type=Path, required=True, help="DXVK as built, with x64/ and x32/")
     parser.add_argument("--out", type=Path, required=True, help="the app folder being put together")
     args = parser.parse_args()
     for needed in (args.wine, args.cpu_dll, args.vkd3d, args.pw / "tools" / "pw_install.py"):
@@ -127,6 +130,12 @@ def main() -> int:
     files, dirs, links = pw_prefix.local_tree(made)
     files[pw_prefix.CPU_DLL] = args.cpu_dll
     files.update(vkd3d_files(args.vkd3d))
+    for bits, folder in (("x64", "system32"), ("x32", "syswow64")):
+        for dll in ("d3d8", "d3d9", "d3d10core", "d3d11", "dxgi"):
+            key, built = f"drive_c/windows/{folder}/{dll}.dll", args.dxvk / bits / f"{dll}.dll"
+            if key not in files or not built.is_file():
+                sys.exit(f"make-prefix: no DXVK {dll}.dll to replace in {folder}, or none built at {built}")
+            files[key] = built
     user = f"drive_c/users/{pw_prefix.CONSOLE_USER}"
     for folder in pw_prefix.CONSOLE_USER_DIRS:
         path = ""

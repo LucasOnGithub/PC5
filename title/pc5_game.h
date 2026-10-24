@@ -90,9 +90,17 @@ typedef struct Pc5GameSession {
  * ("" or "default" for root/prefix). 1 appended, 0 already there, -1 when it
  * couldn't be done. */
 int pc5_prefix_media(const char *root, const char *prefix, const char *app);
-/* At the game's start: PC5's settings, the game's cover colour and its
- * prefix's media registrations, from root (/data/prospero-win), the game's
- * prefix and the app's folder. */
+/* DXVK is in each game's Windows, copied from the app's prefix when the game
+ * was installed. When the app's DXVK (named in its pc5/dxvk.txt) is not the
+ * one the game's Windows has (its pc5/dxvk.txt), the app's DLLs replace the
+ * game's, 64- and 32-bit, and the game's note is written. prefix is the
+ * game's prefix name; the default prefix is not PC5's and is left as it is.
+ * 1 replaced, 0 already the app's (or nothing to do), -1 when it couldn't be
+ * done (tried again at the next start). */
+int pc5_prefix_dxvk(const char *root, const char *prefix, const char *app);
+/* At the game's start: PC5's settings, the game's cover colour, its
+ * prefix's media registrations and its DXVK, from root (/data/prospero-win),
+ * the game's prefix and the app's folder. */
 void pc5_game_begin(Pc5GameSession *game, const Pc5GameOps *ops, const char *root, const char *app,
                     const char *prefix, const char *title);
 /* The loading screen's next frame (PC5_MATRIX_WIDTH x HEIGHT, B,G,R,X), or

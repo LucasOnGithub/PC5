@@ -2,6 +2,7 @@
 /* PC5 on the console (pc5_console.h): prospero-win's presenter, pad and
  * keyboard, the console's clock and settings, and its HTTPS. */
 #include "pc5_console.h"
+#include "pc5_home.h"
 #include "pc5.h"
 #include "pc5_game.h"
 #include "pc5_net.h"
@@ -199,7 +200,7 @@ void pc5_console_run(const Pc5Console *config)
     static PwHidPs5 hid;
     const char *usb_roots[] = { "/mnt/usb0", "/mnt/usb1", "/mnt/usb2", "/mnt/usb3", "/mnt/usb4", "/mnt/usb5",
                                 "/mnt/usb6", "/mnt/usb7", NULL };
-    char template_prefix[PC5_PATH], fonts[PC5_PATH], line[256];
+    char template_prefix[PC5_PATH], tile_template[PC5_PATH], fonts[PC5_PATH], line[256];
     const size_t frame_bytes = (size_t)1920 * 1080 * 4;
     uint32_t *frame;
     PwPadPs5Ops pad_ops;
@@ -212,6 +213,7 @@ void pc5_console_run(const Pc5Console *config)
     console = config;
     pc5_net_ps5_init(config->app, plain_log);
     snprintf(template_prefix, sizeof(template_prefix), "%s/pc5/prefix", config->app);
+    snprintf(tile_template, sizeof(tile_template), "%s/pc5/forwarder", config->app);
     snprintf(fonts, sizeof(fonts), "%s/pc5/fonts.bin", config->app);
     if (sceSystemServiceParamGetInt(PARAM_TIME_FORMAT, &time_format)) time_format = -1;
     if (sceSystemServiceParamGetInt(PARAM_TIME_ZONE, &time_zone) || time_zone < -720 || time_zone > 840) time_format = -1;
@@ -256,7 +258,8 @@ void pc5_console_run(const Pc5Console *config)
     watch_for_crashes(config->root);
     platform = (Pc5Platform){ NULL, { NULL, pc5_net_get }, clock_text, play, log_line, notify_text, unix_time, enter == 0 };
     {
-        Pc5UiConfig ui_config = { config->root, template_prefix, fonts, usb_roots };
+        Pc5UiConfig ui_config = { config->root, template_prefix, fonts, usb_roots, PC5_HOME_ROOT, tile_template,
+                                  config->start };
         ui = pc5_ui_create(&ui_config, &platform);
     }
     if (!ui) {

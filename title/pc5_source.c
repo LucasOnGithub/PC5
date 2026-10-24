@@ -294,6 +294,10 @@ int pc5_folder_inspect(const char *path, const char *name, Pc5Folder *folder)
                     Pc5Buf text = { 0 };
                     if (!pc5_read_file(entry_path, &text, 64)) folder->steam_appid = (uint32_t)strtoul((char *)text.data, NULL, 10);
                     pc5_buf_free(&text);
+                } else if (!relative[0] && !folder->picture[0] &&
+                           (!pc5_casecmp(entry->d_name, "cover.jpg") || !pc5_casecmp(entry->d_name, "cover.jpeg") ||
+                            !pc5_casecmp(entry->d_name, "cover.png"))) {
+                    pc5_copy(folder->picture, sizeof(folder->picture), entry_path);
                 }
             }
             /* links and devices are left out: exFAT and FAT32 have none */

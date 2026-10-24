@@ -5,7 +5,7 @@
 A launcher for your own PC games on a PS5 that runs homebrew. PC5 shows your games as a row
 of covers, installs games from a USB drive in one copy each, and uninstalls them with their
 saves. It runs the games with [prospero-win](https://github.com/mpereiraesaa/prospero-win)
-(Wine on the PS5). The app is `PPSA11018`, its tile is called **PC5**. This is version 1.2.1.
+(Wine on the PS5). The app is `PPSA11018`, its tile is called **PC5**. This is version 1.3.0.
 
 No game is part of PC5, and PC5 downloads none: you install the games you own.
 
@@ -34,8 +34,8 @@ No game is part of PC5, and PC5 downloads none: you install the games you own.
    and if it hasn't after five seconds it is ended. You are back in PC5.
 
 Each game has a menu (**△**): Play, Controller, Frame generation, Change program (when PC5
-started the wrong `.exe`) and Uninstall. Uninstalling deletes the game and everything it made: its saves, its settings,
-its shader cache, its cover. There is no backup and no undo. The USB drive is never
+started the wrong `.exe`), Home screen tile and Uninstall. Uninstalling deletes the game and everything it made: its saves, its settings,
+its shader cache, its cover, its home screen tile's folder. There is no backup and no undo. The USB drive is never
 written to.
 
 | Buttons | |
@@ -48,6 +48,7 @@ written to.
 | Options | Settings |
 | On the review screen | L1 / R1 other covers, □ another program |
 | In a game | touchpad + Options for two seconds: back to PC5 |
+| On a game's Windows pop-up | ✕ presses its highlighted button (OK, Yes), the D-pad moves between its buttons |
 
 A USB keyboard works too: arrows, Enter, Escape, F1 for Settings, F2 for □, F3 for △,
 Page Up and Page Down.
@@ -66,6 +67,12 @@ that game:
 A change takes effect the next time the game starts. Holding the touchpad and Options for two
 seconds leaves the game whichever is chosen.
 
+A pop-up a game shows in a Windows box (a warning before it starts, a Yes / No question) is
+answered with the controller in every mode: with the Xbox controller or the DualSense, ✕
+presses the highlighted button and the D-pad moves between the buttons, and they reach
+the game as keys only while such a box is in front. A USB keyboard and mouse work in
+every mode too.
+
 ## Frame generation
 
 Each game can be shown at 60 fps from 30 (**△** › Frame generation, kept for that game; off
@@ -78,6 +85,37 @@ the screen's edges, and the game reacts a little later than without it. The over
 counts every frame shown, the made ones too. It applies to games drawn with Direct3D 8 to
 12, Vulkan or OpenGL, not to DirectDraw or plain Windows drawing, nor to 10-bit (HDR)
 output. A change takes effect the next time the game starts.
+
+## Home screen tiles
+
+A game can have its own tile on the PS5's home screen (**△** › Home screen tile). Choosing
+the tile starts PC5 straight into the game, and leaving the game goes back to the home
+screen. The tile's picture is the game's cover.
+
+PC5 writes the tile in `/data/homebrew` in the
+[PS5 Forwarder Format](https://github.com/heydemoura/ps5-forwarder-format), so it needs:
+
+- **ShadowMountPlus** (or another homebrew mounter that registers the apps in
+  `/data/homebrew`): the tile appears on the home screen once it has registered it;
+- **elfldr**, the payload loader (port 9021): the tile's program uses it to start the
+  format's launcher, which then starts PC5.
+
+Turning the row off, or uninstalling the game, deletes the tile's folder; if the tile is
+still on the home screen after that, delete it there.
+
+## Covers
+
+Covers come from Steam's store, then GOG's catalogue, then Wikipedia (see below). Without
+internet, or for a game none of them has, your own picture can be the cover, and it is
+used for the game's home screen tile too:
+
+- **When installing**: a `cover.jpg`, `cover.jpeg` or `cover.png` at the top of the game's
+  folder on the USB drive is the first cover offered.
+- **For an installed game**: a picture in `/data/prospero-win/covers/` named after the
+  game's folder, its name in PC5 or its id (`Neon Drift.png`, say; `.jpg`, `.jpeg` or
+  `.png`) becomes its cover the next time PC5 opens, and again whenever you replace it.
+
+Pictures are cut to the cover's 2:3 shape.
 
 ## Settings
 
@@ -106,7 +144,7 @@ or 64-bit and what it draws with, and writes the same kind of prospero-win profi
 
 | The game uses | Through |
 | --- | --- |
-| Direct3D 8, 9, 10, 11 | DXVK 2.6.2-prospero2 |
+| Direct3D 8, 9, 10, 11 | DXVK 2.6.2-prospero2, with PC5's patch |
 | Direct3D 12 | VKD3D-Proton 2.14.1 |
 | Vulkan | RADV directly |
 | OpenGL | Mesa Zink |
@@ -116,11 +154,17 @@ Only a game whose program draws with Direct3D 12 gets VKD3D-Proton; every other 
 Wine's own Direct3D 12, as prospero-win's tested profiles have it (a library that only tries
 Direct3D 12 stops there instead of going further and crashing).
 
+PC5's DXVK lets a game share a picture between Direct3D 9 and Direct3D 11 (some games play
+their movies that way) within the game, as the console can't share it through Windows'
+handles. A game installed with an older PC5 gets this DXVK the next time it starts.
+
 What won't run: games that need Steam, Epic, EA or Ubisoft's launcher running, online DRM
 or anti-cheat; .NET Framework games (prospero-win has no .NET yet); programs that aren't
 Windows programs. Whether a game runs is only known by trying it: PC5 makes no promise
 about any game. When a game closes before showing anything, or crashes, PC5 says so the
-next time it opens, and keeps the log.
+next time it opens, and keeps the log. A crash's log also says where it happened: the
+faulting thread's registers and the code addresses on its stack, as module+offset
+(`speed.exe+0x1a2b3c`), which shows the game's code that led to it.
 
 **Launch options**: a `launch.txt` beside the game's `.exe` holds its options (its first
 line that isn't a `#` comment). PC5 reads it each time the game starts.
@@ -134,7 +178,8 @@ language follows the console.
 
 **Covers** come from Steam's store, then GOG's catalogue, then Wikipedia: public sources,
 no account and no key. The review screen shows what was found (L1 / R1 for the others). A
-game none of them has gets a cover made from its own icon and name. A cover fills its frame
+game none of them has, without your own picture (see Covers), gets a cover made from its
+own icon and name. A cover fills its frame
 (cut to shape), and the downloaded picture is kept with the game. They are fetched over
 HTTPS with Mbed TLS, checked against the console's root certificates and Mozilla's (which
 the app carries).
@@ -149,10 +194,13 @@ PC5 keeps everything where prospero-win keeps it, in `/data/prospero-win`:
   prefixes/<game>/                      the game's own Windows: registry, saves, settings
   prefixes/<game>/drive_c/Games/<folder>/   the one copy of the game
   prefixes/<game>/pc5/                  PC5's notes on the game, its cover and its picture
+  covers/<game>.jpg / .png              your own covers (see Covers)
   prefixes/<game>/pc5-cache/radv/       its shader cache
   pc5/settings.txt                      PC5's settings
   pc5/last.txt, pc5/update.txt          the game played last; the last update check
   logs/issue-<when>_<game>.log          the log of a session that went wrong (kept 7 days)
+
+/data/homebrew/<PPSA992xx–PPSA998xx>/   a game's home screen tile (see Home screen tiles)
 ```
 
 A session's log is written while it runs (`logs/session-N.log`); when PC5 next opens, a
@@ -194,7 +242,8 @@ version as a GitHub release with that tag, with `PPSA11018.zip` and
 
 - `title/`: PC5's own code, plain C built into prospero-win's title: the screens
   (`pc5_ui.c`, drawn on the CPU by `pc5_draw.c`), the library, installing and uninstalling
-  (`pc5_library.c`), USB folders (`pc5_source.c`), reading Windows programs (`pc5_pe.c`),
+  (`pc5_library.c`), home screen tiles (`pc5_home.c`, with the PS5 Forwarder Format's
+  psfwd in `third_party/psfwd`), USB folders (`pc5_source.c`), reading Windows programs (`pc5_pe.c`),
   covers (`pc5_cover.c`, `pc5_image.c`, `pc5_json.c`), HTTPS on Mbed TLS (`pc5_net.c`),
   settings, updates and logs (`pc5_settings.c`, `pc5_update.c`, `pc5_logs.c`), the game's
   side (`pc5_game.c`, the loading screen `pc5_matrix.c`) and the console's
@@ -207,7 +256,12 @@ version as a GitHub release with that tag, with `PPSA11018.zip` and
   controller; the computer's name without wineboot; and Wine's XAudio2 keeping an effect
   alive while a voice holds it, and ignoring calls on a voice the game destroyed; games'
   videos and sound on FFmpeg (Wine's winegstreamer decoders on FFmpeg in place of
-  GStreamer, and winedmo); and Frame generation in RADV's `libvulkan.prx`.
+  GStreamer, and winedmo); Frame generation in RADV's `libvulkan.prx`; a game started from
+  a home screen tile, and back to the home screen after it; the controller answering a
+  game's Windows pop-up (Wine's PS5 driver sends ✕ and the D-pad only to a dialog box); and
+  a crash report in the log, as the console runs no debugger.
+- `patches/dxvk/`: PC5's patch to DXVK 2.6.2-prospero2: textures shared between a game's
+  Direct3D 9 and Direct3D 11 within the game, where memory can't be shared through handles.
 - `tools/`: the build, the Windows template (`make-prefix.py`), the font atlas
   (`make-font.py`) and the app (`make-app.py`). `art/make-art.py` draws the icon and the
   Home background.
@@ -223,8 +277,9 @@ It is built on prospero-win by mpereiraesaa and the projects it uses: Wine, DXVK
 (RADV, Zink; including mihawk-99's PS5 work), the PS5 payload SDK and boilerplate, and the
 Lapy helper. Also FFmpeg (LGPL 2.1 or later), ps5-framegen by Swordpdf (GPL 3.0 or later,
 its shaders from AMD's FSR3 under MIT), VKD3D-Proton (LGPL 2.1 or later), Mbed TLS (Apache 2.0 or GPL 2.0 or
-later), Mozilla's root certificates (MPL 2.0), stb_image (public domain / MIT) and the
-Inter font (SIL OFL 1.1, `fonts/OFL.txt`). Blur5, sahin and PS5_MihawkOS were inspiration
+later), Mozilla's root certificates (MPL 2.0), stb_image and stb_image_write (public domain /
+MIT), the PS5 Forwarder Format by heydemoura (its tile program and psfwd, GPL 3.0 or later)
+and the Inter font (SIL OFL 1.1, `fonts/OFL.txt`). Blur5, sahin and PS5_MihawkOS were inspiration
 only; no code was taken from them. See `NOTICE.md`.
 
 PC5 is not made by or connected to Sony, Valve, GOG, GitHub or the Wikimedia Foundation.

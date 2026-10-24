@@ -1,0 +1,144 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bornaradusin <bornaradusin@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 18:36:28 +0100
+Subject: [PATCH] PC5: a crash report in the log (Wine patch 0912)
+
+The console runs no debugger, so a game's unhandled crash left only its
+kind and the faulting address: not which of the game's code led to it.
+Wine now logs the faulting thread's registers, where it faulted and the
+code addresses on its stack, each as module+offset.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
+---
+ PUBLICATION_ALLOWLIST.txt                     |   1 +
+ ...base-crash-report-without-a-debugger.patch | 108 ++++++++++++++++++
+ 2 files changed, 109 insertions(+)
+ create mode 100644 wine/patches/0912-kernelbase-crash-report-without-a-debugger.patch
+
+diff --git a/PUBLICATION_ALLOWLIST.txt b/PUBLICATION_ALLOWLIST.txt
+index b86e654..dc14d58 100644
+--- a/PUBLICATION_ALLOWLIST.txt
++++ b/PUBLICATION_ALLOWLIST.txt
+@@ -553,6 +553,7 @@ docs/wine-worker-desktop.md
+ 
+ wine/patches/0910-win32u-ps5-worker-desktop-cache.patch
+ wine/patches/0911-win32u-ps5-dialog-keys.patch
++wine/patches/0912-kernelbase-crash-report-without-a-debugger.patch
+ 
+ 
+ 
+diff --git a/wine/patches/0912-kernelbase-crash-report-without-a-debugger.patch b/wine/patches/0912-kernelbase-crash-report-without-a-debugger.patch
+new file mode 100644
+index 0000000..2acc8a3
+--- /dev/null
++++ b/wine/patches/0912-kernelbase-crash-report-without-a-debugger.patch
+@@ -0,0 +1,108 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: prospero-win <prospero-win@invalid>
++Date: Sat, 24 Oct 2026 18:45:00 +0100
++Subject: [PATCH] kernelbase: Report where an unhandled crash happened.
++
++A process on the PS5 cannot start winedbg, so an unhandled exception
++left only its kind and the faulting address in the log: not which
++code made the call that failed. Before starting the debugger, report
++the faulting thread's registers, the code address it faulted at and
++the code addresses on its stack (return addresses, newest first, some
++possibly stale), each as module+offset, so that a crash on the console
++can be traced to the game's code that led to it.
++---
++ dlls/kernelbase/debug.c | 67 ++++++++++++++++++++++++++++++++++++++++
++ 1 file changed, 67 insertions(+)
++
++diff --git a/dlls/kernelbase/debug.c b/dlls/kernelbase/debug.c
++--- a/dlls/kernelbase/debug.c
+++++ b/dlls/kernelbase/debug.c
++@@ -527,6 +527,77 @@
++ 
++ 
++ /******************************************************************
+++ *         crash_report
+++ *
+++ * Where a crash happened, for a system with no debugger to start (the
+++ * PS5): the faulting thread's registers, the code address it faulted at
+++ * and the code addresses on its stack (return addresses, newest first;
+++ * some may be stale), each as module+offset.
+++ */
+++static const WCHAR *code_module( ULONG_PTR addr, ULONG_PTR *base, USHORT *len )
+++{
+++    LDR_DATA_TABLE_ENTRY *mod;
+++    IMAGE_NT_HEADERS *nt;
+++    IMAGE_SECTION_HEADER *sec;
+++    ULONG_PTR rva;
+++    unsigned int i;
+++
+++    if (addr < 0x10000 || LdrFindEntryForAddress( (void *)addr, &mod )) return NULL;
+++    if (!(nt = RtlImageNtHeader( mod->DllBase ))) return NULL;
+++    rva = addr - (ULONG_PTR)mod->DllBase;
+++    sec = IMAGE_FIRST_SECTION( nt );
+++    for (i = 0; i < nt->FileHeader.NumberOfSections; i++, sec++)
+++    {
+++        if (rva < sec->VirtualAddress || rva >= sec->VirtualAddress + max( sec->Misc.VirtualSize, sec->SizeOfRawData ))
+++            continue;
+++        if (!(sec->Characteristics & IMAGE_SCN_MEM_EXECUTE)) return NULL;
+++        *base = (ULONG_PTR)mod->DllBase;
+++        *len = mod->BaseDllName.Length / sizeof(WCHAR);
+++        return mod->BaseDllName.Buffer;
+++    }
+++    return NULL;
+++}
+++
+++static void crash_report( EXCEPTION_POINTERS *epointers )
+++{
+++    const CONTEXT *ctx = epointers->ContextRecord;
+++    ULONG_PTR pc = (ULONG_PTR)epointers->ExceptionRecord->ExceptionAddress, sp, base, *slot, *top;
+++    const WCHAR *name;
+++    unsigned int found = 0;
+++    USHORT len;
+++
+++#ifdef __i386__
+++    sp = ctx->Esp;
+++    MESSAGE( "wine: crash report: eax=%08lx ebx=%08lx ecx=%08lx edx=%08lx esi=%08lx edi=%08lx ebp=%08lx esp=%08lx\n",
+++             ctx->Eax, ctx->Ebx, ctx->Ecx, ctx->Edx, ctx->Esi, ctx->Edi, ctx->Ebp, ctx->Esp );
+++#elif defined(__x86_64__)
+++    sp = ctx->Rsp;
+++    MESSAGE( "wine: crash report: rax=%p rbx=%p rcx=%p rdx=%p rsi=%p rdi=%p rbp=%p rsp=%p\n",
+++             (void *)ctx->Rax, (void *)ctx->Rbx, (void *)ctx->Rcx, (void *)ctx->Rdx,
+++             (void *)ctx->Rsi, (void *)ctx->Rdi, (void *)ctx->Rbp, (void *)ctx->Rsp );
+++#else
+++    return;
+++#endif
+++    if ((name = code_module( pc, &base, &len )))
+++        MESSAGE( "wine: crash report: at %s+0x%Ix\n", debugstr_wn( name, len ), pc - base );
+++    slot = (ULONG_PTR *)sp;
+++    top = NtCurrentTeb()->Tib.StackBase;
+++    if (slot < (ULONG_PTR *)NtCurrentTeb()->Tib.StackLimit || slot >= top || (sp & (sizeof(ULONG_PTR) - 1)))
+++    {
+++        MESSAGE( "wine: crash report: the stack pointer is outside the thread's stack\n" );
+++        return;
+++    }
+++    for (; slot < top && slot < (ULONG_PTR *)sp + 2048 && found < 40; slot++)
+++    {
+++        if (!(name = code_module( *slot, &base, &len ))) continue;
+++        MESSAGE( "wine: crash report: stack+0x%Ix %s+0x%Ix\n", (ULONG_PTR)slot - sp,
+++                 debugstr_wn( name, len ), *slot - base );
+++        found++;
+++    }
+++}
+++
+++
+++/******************************************************************
++  *		start_debugger
++  *
++  * Does the effective debugger startup according to 'format'
++@@ -545,6 +616,7 @@
++ 
++     format_exception_msg( epointers, buffer, sizeof(buffer) );
++     MESSAGE( "wine: %s (thread %04lx), starting debugger...\n", buffer, GetCurrentThreadId() );
+++    crash_report( epointers );
++ 
++     InitializeObjectAttributes( &attr, &nameW, 0, 0, NULL );
++     if (!NtOpenKey( &dbg_key, KEY_READ, &attr ))
++-- 
++2.43.0
++

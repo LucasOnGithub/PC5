@@ -1,0 +1,259 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bornaradusin <bornaradusin@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 15:30:48 +0100
+Subject: [PATCH] PC5: a game started from a home screen tile, and back to the
+ home screen after it
+
+PC5's home screen tiles (the PS5 Forwarder Format) start the title with
+"--rom <game> --exit-after-game". The launch arguments take both, and
+exit=1 for a game the launcher starts: when that game ends, the title
+closes instead of coming back to the launcher, so the player is on the
+home screen again.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
+---
+ native/wine64_main.c        | 40 +++++++++++++++++++++++++++++--------
+ src/pw_wine_launch.c        | 20 ++++++++++++++++++-
+ src/pw_wine_launch.h        | 15 +++++++++++---
+ tests/test_pw_wine_launch.c | 26 ++++++++++++++++++++++--
+ 4 files changed, 87 insertions(+), 14 deletions(-)
+
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+index 3bb3041..3a8bcdb 100644
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -653,8 +653,10 @@ static PwWineLaunch launch;
+ 
+ /* Replace this process with the title again: app's game, or the launcher
+  * when app is NULL. /app0 is not visible once /data is granted, so the
+- * sandbox's view of the same eboot is tried next. Returns only on failure. */
+-static void restart_title(const PwWineApp *app, uint32_t cycle, const char *reason)
++ * sandbox's view of the same eboot is tried next. A game started from a home
++ * screen tile is told so (exit_after): closing it closes the title. Returns
++ * only on failure. */
++static void restart_title_exit(const PwWineApp *app, uint32_t cycle, const char *reason, unsigned exit_after)
+ {
+     static char sandbox_eboot[sizeof(sandbox_app0) + 16];
+     const char *const eboots[] = { "/app0/eboot.bin", sandbox_eboot };
+@@ -662,7 +664,7 @@ static void restart_title(const PwWineApp *app, uint32_t cycle, const char *reas
+     char *next[PW_WINE_LAUNCH_ARGS];
+ 
+     snprintf(sandbox_eboot, sizeof(sandbox_eboot), "%s/eboot.bin", sandbox_app0);
+-    if (!pw_wine_launch_argv(app, cycle, storage, sizeof(storage), next, PW_WINE_LAUNCH_ARGS)) {
++    if (!pw_wine_launch_argv_exit(app, cycle, exit_after, storage, sizeof(storage), next, PW_WINE_LAUNCH_ARGS)) {
+         PS5LOG_LOG("PW_WINE64 restart refused: arguments do not fit");
+         return;
+     }
+@@ -676,11 +678,22 @@ static void restart_title(const PwWineApp *app, uint32_t cycle, const char *reas
+     }
+ }
+ 
++static void restart_title(const PwWineApp *app, uint32_t cycle, const char *reason)
++{
++    restart_title_exit(app, cycle, reason, 0);
++}
++
+ /* Wine ends the process with exit() when its last program ends: go back to
+- * the launcher. */
++ * the launcher, or, for a game a home screen tile started, to the home
++ * screen (the process just ends). */
+ static void on_exit_report(void)
+ {
+     PS5LOG_LOG("PW_WINE64 exit sink_calls=%lu", sink_calls);
++    if (launch.mode == PW_WINE_LAUNCH_GAME && launch.exit_after) {
++        PS5LOG_LOG("PW_WINE64 exit to the home screen: started from a tile");
++        pw_diagnostics_close("tile-exit");
++        return;
++    }
+     restart_title(NULL, launch.cycle + 1u, "wine-exit");
+     pw_diagnostics_close("wine64-exit");
+ }
+@@ -905,10 +918,14 @@ static void pc5_log(const char *line)
+  * began. Returns only when the title could not be restarted. */
+ static void pc5_play(const char *id)
+ {
++    /* The game a home screen tile asked for closes back to the home screen
++     * when the tile said so; any other goes back to PC5. */
++    unsigned exit_after = launch.exit_after && launch.start[0] && !strcmp(id, launch.start);
++
+     load_catalog();
+     for (size_t i = 0; i < catalog_count; i++)
+         if (!strcmp(catalog[i].id, id)) {
+-            restart_title(&catalog[i], launch.cycle, "pc5");
++            restart_title_exit(&catalog[i], launch.cycle, "pc5", exit_after);
+             break;
+         }
+     PS5LOG_LOG("PW_WINE64 pc5 play failed id=%s", id);
+@@ -936,7 +953,8 @@ static void pc5_launcher(void)
+         PS5LOG_LOG("PW_WINE64 pc5 files missing from the app");
+         return;
+     }
+-    const Pc5Console console = { library_root, app, launch.cycle, pc5_play, pc5_log };
++    const Pc5Console console = { library_root, app, launch.cycle, pc5_play, pc5_log,
++                                 launch.start[0] ? launch.start : NULL };
+     pc5_console_run(&console);
+ }
+ 
+@@ -1242,9 +1260,10 @@ int main(int argc, char **argv)
+     (void)pw_wine_launch_parse(argc, argv, catalog, catalog_count, &launch);
+     (void)pw_diagnostics_open(library_root, PW_BUILD_ID,
+                               launch.app ? launch.app->id : "launcher", launch.cycle);
+-    PS5LOG_LOG("PW_WINE64 args argc=%d mode=%s profile=%s cycle=%u refused=%u", argc,
++    PS5LOG_LOG("PW_WINE64 args argc=%d mode=%s profile=%s cycle=%u refused=%u tile=%s exit_after=%u", argc,
+                launch.mode == PW_WINE_LAUNCH_GAME ? "game" : "launcher",
+-               launch.app ? launch.app->id : "-", (unsigned)launch.cycle, launch.refused);
++               launch.app ? launch.app->id : "-", (unsigned)launch.cycle, launch.refused,
++               launch.start[0] ? launch.start : "-", launch.exit_after);
+     if (launch.mode != PW_WINE_LAUNCH_GAME) {
+ #ifdef PW_PC5
+         pc5_launcher();
+@@ -1740,6 +1759,11 @@ int main(int argc, char **argv)
+         }
+         if (close_requested && now - close_requested >= (uint64_t)PW_WINE64_CLOSE_WAIT_S * 1000000000u) {
+             PS5LOG_LOG("PW_WINE64 close timeout: leaving the game");
++            if (launch.exit_after) {   /* started from a tile: back to the home screen */
++                PS5LOG_LOG("PW_WINE64 exit to the home screen: started from a tile");
++                pw_diagnostics_close("tile-exit");
++                _exit(0);
++            }
+             restart_title(NULL, launch.cycle + 1u, "close-timeout");
+             break;
+         }
+diff --git a/src/pw_wine_launch.c b/src/pw_wine_launch.c
+index 58e7474..4288adc 100644
+--- a/src/pw_wine_launch.c
++++ b/src/pw_wine_launch.c
+@@ -46,6 +46,13 @@ int pw_wine_launch_parse(int argc, char *const *argv, const PwWineApp *apps, siz
+         if ((value = value_of(word, "profile"))) profile = value;
+         else if ((value = value_of(word, "path"))) path = value;
+         else if ((value = value_of(word, "cycle")) && parse_count(value, &out->cycle)) out->cycle = 0;
++        else if ((value = value_of(word, "exit"))) out->exit_after = !strcmp(value, "1");
++        else if (!strcmp(word, "--exit-after-game")) out->exit_after = 1;
++        else if (!strcmp(word, "--rom") && i + 1 < argc && argv[i + 1] &&
++                 strlen(argv[i + 1]) < sizeof(out->start)) {
++            memcpy(out->start, argv[i + 1], strlen(argv[i + 1]) + 1);
++            i++;
++        }
+     }
+     if (profile) {
+         for (size_t i = 0; i < count && !out->app; i++)
+@@ -75,11 +82,18 @@ static int add_word(char *storage, size_t size, size_t *used, const char *key, c
+ 
+ size_t pw_wine_launch_argv(const PwWineApp *app, uint32_t cycle, char *storage, size_t size,
+                            char **argv, size_t max)
++{
++    return pw_wine_launch_argv_exit(app, cycle, 0, storage, size, argv, max);
++}
++
++size_t pw_wine_launch_argv_exit(const PwWineApp *app, uint32_t cycle, unsigned exit_after, char *storage,
++                                size_t size, char **argv, size_t max)
+ {
+     char digits[11], number[11];
+     size_t used = 0, words = 0, n = 0;
+ 
+-    if (!storage || !argv || max < PW_WINE_LAUNCH_ARGS) return 0;
++    /* the words and the NULL: one fewer without exit=1 */
++    if (!storage || !argv || max < (app && exit_after ? PW_WINE_LAUNCH_ARGS : PW_WINE_LAUNCH_ARGS - 1u)) return 0;
+     do digits[n++] = (char)('0' + cycle % 10u); while ((cycle /= 10u) && n < sizeof(digits));
+     for (size_t i = 0; i < n; i++) number[i] = digits[n - 1 - i];
+     number[n] = 0;
+@@ -89,6 +103,10 @@ size_t pw_wine_launch_argv(const PwWineApp *app, uint32_t cycle, char *storage,
+         if (add_word(storage, size, &used, "profile", app->id)) return 0;
+         argv[words++] = storage + used;
+         if (add_word(storage, size, &used, "path", app->executable)) return 0;
++        if (exit_after) {
++            argv[words++] = storage + used;
++            if (add_word(storage, size, &used, "exit", "1")) return 0;
++        }
+     } else {
+         argv[words++] = storage + used;
+         if (add_word(storage, size, &used, "launcher", "1")) return 0;
+diff --git a/src/pw_wine_launch.h b/src/pw_wine_launch.h
+index 62607b2..584bab4 100644
+--- a/src/pw_wine_launch.h
++++ b/src/pw_wine_launch.h
+@@ -10,14 +10,18 @@
+  *   profile=<id>   a game from the title's catalog;
+  *   path=<exe>     an absolute Windows path, run directly (overrides the
+  *                  profile's executable);
+- *   cycle=<n>      open/close cycles completed, for unattended validation.
++ *   cycle=<n>      open/close cycles completed, for unattended validation;
++ *   exit=1         the game was started from a home screen tile: closing it
++ *                  closes the title, back to the home screen.
+  * With neither profile nor path the title shows the launcher, as when the
+- * system starts it (argc 1, empty argv[0]).
++ * system starts it (argc 1, empty argv[0]). A home screen tile (the PS5
++ * Forwarder Format's forwarders) starts it with "--rom <id>", the game the
++ * launcher starts at once, and "--exit-after-game".
+  */
+ #include <stddef.h>
+ #include <stdint.h>
+ 
+-enum { PW_WINE_LAUNCH_PATH_MAX = 260, PW_WINE_LAUNCH_ARGS = 4, PW_WINE_LAUNCH_WORDS = 32 };
++enum { PW_WINE_LAUNCH_PATH_MAX = 260, PW_WINE_LAUNCH_ARGS = 5, PW_WINE_LAUNCH_WORDS = 32, PW_WINE_LAUNCH_ID_MAX = 64 };
+ 
+ typedef struct PwWineApp {
+     const char *id;           /* profile=<id> */
+@@ -34,6 +38,8 @@ typedef struct PwWineLaunch {
+     char executable[PW_WINE_LAUNCH_PATH_MAX];     /* GAME: what Wine runs */
+     uint32_t cycle;
+     unsigned refused;   /* an unknown profile or an invalid path: shown in the launcher */
++    char start[PW_WINE_LAUNCH_ID_MAX];   /* LAUNCHER: a tile's game ("--rom"), or "" */
++    unsigned exit_after;                 /* "--exit-after-game", or exit=1 in a GAME */
+ } PwWineLaunch;
+ 
+ /* Decide from argv. Always fills out; a refused game falls back to the
+@@ -47,6 +53,9 @@ int pw_wine_launch_parse(int argc, char *const *argv, const PwWineApp *apps, siz
+  * is too small. */
+ size_t pw_wine_launch_argv(const PwWineApp *app, uint32_t cycle, char *storage, size_t size,
+                            char **argv, size_t max);
++/* The same, with exit=1 after app's words when exit_after is set. */
++size_t pw_wine_launch_argv_exit(const PwWineApp *app, uint32_t cycle, unsigned exit_after, char *storage,
++                                size_t size, char **argv, size_t max);
+ /* A profile's arguments line as words for Wine's argv, which Wine quotes
+  * back into the Windows command line: words split at spaces and tabs, and
+  * double quotes group a word ("a b" is one word; the quotes are dropped).
+diff --git a/tests/test_pw_wine_launch.c b/tests/test_pw_wine_launch.c
+index 884b816..ecd0449 100644
+--- a/tests/test_pw_wine_launch.c
++++ b/tests/test_pw_wine_launch.c
+@@ -100,6 +100,28 @@ static void test_argv(void)
+     assert(!pw_wine_launch_argv(&broken, 0, storage, sizeof(storage), argv, 4));
+     assert(!pw_wine_launch_argv(&apps[0], 0, NULL, sizeof(storage), argv, 4));
+     assert(!pw_wine_launch_argv(&apps[0], 0, storage, sizeof(storage), NULL, 4));
++
++    /* A home screen tile: its game for the launcher, and exit=1 carried into
++     * the game, which closes the title instead of going back. */
++    {
++        char *tile[] = { "eboot.bin", "--rom", "pinball", "--exit-after-game" }, *bare[] = { "--rom" };
++        char *only[] = { "--exit-after-game" };
++        PwWineLaunch l;
++        assert(!pw_wine_launch_parse(4, tile, apps, COUNT, &l));
++        assert(l.mode == PW_WINE_LAUNCH_LAUNCHER && !strcmp(l.start, "pinball") && l.exit_after && !l.refused);
++        assert(!pw_wine_launch_parse(1, bare, apps, COUNT, &l) && !l.start[0] && !l.exit_after);
++        assert(!pw_wine_launch_parse(1, only, apps, COUNT, &l) && !l.start[0] && l.exit_after);
++        assert(pw_wine_launch_argv_exit(&apps[0], 2, 1, storage, sizeof(storage), argv, PW_WINE_LAUNCH_ARGS) == 4);
++        assert(!strcmp(argv[2], "exit=1") && !strcmp(argv[3], "cycle=2") && !argv[4]);
++        assert(!pw_wine_launch_parse(4, argv, apps, COUNT, &back));
++        assert(back.mode == PW_WINE_LAUNCH_GAME && back.app == &apps[0] && back.exit_after && back.cycle == 2);
++        /* exit=1 needs room for its word; the launcher never gets it. */
++        assert(!pw_wine_launch_argv_exit(&apps[0], 2, 1, storage, sizeof(storage), argv, 4));
++        assert(pw_wine_launch_argv_exit(NULL, 3, 1, storage, sizeof(storage), argv, 4) == 2 &&
++               !strcmp(argv[0], "launcher=1"));
++        assert(pw_wine_launch_argv(&apps[0], 0, storage, sizeof(storage), argv, 4) == 3);
++        assert(!pw_wine_launch_parse(3, argv, apps, COUNT, &back) && !back.exit_after);
++    }
+ }
+ 
+ 
+@@ -159,7 +181,7 @@ int main(void)
+     test_split();
+     test_host_dir();
+     printf("wine launch passed: launcher on no game, profile and path, overrides, refusals, "
+-           "cycle counts, LoadExec argv round trip, bounded storage, "
+-           "argument words, working directory in the prefix\n");
++           "cycle counts, LoadExec argv round trip, bounded storage, home screen tiles "
++           "and exit-after-game, argument words, working directory in the prefix\n");
+     return 0;
+ }
