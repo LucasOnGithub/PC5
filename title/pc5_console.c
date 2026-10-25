@@ -223,6 +223,8 @@ void pc5_console_run(const Pc5Console *config)
              PC5_VERSION, config->root, config->app, config->cycle, time_format, time_zone, summer, enter,
              pc5_console_locale() ? pc5_console_locale() : "-");
     plain_log(line);
+    pc5_system_text(line, sizeof(line));
+    plain_log(line);
 
     frame = mmap(NULL, frame_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     video_status = pw_videoout_ps5_open(&video);

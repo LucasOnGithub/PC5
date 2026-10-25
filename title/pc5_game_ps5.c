@@ -2,9 +2,10 @@
 /* PC5's game ops on the console (pc5_game.h): libScePad's light bar and
  * adaptive triggers, VideoOut's second hardware cursor for the overlay over
  * the frames the title shows itself, the overlay's numbers (the process's
- * CPU time, libkernel's temperatures and memory), and the on-screen
- * keyboard (libSceImeDialog). */
+ * CPU time, libkernel's temperatures and memory), the on-screen
+ * keyboard (libSceImeDialog), and the console's firmware for the log. */
 #include "pc5_game.h"
+#include "pc5_console.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -296,10 +297,39 @@ static int keyboard_close(void)
     return rc < 0 ? rc : result.end_status == IME_END_OK ? 1 : 0;
 }
 
+/* libkernel's SceKernelSwVersion: its size first, then the version as text and as a number
+ * (0x12400009: 12.40). Room to spare, should the console's be longer. */
+typedef struct SwVersion {
+    uint64_t size;
+    char text[0x1c];
+    uint32_t version;
+} SwVersion;
+int sceKernelGetSystemSwVersion(SwVersion *version);
+
+void pc5_system_text(char *out, size_t size)
+{
+    union { SwVersion sw; uint8_t room[256]; } answer;
+    char firmware[16] = "unknown", space[32] = "unknown";
+    uint64_t free_bytes;
+
+    memset(&answer, 0, sizeof(answer));
+    answer.sw.size = sizeof(answer.sw);
+    if (!sceKernelGetSystemSwVersion(&answer.sw) && answer.sw.version >> 24)
+        snprintf(firmware, sizeof(firmware), "%x.%02x", (unsigned)(answer.sw.version >> 24),
+                 (unsigned)((answer.sw.version >> 16) & 0xff));
+    if (!pc5_free_bytes("/data", &free_bytes))
+        snprintf(space, sizeof(space), "%.1fGB", (double)free_bytes / 1e9);
+    snprintf(out, size, "PC5 system firmware=%s firmware_version=0x%08x data_free=%s version=%s", firmware,
+             (unsigned)answer.sw.version, space, PC5_VERSION);
+}
+
 void pc5_game_ps5_ops(Pc5GameOps *ops, void (*log)(const char *line));
 void pc5_game_ps5_ops(Pc5GameOps *ops, void (*log)(const char *line))
 {
+    char system[160];
     ps5_log = log;
+    pc5_system_text(system, sizeof(system));
+    if (log) log(system);
     *ops = (Pc5GameOps){ .light_bar = light_bar, .light_bar_reset = light_bar_reset, .triggers = triggers,
                          .cursor = cursor, .log = log, .cpu_time_us = cpu_time_us, .cpu_count = cpu_count,
                          .temperature = temperature, .memory = memory, .keyboard_open = keyboard_open,

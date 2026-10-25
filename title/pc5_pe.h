@@ -18,6 +18,9 @@ enum {
     PC5_IMPORT_VULKAN = 1u << 7,   /* vulkan-1 */
     PC5_IMPORT_DDRAW = 1u << 8,
     PC5_IMPORT_DOTNET = 1u << 9,   /* mscoree: a .NET Framework program */
+    /* the libraries a program draws with */
+    PC5_IMPORT_DRAWING = PC5_IMPORT_D3D8 | PC5_IMPORT_D3D9 | PC5_IMPORT_D3D10 | PC5_IMPORT_D3D11 | PC5_IMPORT_DXGI |
+                         PC5_IMPORT_D3D12 | PC5_IMPORT_OPENGL | PC5_IMPORT_VULKAN | PC5_IMPORT_DDRAW,
 };
 
 typedef enum Pc5Api {
@@ -44,6 +47,10 @@ typedef struct Pc5PeInfo {
 /* 0 for a Windows x86 or x86-64 program or library, -1 otherwise (not PE,
  * another CPU, unreadable). */
 int pc5_pe_read(const char *path, Pc5PeInfo *info);
+/* The libraries a program draws with that it names in its own data, as PC5_IMPORT_* bits:
+ * a program that loads Direct3D or Vulkan itself at run time (LoadLibrary) imports none
+ * of them. Names in ASCII or UTF-16, any case; reads at most 1 GiB of the file. */
+uint32_t pc5_pe_named_libraries(const char *path);
 /* The most capable API among the imports. */
 Pc5Api pc5_api_from_imports(uint32_t imports);
 /* "DirectX 11", "OpenGL", ... */

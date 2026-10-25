@@ -84,6 +84,10 @@ DXVK_NAME=2.6.2-prospero2-pc5.2
 # title/third_party/psfwd holds unchanged.
 FORWARDER_URL=https://github.com/heydemoura/ps5-forwarder-format.git
 FORWARDER_COMMIT=22e8762ad7dbd01e18bd8c0e95f86461fdf8aaf4
+# Project Nayuki's QR Code generator (C): Report on GitHub's codes, which
+# title/third_party/qrcodegen holds unchanged.
+QRCODEGEN_URL=https://github.com/nayuki/QR-Code-generator.git
+QRCODEGEN_COMMIT=3c6d0b3cefb4e049dc337e82237c9644399716a8
 VKD3D_SOURCE_URL=https://github.com/HansKristian-Work/vkd3d-proton.git
 VKD3D_SOURCE_COMMIT=3b10bd7a7ec6a7347e616cf8bea59333afec2255   # tag v3.0.1, the release's build
 
@@ -168,7 +172,7 @@ step_sources() {
     cp "$here"/title/pc5*.c "$here"/title/pc5*.h "$PW/native/"
     mkdir -p "$PW/native/third_party"
     cp "$here/title/third_party/stb_image.h" "$here/title/third_party/stb_image_write.h" "$PW/native/third_party/"
-    cp -r "$here/title/third_party/psfwd" "$PW/native/third_party/"
+    cp -r "$here/title/third_party/psfwd" "$here/title/third_party/qrcodegen" "$PW/native/third_party/"
     git -C "$PW" add native/pc5* native/third_party
     GIT_AUTHOR_DATE="2026-10-22T17:00:00+0100" GIT_COMMITTER_DATE="2026-10-22T17:00:00+0100" \
         git -C "$PW" "${id[@]}" commit -q -m "PC5: its screens (title/ of the PC5 repo)"
@@ -199,6 +203,13 @@ step_sources() {
     for pair in src/psfwd.c:psfwd.c include/psfwd.h:psfwd.h LICENSE:LICENSE; do
         cmp -s "$B/ps5-forwarder-format/${pair%%:*}" "$here/title/third_party/psfwd/${pair##*:}" ||
             { echo "title/third_party/psfwd/${pair##*:} differs from the PS5 Forwarder Format at $FORWARDER_COMMIT" >&2
+              return 1; }
+    done
+    # Report on GitHub's QR codes: qrcodegen in title/third_party must be Project Nayuki's, unchanged.
+    fetch "$B/qrcodegen" "$QRCODEGEN_URL" "$QRCODEGEN_COMMIT"
+    for pair in c/qrcodegen.c:qrcodegen.c c/qrcodegen.h:qrcodegen.h; do
+        cmp -s "$B/qrcodegen/${pair%%:*}" "$here/title/third_party/qrcodegen/${pair##*:}" ||
+            { echo "title/third_party/qrcodegen/${pair##*:} differs from the QR Code generator at $QRCODEGEN_COMMIT" >&2
               return 1; }
     done
     # Zink's Mesa and compiler, as tools/build_mesa_zink.sh pins them.
@@ -401,6 +412,8 @@ EOF_SOURCES
     cp "$B/ps5-forwarder-format/template/sce_module/libc.prx" "$app/pc5/forwarder/sce_module/"
     chmod 755 "$app/pc5/forwarder/eboot.bin" "$app/pc5/forwarder/sce_module/libc.prx"
     cp "$B/ps5-forwarder-format/LICENSE" "$app/LICENSES/ps5-forwarder-format/LICENSE"
+    mkdir -p "$app/LICENSES/qrcodegen"
+    cp "$here/title/third_party/qrcodegen/LICENSE" "$app/LICENSES/qrcodegen/LICENSE"
     python3 "$here/tools/make-font.py" "$app/pc5/fonts.bin"
     # Mozilla's roots as Debian ships them, for the covers' HTTPS (the console's own come first).
     for root in /usr/share/ca-certificates/mozilla/*.crt; do cat "$root"; echo; done > "$app/pc5/ca-certificates.crt"
@@ -462,6 +475,7 @@ step_bundle() {
     part PS5-Lapy-JB-Daemon "$B/lapy" "$LAPY_COMMIT" "$LAPY_URL"
     part ps5-forwarder-format "$B/ps5-forwarder-format" "$FORWARDER_COMMIT" \
         "$FORWARDER_URL (the home screen tiles' program and psfwd)"
+    part QR-Code-generator "$B/qrcodegen" "$QRCODEGEN_COMMIT" "$QRCODEGEN_URL (Report on GitHub's QR codes)"
     mkdir -p "$stage/vkd3d-proton"
     tar -C "$B/vkd3d-proton-source" --exclude=.git -cf - . | tar -x -C "$stage/vkd3d-proton"
     printf '%-28s %s at %s, with its submodules\n' "vkd3d-proton/" "$VKD3D_SOURCE_URL" "$VKD3D_SOURCE_COMMIT" >> "$stage/PARTS.txt"

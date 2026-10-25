@@ -1,4 +1,4 @@
-PC5 is a launcher for your own Windows PC games on a PS5 that runs homebrew. It installs games from a USB drive, shows them as a row of covers, and runs them with [prospero-win](https://github.com/mpereiraesaa/prospero-win) (Wine on the PS5). The app's title ID is `PPSA11018` and its tile on the home screen is called **PC5**. This wiki describes PC5 **1.6.0**.
+PC5 is a launcher for your own Windows PC games on a PS5 that runs homebrew. It installs games from a USB drive, shows them as a row of covers, and runs them with [prospero-win](https://github.com/mpereiraesaa/prospero-win) (Wine on the PS5). The app's title ID is `PPSA11018` and its tile on the home screen is called **PC5**. This wiki describes PC5 **1.6.1**.
 
 ![The PC5 library](images/library.png)
 *The library: your games as a row of covers, with the chosen one in the middle.*
@@ -14,7 +14,7 @@ PC5 contains no games and downloads none. You install the games you own.
 - **Has settings for every game:** an overlay (FPS, frame time, CPU, temperatures, memory), vibration strength, the light bar and the adaptive triggers.
 - **Lets you type into games** with the PS5's on-screen keyboard: click the touchpad with two fingers.
 - **Starts a game its launcher starts:** when a game's own launcher starts the game, PC5 starts it in the launcher's place.
-- **Keeps the log** of a game that crashed or failed to start, and tells you about it the next time it opens.
+- **Keeps the log** of each game's newest session as one zip, with the game's own logs and crash files, tells you when a game crashed, and opens GitHub's issue form for it with a QR code.
 
 ## Start here
 

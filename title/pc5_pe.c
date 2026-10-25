@@ -352,6 +352,57 @@ int pc5_pe_read(const char *path, Pc5PeInfo *info)
     return 0;
 }
 
+/* name (lower case) at p, in ASCII, or in UTF-16 (wide), any case. */
+static int names_at(const uint8_t *p, size_t left, const char *name, int wide)
+{
+    size_t n = strlen(name), step = wide ? 2 : 1;
+    if (left < n * step) return 0;
+    for (size_t i = 0; i < n; i++)
+        if (pc5_lower(p[i * step]) != (unsigned char)name[i] || (wide && p[i * step + 1])) return 0;
+    return 1;
+}
+
+uint32_t pc5_pe_named_libraries(const char *path)
+{
+    static const struct { const char *name; uint32_t bit; } named[] = {
+        { "vulkan-1", PC5_IMPORT_VULKAN }, { "d3d12.dll", PC5_IMPORT_D3D12 }, { "d3d11.dll", PC5_IMPORT_D3D11 },
+        { "dxgi.dll", PC5_IMPORT_DXGI },   { "d3d10", PC5_IMPORT_D3D10 },     { "d3d9.dll", PC5_IMPORT_D3D9 },
+        { "d3d8.dll", PC5_IMPORT_D3D8 },   { "opengl32", PC5_IMPORT_OPENGL }, { "ddraw.dll", PC5_IMPORT_DDRAW },
+    };
+    enum { CHUNK = 1 << 20, KEEP = 32 };
+    const uint64_t most = (uint64_t)1 << 30;
+    uint8_t *buf;
+    uint64_t total = 0;
+    uint32_t bits = 0;
+    size_t kept = 0;
+    ssize_t got;
+    int fd;
+
+    if ((fd = open(path, O_RDONLY)) < 0) return 0;
+    if (!(buf = pc5_alloc(CHUNK + KEEP))) {
+        close(fd);
+        return 0;
+    }
+    while (total < most && (got = read(fd, buf + kept, CHUNK)) > 0) {
+        size_t have = kept + (size_t)got;
+        total += (uint64_t)got;
+        for (size_t at = 0; at < have; at++) {
+            uint8_t c = (uint8_t)pc5_lower(buf[at]);
+            if (c != 'v' && c != 'd' && c != 'o') continue;
+            for (size_t i = 0; i < sizeof(named) / sizeof(named[0]); i++)
+                if (!(bits & named[i].bit) && (names_at(buf + at, have - at, named[i].name, 0) ||
+                                               names_at(buf + at, have - at, named[i].name, 1)))
+                    bits |= named[i].bit;
+        }
+        /* The tail again with the next chunk: a name may run across the two. */
+        kept = have < KEEP ? have : KEEP;
+        memmove(buf, buf + have - kept, kept);
+    }
+    pc5_free(buf);
+    close(fd);
+    return bits;
+}
+
 Pc5Api pc5_api_from_imports(uint32_t imports)
 {
     if (imports & PC5_IMPORT_D3D12) return PC5_API_D3D12;

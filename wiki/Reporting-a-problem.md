@@ -15,11 +15,11 @@ Please don't report problems in ProsperoStore comments. Comments can't hold a lo
 
 ## What to include
 
-1. **The PC5 version**, from **Settings › About PC5** (press **Options** in the library). For example `1.6.0`.
+1. **The PC5 version**, from **Settings › About PC5** (press **Options** in the library). For example `1.6.1`.
 2. **The game**: its name, and the program PC5 starts for it (shown in the game's menu under **Change program**).
 3. **What happened**: what you did, where it stopped, what was on screen, and whether it happens every time.
 4. **How the game is set up**, if you changed anything: its controller mode, frame generation, and any [launch options](Launch-options).
-5. **The log** of that session, attached as a file (see below).
+5. **The log** of that session: the zip PC5 kept, attached as a file (see below).
 
 ## Finding the log
 
@@ -29,59 +29,68 @@ PC5 keeps logs in:
 /data/prospero-win/logs/
 ```
 
-While a game runs, its log is written as `session-N.log`. When PC5 next opens, it looks at the sessions that have ended:
+While a game runs, its log is written as `session-N.log`, and put on the console's storage every two seconds, so it survives even if the console freezes and has to be switched off. When PC5 next opens, it files the sessions that have ended, each as **one zip**:
 
-- A session that **went wrong** is kept as `issue-<when>_<game>.log`. That means the game crashed, closed within a minute without showing anything, or didn't close when asked and had to be ended.
-- A session that went well is deleted, unless **Settings › Keep all logs** is **On**. Then it is kept as `log-<when>_<game>.log`.
+- A session that **went wrong** is kept as `issue-<when>_<game>.zip`: the game crashed, closed within a minute without showing anything, or didn't close when asked and had to be ended.
+- Each game's **newest session** is kept as `log-<when>_<game>.zip` even when nothing went wrong, so a problem without a crash (no sound, a wrong picture, a freeze) still has its log. Playing that game again replaces it.
+- PC5's own sessions that went well are deleted, unless **Settings › Keep all logs** is **On** (then every session is kept).
 - Nothing in `logs/` is kept longer than **seven days**.
 
 `<when>` is the date and time the session began, on the console's clock (`2026-10-25_14-17`), and `<game>` is the game's id (`neon-drift`, for example; `launcher` for PC5's own sessions).
 
-When a session went wrong, PC5 tells you the next time it opens, and names the kept log:
+The zip holds everything a report needs:
+
+| In the zip | What it is |
+| --- | --- |
+| `issue-…_<game>.log` (with `-earlier` and `-start` for a long session) | PC5's log of the session |
+| `about.txt` | what PC5 saw, the program, the console's firmware, and the list of the game's files below |
+| `game/…` | the files the game itself wrote while it ran: its own logs, crash reports and crash dumps (Unity's `Player.log`, a `log.txt` in My Games, `crash.xml`, `.dmp` files), from its folders under `C:\users` and its own folder |
+
+Attach the zip as it is. You don't need to look for the game's own logs.
+
+When a session went wrong, PC5 tells you the next time it opens, and names the zip it kept:
 
 ![PC5 telling you a game crashed](images/issue-crashed.png)
-*After a crash, PC5 names the log it kept. Attach that file to your issue.*
+*After a crash, PC5 names the log it kept. △ reports it on GitHub.*
 
 | PC5 says | What happened |
 | --- | --- |
-| *Game* stopped with an error | Wine reported a crash in the game. |
+| *Game* stopped with an error | Wine reported a crash in the game, or the game's own crash handler caught one. |
 | *Game* closed before showing anything | The game ended within a minute of starting without showing a picture, or Wine couldn't start it. Check the program first. |
 | *Game* had to be closed | The game didn't close when asked, so PC5 ended it. |
-| PC5 ended unexpectedly last time | PC5 itself stopped while it ran. Its log is `issue-<when>_launcher.log`. |
+| PC5 ended unexpectedly last time | PC5 itself stopped while it ran. Its log is `issue-<when>_launcher.zip`. |
 
-Attach the newest `issue-…` log for that game. Attach the file itself, not parts of it pasted into the issue.
+### Report on GitHub from PC5
 
-### Logs in parts
+In that message, press **△**. PC5 shows a QR code: scan it with your phone, and GitHub's form for a new issue opens, already filled in with the game, its program, PC5's version, the console's firmware and what PC5 saw. Say what happened, attach the zip it names, and submit.
 
-A long session's log is written in parts. How the session began is kept with `-start` added to its name, and the part before the newest with `-earlier`:
+![Report on GitHub](images/report-on-github.png)
+*The QR code opens the issue form; the zip to attach is named beside it.*
 
-```text
-issue-2026-10-25_14-17_neon-drift.log
-issue-2026-10-25_14-17_neon-drift-earlier.log
-issue-2026-10-25_14-17_neon-drift-start.log
-```
+The QR code only opens the form: nothing is sent until you submit it, and the log goes only if you attach it.
 
-Attach all of them. A line that repeats many times is saved once, followed by `the line before came N more times`.
+### When there is no message
 
-### When there is no issue log
-
+- **The game froze, or you had to restart the console.** Attach that game's newest `log-…` (or `issue-…`) zip: it holds the session up to a few seconds before it stopped. Its `about.txt` says the log has no end line. Don't play the game again before copying it, as that replaces it.
+- **Something went wrong but nothing crashed** (no music, a wrong picture): attach the game's newest `log-…` zip, and say what you saw and when.
 - **You started the game from its [home screen tile](Home-screen-tiles).** Leaving the game goes back to the home screen, so PC5 hasn't opened since. Open PC5 once: it files the log then.
-- **The game froze, or you had to restart the console**, but it had shown pictures. PC5 may not see a problem in such a log. Open an issue anyway and say what happened and when: you'll be asked for what's needed.
-- **An install or uninstall went wrong.** PC5 keeps that session's log as `issue-<when>_launcher.log`, once PC5 has been closed and opened again. It doesn't show a message for it.
+- **An install or uninstall went wrong.** PC5 keeps that session's log as `issue-<when>_launcher.zip`, once PC5 has been closed and opened again. It doesn't show a message for it.
 
 ### Copying the log off the console
 
-Copy the file from `/data/prospero-win/logs/` with the tool you use to move files to and from the console (an FTP server payload, for example). GitHub accepts `.log` files as attachments: drag the file into the issue's text box. If it is too large to attach, zip it first.
+Copy the zip from `/data/prospero-win/logs/` with the tool you use to move files to and from the console (an FTP server payload, for example). Drag it into the issue's text box.
+
+PC5 1.6.0 and older kept logs as `.log` files (with `-earlier` and `-start` parts) rather than zips. Attach all of them if that is what you have.
 
 ## What a crash log contains
 
-From PC5 1.3.0, when a game crashes its log has a crash report: lines starting with `wine: crash report:`. They give the module and offset the crash happened at (such as `game.exe+0x1a2b3c`), the registers, and the code addresses on the stack. That is what lets the cause be found, so a log from 1.3.0 or newer is the most useful one to attach.
+From PC5 1.3.0, when a game crashes its log has a crash report: lines starting with `wine: crash report:`. They give the module and offset the crash happened at (such as `game.exe+0x1a2b3c`), the registers, and the code addresses on the stack. From 1.6.1 this is there too when the game's own crash handler catches the crash (the line before says `handed to the program's own crash handler`). The first lines of each log name the console's firmware and PC5's version.
 
 ## Opening the issue
 
-1. Go to <https://github.com/bornaradusin/PC5/issues> and choose **New issue**. You need a GitHub account.
+1. Press **△** on PC5's message and scan the code (see [Report on GitHub from PC5](#report-on-github-from-pc5)), or go to <https://github.com/bornaradusin/PC5/issues> and choose **New issue**. You need a GitHub account.
 2. Give it a title that says what goes wrong, for example "Game closes before showing anything after its intro video".
 3. Write the details from [What to include](#what-to-include).
-4. Drag the log file (or both parts) into the text box, wait for it to upload, and submit.
+4. Drag the zip into the text box, wait for it to upload, and submit.
 
 Thank you: every report with a log helps more games run.

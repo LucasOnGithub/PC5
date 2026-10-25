@@ -320,6 +320,15 @@ int pc5_folder_inspect(const char *path, const char *name, Pc5Folder *folder)
         for (int k = 0; k < walk.dll_count; k++)
             if (!strcmp(walk.dlls[k].dir, dir)) folder->exes[i].beside |= walk.dlls[k].imports;
     }
+    /* A game whose programs and libraries import nothing they draw with loads it at run
+     * time: what its likeliest programs name (pc5_pe_named_libraries), read only then. */
+    if (!(folder->imports & PC5_IMPORT_DRAWING)) {
+        for (int i = 0; i < folder->exe_count && i < 3; i++) {
+            char file[PC5_PATH * 2];
+            if (pc5_format(file, sizeof(file), "%s/%s", path, folder->exes[i].path)) continue;
+            folder->exes[i].pe.imports |= pc5_pe_named_libraries(file);
+        }
+    }
     if (!folder->exe_count && !folder->problem[0])
         snprintf(folder->problem, sizeof(folder->problem), "There is no Windows program in this folder.");
     else if (folder->exe_count && folder->exes[0].score <= -500 && !folder->problem[0])
@@ -333,9 +342,7 @@ out:
 
 Pc5Api pc5_folder_api(const Pc5Folder *folder, int index)
 {
-    const uint32_t drawing = PC5_IMPORT_D3D8 | PC5_IMPORT_D3D9 | PC5_IMPORT_D3D10 | PC5_IMPORT_D3D11 |
-                             PC5_IMPORT_DXGI | PC5_IMPORT_D3D12 | PC5_IMPORT_OPENGL | PC5_IMPORT_VULKAN |
-                             PC5_IMPORT_DDRAW;
+    const uint32_t drawing = PC5_IMPORT_DRAWING;
     uint32_t own, beside;
 
     if (index < 0 || index >= folder->exe_count) return PC5_API_GDI;

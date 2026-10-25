@@ -385,6 +385,18 @@ int pc5_profile_refresh(const char *root, const char *id, char *error, size_t si
         snprintf(error, size, "PC5's notes on this game are missing.");
         return -1;
     }
+    /* A game installed as drawing with Windows itself may load Direct3D or Vulkan at run
+     * time (before 1.6.1 PC5 didn't look): what its program names, kept in its notes. */
+    if (info.api == PC5_API_GDI &&
+        !pc5_format(path, sizeof(path), "%s/prefixes/%s/drive_c/Games/%s/%s", root, id, info.folder, info.exe)) {
+        uint32_t named = pc5_pe_named_libraries(path) & PC5_IMPORT_DRAWING;
+        if (named) {
+            info.api = pc5_api_from_imports(named);
+            if (!pc5_info_text(&info, text, sizeof(text)) &&
+                !pc5_format(path, sizeof(path), "%s/prefixes/%s/pc5/info.txt", root, id))
+                pc5_write_file(path, text, strlen(text));
+        }
+    }
     launch_options(root, id, &info, arguments, sizeof(arguments));
     pc5_controls_load(root, id, &controls);
     program_folder(root, id, &info, folder, sizeof(folder));

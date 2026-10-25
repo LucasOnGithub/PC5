@@ -1,0 +1,114 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bornaradusin <bornaradusin@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 14:50:00 +0000
+Subject: [PATCH] PC5: a crash the game's own handler takes is reported first
+ (Wine patch 0924)
+
+A game with a crash handler of its own (it writes a dump and starts a
+crash reporter the PS5 can't start) left only a fault count in the log:
+Wine reached its crash report only once the handler passed the crash on.
+The crash is now reported, registers and stack, before the game's handler
+runs, and not again when that handler passes it on.
+---
+ PUBLICATION_ALLOWLIST.txt                     |  1 +
+ ...ort-before-the-program-s-own-handler.patch | 79 +++++++++++++++++++
+ 2 files changed, 80 insertions(+)
+ create mode 100644 wine/patches/0924-kernelbase-crash-report-before-the-program-s-own-handler.patch
+
+diff --git a/PUBLICATION_ALLOWLIST.txt b/PUBLICATION_ALLOWLIST.txt
+index 84a06de..88e56b8 100644
+--- a/PUBLICATION_ALLOWLIST.txt
++++ b/PUBLICATION_ALLOWLIST.txt
+@@ -565,6 +565,7 @@ wine/patches/0920-dxcore-a-gpu-adapter-has-the-graphics-and-compute-attributes.p
+ wine/patches/0921-ntdll-ps5-4-gib-for-32-bit-programs.patch
+ wine/patches/0922-win32u-ps5-type-characters-from-the-console-s-keyboard.patch
+ wine/patches/0923-ntdll-ps5-hand-a-launcher-s-game-to-the-title.patch
++wine/patches/0924-kernelbase-crash-report-before-the-program-s-own-handler.patch
+ 
+ 
+ 
+diff --git a/wine/patches/0924-kernelbase-crash-report-before-the-program-s-own-handler.patch b/wine/patches/0924-kernelbase-crash-report-before-the-program-s-own-handler.patch
+new file mode 100644
+index 0000000..9506773
+--- /dev/null
++++ b/wine/patches/0924-kernelbase-crash-report-before-the-program-s-own-handler.patch
+@@ -0,0 +1,79 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: prospero-win <prospero-win@invalid>
++Date: Sun, 25 Oct 2026 14:50:00 +0000
++Subject: [PATCH] kernelbase: Report a crash before the program's own crash handler takes it.
++
++Many games set an unhandled exception filter of their own: it writes a
++dump, starts a crash reporter (which the PS5 can't start) and then ends
++the process, or waits for the reporter for ever. Wine reached its crash
++report (0912) only after that filter passed the crash on, so such a crash
++left only a fault count in the log. Report it, once, before calling the
++program's filter, and leave it out when the filter passes the same crash
++on to the debugger. At most eight are reported, for a filter that carries
++on after each.
++---
++ dlls/kernelbase/debug.c |   35 +++++++++++++++++++++++++++++++++--
++ 1 file changed, 33 insertions(+), 2 deletions(-)
++
++diff --git a/dlls/kernelbase/debug.c b/dlls/kernelbase/debug.c
++--- a/dlls/kernelbase/debug.c
+++++ b/dlls/kernelbase/debug.c
++@@ -596,6 +596,32 @@
++     }
++ }
++ 
+++/* The crash last reported before the program's own crash handler took it,
+++ * so that one the handler passes on to the debugger isn't reported twice,
+++ * and how many were: a handler that carries on after each could otherwise
+++ * fill the log. */
+++static const EXCEPTION_RECORD *handed_record;
+++static void *handed_address;
+++static LONG handed_count;
+++
+++static BOOL crash_reported( const EXCEPTION_RECORD *rec )
+++{
+++    return rec == handed_record && rec->ExceptionAddress == handed_address;
+++}
+++
+++static void report_handed_crash( EXCEPTION_POINTERS *epointers )
+++{
+++    const EXCEPTION_RECORD *rec = epointers->ExceptionRecord;
+++    char buffer[256];
+++
+++    if (crash_reported( rec ) || InterlockedIncrement( &handed_count ) > 8) return;
+++    handed_record = rec;
+++    handed_address = rec->ExceptionAddress;
+++    format_exception_msg( epointers, buffer, sizeof(buffer) );
+++    MESSAGE( "wine: %s (thread %04lx), handed to the program's own crash handler\n", buffer, GetCurrentThreadId() );
+++    crash_report( epointers );
+++}
+++
++ 
++ /******************************************************************
++  *		start_debugger
++@@ -616,7 +642,7 @@
++ 
++     format_exception_msg( epointers, buffer, sizeof(buffer) );
++     MESSAGE( "wine: %s (thread %04lx), starting debugger...\n", buffer, GetCurrentThreadId() );
++-    crash_report( epointers );
+++    if (!crash_reported( epointers->ExceptionRecord )) crash_report( epointers );
++ 
++     InitializeObjectAttributes( &attr, &nameW, 0, 0, NULL );
++     if (!NtOpenKey( &dbg_key, KEY_READ, &attr ))
++@@ -850,7 +876,12 @@
++         nested = rec->ExceptionFlags & EXCEPTION_NESTED_CALL;
++         if (top_filter && !nested)
++         {
++-            LONG ret = top_filter( epointers );
+++            LONG ret;
+++
+++            /* The handler may end the process, or wait for a crash reporter the
+++             * PS5 can't start: say where the crash happened first. */
+++            report_handed_crash( epointers );
+++            ret = top_filter( epointers );
++             if (ret != EXCEPTION_CONTINUE_SEARCH) return ret;
++         }
++ 
++-- 
++2.43.0
++

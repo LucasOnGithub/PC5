@@ -14,11 +14,14 @@
 #include "pc5_json.h"
 #include "pc5_library.h"
 #include "pc5_logs.h"
+#include "pc5_qr.h"
+#include "pc5_report.h"
 #include "pc5_pe.h"
 #include "pc5_settings.h"
 #include "pc5_source.h"
 #include "pc5_ui.h"
 #include "pc5_update.h"
+#include "pc5_zip.h"
 
 #include "pw_game_profile.h"
 #include "pw_wine_library.h"
@@ -1065,6 +1068,55 @@ static void test_update(void)
           !strcmp(back.last.version, "9.0.0"), "read back");
 }
 
+/* The names in a zip's directory, one per line (its central directory, read as unzip does). */
+static int zip_names(const char *file, char *out, size_t size)
+{
+    Pc5Buf zip = { 0 };
+    size_t n = 0;
+    out[0] = 0;
+    if (pc5_read_file(file, &zip, 64u << 20) || zip.len < 22) { pc5_buf_free(&zip); return -1; }
+    const uint8_t *z = zip.data, *end = z + zip.len - 22;
+    while (end > z && !(end[0] == 0x50 && end[1] == 0x4b && end[2] == 5 && end[3] == 6)) end--;
+    uint32_t count = end[10] | end[11] << 8, at = end[16] | end[17] << 8 | end[18] << 16 | (uint32_t)end[19] << 24;
+    for (uint32_t i = 0; i < count && at + 46 <= zip.len; i++) {
+        const uint8_t *c = z + at;
+        uint32_t name = c[28] | c[29] << 8, extra = c[30] | c[31] << 8, comment = c[32] | c[33] << 8;
+        if (c[0] != 0x50 || c[1] != 0x4b || c[2] != 1 || c[3] != 2 || at + 46 + name > zip.len || n + name + 2 > size) break;
+        memcpy(out + n, c + 46, name);
+        n += name;
+        out[n++] = '\n';
+        out[n] = 0;
+        at += 46 + name + extra + comment;
+    }
+    pc5_buf_free(&zip);
+    return 0;
+}
+
+static void test_zip(void)
+{
+    char file[PC5_PATH], names[512];
+    Pc5Zip zip;
+    static uint8_t noise[3000], text[40000];
+    for (size_t i = 0; i < sizeof(noise); i++) noise[i] = (uint8_t)((i * 2654435761u) >> 13);
+    for (size_t i = 0; i < sizeof(text); i++) text[i] = (uint8_t)"PC5 log line, repeated.\n"[i % 24];
+    CHECK(pc5_crc32("123456789", 9) == 0xcbf43926u, "CRC-32 of the check string");
+    path(file, sizeof(file), "%s/zip-test.zip", work);
+    CHECK(!pc5_zip_open(&zip, file), "zip opened");
+    CHECK(!pc5_zip_add(&zip, "text.log", text, sizeof(text), 1792700000) &&
+          !pc5_zip_add(&zip, "game/users/prospero/noise.dmp", noise, sizeof(noise), 1792700000) &&
+          !pc5_zip_add(&zip, "empty.txt", "", 0, 0) && !pc5_zip_add(&zip, "k\xc3\xa4ytt\xc3\xa4j\xc3\xa4.txt", "x", 1, 1792700000),
+          "four files added");
+    CHECK(!pc5_zip_close(&zip) && pc5_is_file(file), "zip written (tests/test.sh opens it with Python)");
+    path(names, sizeof(names), "%s/zip-test.zip.part", work);
+    CHECK(!pc5_exists(names), "no part left behind");
+    CHECK(!zip_names(file, names, sizeof(names)) && strstr(names, "text.log\n") && strstr(names, "noise.dmp\n"),
+          "its directory: %s", names);
+    struct stat st;
+    CHECK(!stat(file, &st) && st.st_size < 4000 + 2000, "the log line deflated: %lld bytes", (long long)st.st_size);
+    path(file, sizeof(file), "%s/no-such-dir/x.zip", work);
+    CHECK(pc5_zip_open(&zip, file) == -1, "a zip that can't be written");
+}
+
 static void log_file(const char *dir, const char *name, const char *profile, long long time, const char *body)
 {
     char file[PC5_PATH], text[4096];
@@ -1073,15 +1125,29 @@ static void log_file(const char *dir, const char *name, const char *profile, lon
     write_text(file, text);
 }
 
+static void file_at(const char *file, const char *text, long long time)
+{
+    char dir[PC5_PATH];
+    pc5_copy(dir, sizeof(dir), file);
+    *strrchr(dir, '/') = 0;
+    pc5_mkdirs(dir);
+    write_text(file, text);
+    struct timeval at[2] = { { (time_t)time, 0 }, { (time_t)time, 0 } };
+    utimes(file, at);
+}
+
 static void test_logs(void)
 {
-    char root_dir[PC5_PATH], logs[PC5_PATH], file[PC5_PATH];
+    char root_dir[PC5_PATH], logs[PC5_PATH], file[PC5_PATH], names[4096], drive[PC5_PATH];
     const long long now = 1792700000;
     Pc5LogIssue issue;
     const char *crash =
         "REC seq=1 t=100.000 PW_WINE64 args argc=3 mode=game profile=gtaiv\n"
-        "REC seq=2 t=100.400 WINE wine: Unhandled page fault on read access to 0000002C at address 7985D308 (thread 0024), starting debugger...\n"
-        "REC seq=3 t=100.500 PW_WINE64 session_end reason=wine-exit\n";
+        "REC seq=2 t=100.100 PW_WINE64 profile id=gtaiv prefix=/data/prospero-win/prefixes/gtaiv desktop=1920x1080\n"
+        "REC seq=3 t=100.200 PW_WINE64 ntdll=/app0/ntdll.prx prefix=/data/prospero-win/prefixes/gtaiv exe=C:\\Games\\GTA IV\\GTAIV.exe\n"
+        "REC seq=4 t=100.300 PC5 system firmware=12.40 data_free=200GB\n"
+        "REC seq=5 t=100.400 WINE wine: Unhandled page fault on read access to 0000002C at address 7985D308 (thread 0024), starting debugger...\n"
+        "REC seq=6 t=130.500 PW_WINE64 session_end reason=wine-exit\n";
     const char *played =
         "REC seq=1 t=100.000 PW_WINE64 args argc=3 mode=game profile=blur\n"
         "REC seq=2 t=130.000 PW_WINE64 display released to vulkan close=ok shown=0\n"
@@ -1097,6 +1163,10 @@ static void test_logs(void)
     const char *pc5_problem =
         "REC seq=1 t=10.000 PC5 start version=1.0.0\n"
         "REC seq=2 t=20.000 PC5 problem install Blur: Not enough space\n";
+    const char *handed =
+        "REC seq=1 t=10.000 WINE wine: Unhandled page fault on read access to 0000000000000000 at address 000000014001D11A "
+        "(thread 0024), handed to the program's own crash handler\n"
+        "REC seq=2 t=12.000 PW_WINE64 alive tick=60 sink_calls=1 frames_put=2 shown=1\n";
 
     char text[4096];
 #define CLASSIFY(profile, body) (snprintf(text, sizeof(text), "PW_REPORT/1 build=abc profile=%s cycle=2 pid=1 time=5\n%s", \
@@ -1104,6 +1174,10 @@ static void test_logs(void)
     CHECK(CLASSIFY("gtaiv", crash) == PC5_LOG_GAME_CRASHED, "a crash");
     CHECK(!strcmp(issue.profile, "gtaiv") && issue.time == 5 && strstr(issue.detail, "Unhandled page fault"),
           "its line: %s", issue.detail);
+    CHECK(!strcmp(issue.prefix, "/data/prospero-win/prefixes/gtaiv") && !strcmp(issue.exe, "C:\\Games\\GTA IV\\GTAIV.exe") &&
+          !strcmp(issue.firmware, "12.40") && issue.closed && issue.ended == 35,
+          "where it ran: %s %s %s %d %lld", issue.prefix, issue.exe, issue.firmware, issue.closed, (long long)issue.ended);
+    CHECK(CLASSIFY("grim", handed) == PC5_LOG_GAME_CRASHED && !issue.closed, "a crash the game's own handler took");
     CHECK(CLASSIFY("launcher", crash) == PC5_LOG_FINE, "PC5's own session isn't a game's");
     CHECK(CLASSIFY("blur", played) == PC5_LOG_FINE, "a game played");
     CHECK(CLASSIFY("quick", quick) == PC5_LOG_NO_PICTURE, "closed before any picture");
@@ -1112,6 +1186,7 @@ static void test_logs(void)
                             "leaving the game\n") == PC5_LOG_FINE, "closed by the player, ended when it didn't close");
     CHECK(CLASSIFY("launcher", pc5_problem) == PC5_LOG_PC5_PROBLEM && !strcmp(issue.detail, "install Blur: Not enough space"),
           "PC5's problem: %s", issue.detail);
+    CHECK(!strcmp(pc5_log_problem_text(PC5_LOG_GAME_CRASHED), "stopped with an error"), "a problem in words");
 #undef CLASSIFY
 
     path(root_dir, sizeof(root_dir), "%s/logs-root", work);
@@ -1123,6 +1198,20 @@ static void test_logs(void)
     /* every part of a session repeats its first line, the time it began among it */
     log_file(logs, "session-0.previous.log", "gtaiv", now - 600, "REC seq=1 t=1.0 earlier\n");
     log_file(logs, "session-0.start.log", "gtaiv", now - 600, "REC seq=1 t=1.0 how it began\n");
+    /* What GTA IV wrote while it ran (its session: now - 600 for 30 seconds), and what it didn't. */
+    path(drive, sizeof(drive), "%s/prefixes/gtaiv/drive_c", root_dir);
+    path(file, sizeof(file), "%s/users/prospero/Documents/Rockstar Games/GTA IV/log.txt", drive);
+    file_at(file, "GTA IV's own log\n", now - 590);
+    path(file, sizeof(file), "%s/users/prospero/AppData/Local/Temp/1234/crash.xml", drive);
+    file_at(file, "<crashreport/>\n", now - 575);
+    path(file, sizeof(file), "%s/users/prospero/Documents/Rockstar Games/GTA IV/old.log", drive);
+    file_at(file, "from yesterday\n", now - 86400);
+    path(file, sizeof(file), "%s/users/prospero/Documents/Rockstar Games/GTA IV/save.dat", drive);
+    file_at(file, "a save\n", now - 590);
+    path(file, sizeof(file), "%s/Games/GTA IV/crash.dmp", drive);
+    file_at(file, "MDMP", now - 580);
+    path(file, sizeof(file), "%s/Games/Other/other.log", drive);
+    file_at(file, "another game's\n", now - 590);
     /* A long session: its newest part alone looks like a game that closed within a
      * minute without a picture; how it began says otherwise. */
     log_file(logs, "session-2.start.log", "longplay", now - 4000, "REC seq=1 t=1.0 display released to vulkan\n");
@@ -1138,6 +1227,7 @@ static void test_logs(void)
     path(file, sizeof(file), "%s/pc5/crash-3.txt", root_dir);
     write_text(file, "signal 11\n");
     log_file(logs, "issue-2026-10-01_10-00_old.log", "old", now - 20 * 86400, crash);
+    log_file(logs, "log-2026-10-20_10-00_blur.zip", "blur", now - 5 * 86400, "an older one of Blur's that went well\n");
     {
         struct timeval old[2] = { { (time_t)(now - 10 * 86400), 0 }, { (time_t)(now - 10 * 86400), 0 } };
         path(file, sizeof(file), "%s/issue-2026-10-01_10-00_old.log", logs);
@@ -1148,42 +1238,51 @@ static void test_logs(void)
     path(file, sizeof(file), "%s/session-1.log", logs);
     CHECK(pc5_is_file(file), "the running session stays");
     path(file, sizeof(file), "%s/session-7.log", logs);
-    CHECK(!pc5_exists(file), "a game that went well: deleted");
+    CHECK(!pc5_exists(file), "a game that went well: its session filed");
     path(file, sizeof(file), "%s/session-7.start.log", logs);
     CHECK(!pc5_exists(file), "with how it began");
-    path(file, sizeof(file), "%s/session-2.log", logs);
-    CHECK(!pc5_exists(file), "a long session read from how it began: went well, deleted");
+    path(file, sizeof(file), "%s/log-2026-10-22_20-22_blur.zip", logs);
+    CHECK(pc5_is_file(file), "kept as the game's newest log, though it went well");
+    CHECK(!zip_names(file, names, sizeof(names)) && strstr(names, "log-2026-10-22_20-22_blur.log\n") &&
+          strstr(names, "log-2026-10-22_20-22_blur-start.log\n") && strstr(names, "about.txt\n"), "its parts: %s", names);
+    path(file, sizeof(file), "%s/log-2026-10-20_10-00_blur.zip", logs);
+    CHECK(!pc5_exists(file), "Blur's older one that went well: deleted");
+    path(file, sizeof(file), "%s/log-2026-10-22_20-06_longplay.zip", logs);
+    CHECK(pc5_is_file(file), "a long session read from how it began: went well, kept as the newest");
     path(file, sizeof(file), "%s/session-6.log", logs);
     CHECK(!pc5_exists(file), "PC5 that went well: deleted");
+    CHECK(count_entries(logs, "log-") == 2, "only games' logs that went well: %d", count_entries(logs, "log-"));
     path(file, sizeof(file), "%s/issue-2026-10-01_10-00_old.log", logs);
     CHECK(!pc5_exists(file), "older than a week: deleted");
     path(file, sizeof(file), "%s/pc5/crash-3.txt", root_dir);
     CHECK(!pc5_exists(file), "the crash marker is used once");
-    CHECK(count_entries(logs, "issue-") == 6 && count_entries(logs, "session-") == 1, "kept under their names: %d",
-          count_entries(logs, "issue-"));   /* four, and the crash's earlier part and start */
-    CHECK(issue.problem == PC5_LOG_CRASHED && strstr(issue.file, "/logs/issue-") && strstr(issue.file, "_launcher.log"),
+    CHECK(count_entries(logs, "issue-") == 4 && count_entries(logs, "session-") == 1, "kept as one zip each: %d",
+          count_entries(logs, "issue-"));
+    CHECK(issue.problem == PC5_LOG_CRASHED && strstr(issue.file, "/logs/issue-") && strstr(issue.file, "_launcher.zip"),
           "the newest: %d %s", (int)issue.problem, issue.file);
-    {
-        const char *name = "_gtaiv.log";
-        DIR *d = opendir(logs);
-        struct dirent *e;
-        int found = 0;
-        while (d && (e = readdir(d))) found |= strstr(e->d_name, "issue-") && strstr(e->d_name, name) && !strstr(e->d_name, "earlier");
-        if (d) closedir(d);
-        CHECK(found, "the crash kept with the game's name");
-        path(file, sizeof(file), "%s/issue-2026-10-22_21-03_gtaiv.log", logs);   /* local time: UTC+1 */
-        CHECK(pc5_is_file(file), "named by when it began");
-        path(file, sizeof(file), "%s/issue-2026-10-22_21-03_gtaiv-earlier.log", logs);
-        CHECK(pc5_is_file(file), "with its earlier part");
-        path(file, sizeof(file), "%s/issue-2026-10-22_21-03_gtaiv-start.log", logs);
-        CHECK(pc5_is_file(file), "and how it began");
-    }
-    /* Keep all: one that went well is kept too, as log-... */
+    path(file, sizeof(file), "%s/issue-2026-10-22_21-03_gtaiv.zip", logs);   /* local time: UTC+1 */
+    CHECK(pc5_is_file(file), "the crash kept with the game's name and when it began");
+    CHECK(!zip_names(file, names, sizeof(names)) && strstr(names, "issue-2026-10-22_21-03_gtaiv.log\n") &&
+          strstr(names, "issue-2026-10-22_21-03_gtaiv-earlier.log\n") && strstr(names, "issue-2026-10-22_21-03_gtaiv-start.log\n") &&
+          strstr(names, "about.txt\n"), "with its parts: %s", names);
+    CHECK(strstr(names, "game/users/prospero/Documents/Rockstar Games/GTA IV/log.txt\n") &&
+          strstr(names, "game/users/prospero/AppData/Local/Temp/1234/crash.xml\n") && strstr(names, "game/Games/GTA IV/crash.dmp\n"),
+          "and the game's own log, crash report and dump: %s", names);
+    CHECK(!strstr(names, "old.log") && !strstr(names, "save.dat") && !strstr(names, "other.log"),
+          "not what it wrote another time, a save, or another game's");
+    path(file, sizeof(file), "%s/session-0.start.log", logs);
+    CHECK(!pc5_exists(file), "its session's parts are in the zip, not beside it");
+    CHECK(!pc5_logs_newest(root_dir, "gtaiv", file, sizeof(file)) && strstr(file, "issue-2026-10-22_21-03_gtaiv.zip"),
+          "GTA IV's newest log: %s", file);
+    CHECK(!pc5_logs_newest(root_dir, "blur", file, sizeof(file)) && strstr(file, "log-2026-10-22_20-22_blur.zip"),
+          "Blur's: %s", file);
+    CHECK(pc5_logs_newest(root_dir, "nothing", file, sizeof(file)) == -1, "none for a game never played");
+    /* Keep all: one that went well is kept too, as log-..., PC5's own among them. */
     path(file, sizeof(file), "%s/next.txt", logs);
     write_text(file, "3\n");
     log_file(logs, "session-0.log", "blur", now - 100, played);
-    CHECK(pc5_logs_tidy(root_dir, 1, now, 0, NULL) == 0 && count_entries(logs, "log-") == 2, "keep all: %d",
-          count_entries(logs, "log-"));   /* the game, and PC5's session before it */
+    CHECK(pc5_logs_tidy(root_dir, 1, now, 0, NULL) == 0 && count_entries(logs, "log-") == 4, "keep all: %d",
+          count_entries(logs, "log-"));   /* both of Blur's, longplay's and PC5's session before it */
 }
 
 static void test_cover_fill(void)
@@ -1347,6 +1446,54 @@ static void test_keyboard(void)
     pc5_game_keyboard(&game, 0, 0, TOUCHPAD, 0);
     game.ops.keyboard_open = NULL;
     CHECK(pc5_game_keyboard(&game, TOUCHPAD, TOUCHPAD, 0, 2) == 0, "without a keyboard, nothing is taken");
+}
+
+/* A program that loads Direct3D or Vulkan itself names it in its data: found in ASCII or
+ * UTF-16, any case; an installed game noted as drawing with Windows gets its API on its
+ * next start. */
+static void test_named_libraries(void)
+{
+    char root[PC5_PATH], from[PC5_PATH], exe[PC5_PATH], file[PC5_PATH], error[PC5_ERROR];
+    static char text[4096];
+    static const uint8_t wide[] = { 'V', 0, 'u', 0, 'L', 0, 'k', 0, 'A', 0, 'n', 0, '-', 0, '1', 0, '.', 0, 'D', 0, 'L', 0, 'L', 0 };
+    Pc5Info info;
+    FILE *out;
+
+    path(from, sizeof(from), "%s/launcher.exe", programs);
+    CHECK(!(pc5_pe_named_libraries(from) & PC5_IMPORT_DRAWING), "a plain program names none");
+    path(root, sizeof(root), "%s/named-root", work);
+    path(exe, sizeof(exe), "%s/prefixes/flat/drive_c/Games/Flat/Flat.exe", root);
+    copy_file(from, exe);
+    if ((out = fopen(exe, "ab"))) {
+        fwrite(wide, 1, sizeof(wide), out);
+        fclose(out);
+    }
+    CHECK(pc5_pe_named_libraries(exe) == PC5_IMPORT_VULKAN, "Vulkan in UTF-16: %#x", pc5_pe_named_libraries(exe));
+    if ((out = fopen(exe, "ab"))) {
+        fwrite("xx\0D3D11.dll", 1, 12, out);
+        fclose(out);
+    }
+    CHECK(pc5_pe_named_libraries(exe) == (PC5_IMPORT_VULKAN | PC5_IMPORT_D3D11), "and D3D11 in ASCII");
+    memset(&info, 0, sizeof(info));
+    pc5_copy(info.title, sizeof(info.title), "Flat");
+    pc5_copy(info.folder, sizeof(info.folder), "Flat");
+    pc5_copy(info.exe, sizeof(info.exe), "Flat.exe");
+    info.bits = 64;
+    info.api = PC5_API_GDI;
+    pc5_info_text(&info, text, sizeof(text));
+    path(file, sizeof(file), "%s/prefixes/flat/pc5/info.txt", root);
+    write_text(file, text);
+    path(file, sizeof(file), "%s/profiles/index.txt", root);
+    write_text(file, "");
+    CHECK(!pc5_profile_refresh(root, "flat", error, sizeof(error)), "refreshed: %s", error);
+    CHECK(!pc5_info_read(root, "flat", &info) && info.api == PC5_API_D3D11, "its API kept in its notes: %d", (int)info.api);
+    path(file, sizeof(file), "%s/profiles/flat.profile", root);
+    {
+        Pc5Buf profile = { 0 };
+        CHECK(!pc5_read_file(file, &profile, 16384) && !pc5_buf_terminate(&profile) &&
+              strstr((char *)profile.data, "graphics = dxvk\n"), "drawn through DXVK now");
+        pc5_buf_free(&profile);
+    }
 }
 
 /* A game's prefix from before winegstreamer gets its registrations once. */
@@ -2411,6 +2558,96 @@ static void test_screens(const char *fonts)
     pc5_free(canvas.px);
 }
 
+/* Report on GitHub: the link to GitHub's form, filled in, as a QR code; and the crash
+ * message's Triangle opens it. */
+static void test_report(const char *fonts)
+{
+    Pc5LogIssue issue;
+    char url[PC5_REPORT_URL];
+    static Pc5Qr qr;
+
+    memset(&issue, 0, sizeof(issue));
+    issue.problem = PC5_LOG_GAME_CRASHED;
+    pc5_copy(issue.profile, sizeof(issue.profile), "grim-dawn");
+    pc5_copy(issue.detail, sizeof(issue.detail), "wine: Unhandled page fault on read access to 0000000000000000 at `address`");
+    pc5_copy(issue.exe, sizeof(issue.exe), "C:\\Games\\Grim Dawn\\x64\\Grim Dawn.exe");
+    pc5_copy(issue.firmware, sizeof(issue.firmware), "12.40");
+    pc5_copy(issue.file, sizeof(issue.file), "/data/prospero-win/logs/issue-2026-10-25_09-19_grim-dawn.zip");
+    CHECK(!strcmp(pc5_report_file(&issue), "issue-2026-10-25_09-19_grim-dawn.zip"), "the zip's name");
+    CHECK(!pc5_report_url(&issue, "Grim Dawn", url, sizeof(url)), "the link");
+    CHECK(!strncmp(url, "https://github.com/bornaradusin/PC5/issues/new?title=Grim%20Dawn%3A%20stopped%20with%20an%20error&body=",
+                   strlen("https://github.com/bornaradusin/PC5/issues/new?title=Grim%20Dawn%3A%20stopped%20with%20an%20error&body=")),
+          "GitHub's form for PC5, its title filled in: %.120s", url);
+    CHECK(strstr(url, "Grim%20Dawn.exe") && strstr(url, "12.40") && strstr(url, PC5_VERSION) &&
+          strstr(url, "issue-2026-10-25_09-19_grim-dawn.zip") && strstr(url, "%27address%27") && !strchr(url, ' ') &&
+          !strchr(url, '\n') && !strchr(url, '`'), "the game, program, firmware, PC5, the zip, and nothing unencoded");
+    CHECK(pc5_report_url(&issue, "Grim Dawn", url, 200) == -1, "a link that doesn't fit");
+    CHECK(!pc5_report_url(&issue, "Grim Dawn", url, sizeof(url)) && !pc5_qr_make(url, &qr) && qr.size >= 21 &&
+          (qr.size - 17) % 4 == 0 && qr.size <= 177, "as a QR code: %d modules", qr.size);
+    int finder = 1;
+    for (int y = 0; y < 7; y++)
+        for (int x = 0; x < 7; x++) {
+            int ring = x == 0 || y == 0 || x == 6 || y == 6, core = x >= 2 && x <= 4 && y >= 2 && y <= 4;
+            finder &= pc5_qr_dark(&qr, x, y) == (ring || core) && pc5_qr_dark(&qr, qr.size - 1 - x, y) == (ring || core) &&
+                      pc5_qr_dark(&qr, x, qr.size - 1 - y) == (ring || core);
+        }
+    CHECK(finder, "its three finder patterns");
+    {
+        /* tests/test.sh has it read back (zbarimg when there is one) */
+        char file[PC5_PATH];
+        path(file, sizeof(file), "%s/report-qr.txt", work);
+        FILE *out = fopen(file, "w");
+        if (out) {
+            fprintf(out, "%s\n", url);
+            for (int y = 0; y < qr.size; y++) {
+                for (int x = 0; x < qr.size; x++) fputc(pc5_qr_dark(&qr, x, y) ? '1' : '0', out);
+                fputc('\n', out);
+            }
+            fclose(out);
+        }
+    }
+    static char big[5000];
+    memset(big, 'x', sizeof(big) - 1);
+    CHECK(pc5_qr_make(big, &qr) == -1 && !qr.size, "text too long for any code");
+
+    /* The crash message after a game crashed: Triangle shows the code, Back goes back. */
+    FakeConsole console = { 0 };
+    FakeNet net = { 0 };
+    Pc5Platform platform = { &console, { &net, fake_get }, fake_clock, fake_play, NULL, fake_notify, fake_time, 0 };
+    const char *roots[] = { usb, NULL };
+    Pc5Canvas canvas = { pc5_alloc(1920u * 1080u * 4u), 1920, 1080, 1920 };
+    Pc5Library library;
+    char logs[PC5_PATH], file[PC5_PATH], text[1024], kept[PC5_PATH];
+    pc5_library_load(root, &library);
+    CHECK(library.count > 0, "a game to crash");
+    if (!library.count || !canvas.px) { pc5_free(canvas.px); return; }
+    path(logs, sizeof(logs), "%s/logs", root);
+    pc5_mkdirs(logs);
+    path(file, sizeof(file), "%s/next.txt", logs);
+    write_text(file, "2\n");
+    snprintf(text, sizeof(text), "PW_REPORT/1 build=abc profile=%s cycle=1 pid=9 time=1792699000\n"
+             "REC seq=1 t=1.0 WINE wine: Unhandled page fault on read access to 00000000 at address 00401000 (thread 0024), "
+             "starting debugger...\nREC seq=2 t=2.0 PW_WINE64 session_end reason=wine-exit\n", library.games[0].id);
+    path(file, sizeof(file), "%s/session-0.log", logs);
+    write_text(file, text);
+    {
+        Pc5UiConfig config = { root, template_prefix, fonts, roots, NULL, NULL, NULL };
+        Pc5Ui *ui = pc5_ui_create(&config, &platform);
+        until_screen(ui, "message", &canvas);
+        CHECK(!strcmp(pc5_ui_screen(ui), "message"), "the crash told: %s", pc5_ui_screen(ui));
+        press(ui, PC5_KEY_TRIANGLE, &canvas);
+        CHECK(!strcmp(pc5_ui_screen(ui), "report"), "Triangle: Report on GitHub: %s", pc5_ui_screen(ui));
+        press(ui, PC5_KEY_BACK, &canvas);
+        CHECK(!strcmp(pc5_ui_screen(ui), "message"), "Back: the message again: %s", pc5_ui_screen(ui));
+        press(ui, PC5_KEY_ACCEPT, &canvas);
+        CHECK(!strcmp(pc5_ui_screen(ui), "library"), "then the library: %s", pc5_ui_screen(ui));
+        pc5_ui_destroy(ui);
+    }
+    CHECK(!pc5_logs_newest(root, library.games[0].id, kept, sizeof(kept)) && pc5_ends_with_ci(kept, ".zip"), "kept: %s", kept);
+    unlink(kept);
+    pc5_free(canvas.px);
+}
+
 int main(int argc, char **argv)
 {
     char fonts[PC5_PATH];
@@ -2433,6 +2670,7 @@ int main(int argc, char **argv)
     test_controls();
     test_settings();
     test_update();
+    test_zip();
     test_logs();
     test_cover_fill();
     test_prefix_media();
@@ -2441,9 +2679,11 @@ int main(int argc, char **argv)
     test_prefix_dxvk();
     test_dotnet();
     test_keyboard();
+    test_named_libraries();
     test_game(fonts);
     test_screens(fonts);
     test_tile_start(fonts);
+    test_report(fonts);
     printf("test_pc5: %d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

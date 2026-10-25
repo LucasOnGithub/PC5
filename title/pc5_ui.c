@@ -6,6 +6,8 @@
 #include "pc5_image.h"
 #include "pc5_library.h"
 #include "pc5_logs.h"
+#include "pc5_qr.h"
+#include "pc5_report.h"
 #include "pc5_settings.h"
 #include "pc5_source.h"
 #include "pc5_update.h"
@@ -36,14 +38,14 @@ enum { W = 1920, H = 1080, COVER_W = 400, COVER_H = 600, FLOOR_Y = 712, MARGIN =
 typedef enum Screen {
     S_START, S_COVERS, S_LIBRARY, S_SETTINGS, S_ABOUT, S_SCAN, S_SOURCES, S_READING, S_SEARCH, S_REVIEW,
     S_PROGRAMS, S_INSTALL, S_STOP, S_UNINSTALL_LIST, S_UNINSTALL_CONFIRM, S_REMOVING, S_MESSAGE, S_LAUNCH,
-    S_UPDATE, S_CHECKING, S_GAME_MENU, S_GAME_READING, S_QUEUE_READ, S_QUEUE, S_BUTTONS, S_KEYS
+    S_UPDATE, S_CHECKING, S_GAME_MENU, S_GAME_READING, S_QUEUE_READ, S_QUEUE, S_BUTTONS, S_KEYS, S_REPORT
 } Screen;
 
 static const char *const screen_names[] = { "start", "covers", "library", "settings", "about", "scan", "sources",
                                             "reading", "search", "review", "programs", "install", "stop",
                                             "uninstall-list", "uninstall-confirm", "removing", "message", "launch",
                                             "update", "checking", "game-menu", "game-reading", "queue-read", "queue",
-                                            "buttons", "keys" };
+                                            "buttons", "keys", "report" };
 
 /* One game of several being installed in a row. */
 typedef enum QueueState { Q_WAITING, Q_INSTALLED, Q_FAILED, Q_STOPPED, Q_SKIPPED } QueueState;
@@ -232,6 +234,11 @@ struct Pc5Ui {
 
     char message_title[160], message_body[700];
     int message_good;
+    int message_report;               /* the message is about a kept log: Triangle reports it */
+    Pc5LogIssue report;               /* Report on GitHub: the log, its game, the form's link as a QR code */
+    char report_game[PC5_NAME], report_url[PC5_REPORT_URL];
+    Pc5Qr report_qr;
+    Pc5Qr coffee_qr;                  /* About PC5: Buy Me a Coffee's page, made once */
     char launch_id[PC5_ID];
     char start[PC5_ID];               /* a home screen tile's game, until it is started */
     int removing_tiles;               /* the game being uninstalled had a tile, deleted with it */
@@ -304,6 +311,7 @@ static void message(Pc5Ui *ui, int good, const char *title, const char *body, Sc
     pc5_copy(ui->message_title, sizeof(ui->message_title), title);
     pc5_copy(ui->message_body, sizeof(ui->message_body), body);
     ui->message_good = good;
+    ui->message_report = 0;
     ui->back_to = back_to;
     go(ui, S_MESSAGE);
 }
@@ -1083,7 +1091,7 @@ static void setting_text(Pc5Ui *ui, SettingRow row, const char **label, char *ab
     case SR_KEEP_LOGS:
         *label = "Keep all logs";
         pc5_copy(about, about_size, set->keep_logs ? "Every session's log is kept for 7 days"
-                                                   : "Only the logs of sessions that went wrong, for 7 days");
+                                                   : "Sessions that went wrong, and each game's newest, for 7 days");
         pc5_copy(value, value_size, set->keep_logs ? "On" : "Off");
         break;
     case SR_ABOUT:
@@ -1333,6 +1341,21 @@ static void issue_message(Pc5Ui *ui)
         return;
     }
     message(ui, 0, title, body, S_LIBRARY);
+    /* Triangle: Report on GitHub, with this log. */
+    ui->report = *issue;
+    pc5_copy(ui->report_game, sizeof(ui->report_game), index >= 0 ? name : "");
+    ui->message_report = 1;
+}
+
+/* Report on GitHub for ui->report: the form's link, as a QR code. */
+static void report_open(Pc5Ui *ui)
+{
+    ui->report_qr.size = 0;
+    if (pc5_report_url(&ui->report, ui->report_game, ui->report_url, sizeof(ui->report_url)) ||
+        pc5_qr_make(ui->report_url, &ui->report_qr))
+        ui->report_url[0] = 0;
+    say(ui, "PC5 report log=%s link=%zu qr=%d", pc5_report_file(&ui->report), strlen(ui->report_url), ui->report_qr.size);
+    go(ui, S_REPORT);
 }
 
 /* From the start screens to the library, telling first what went wrong last time. */
@@ -1879,10 +1902,17 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
         }
         break;
     case S_MESSAGE:
+        if (ui->message_report && (k & PC5_KEY_TRIANGLE)) {
+            report_open(ui);
+            break;
+        }
         if (k & (accept | back)) {
             if (ui->back_to == S_LIBRARY && ui->issue_pending) issue_message(ui);
             else go(ui, ui->back_to);
         }
+        break;
+    case S_REPORT:
+        if (k & (accept | back)) go(ui, S_MESSAGE);
         break;
     case S_LAUNCH:
         if (!ui->drawn) break;
@@ -2397,9 +2427,13 @@ static void keys_dialog(Pc5Ui *ui, Pc5Canvas *c)
     hints(ui, c, (int)x + 60, (int)(y + h - 40), list, 2);
 }
 
+static int qr_draw(Pc5Canvas *c, const Pc5Qr *qr, int x, int y, int box);
+
+#define PC5_COFFEE "https://www.buymeacoffee.com/bornaradusin"
+
 static void about_screen(Pc5Ui *ui, Pc5Canvas *c)
 {
-    float w = 1180, h = 700, x = (W - w) / 2, y = (H - h) / 2;
+    float w = 1500, h = 700, x = (W - w) / 2, y = (H - h) / 2;
     char line[200], space[32];
     uint64_t free_bytes = 0;
     int ty = (int)y + 196;
@@ -2415,15 +2449,22 @@ static void about_screen(Pc5Ui *ui, Pc5Canvas *c)
     wordmark(ui, c, (int)x + 64, (int)y + 110);
     pc5_text(c, &ui->fonts, PC5_FACE_BODY, (int)x + 160, (int)y + 106, C_DIM,
              "version " PC5_VERSION " \xc2\xb7 " PC5_TITLE_ID, 0, 0);
+    /* Buy Me a Coffee, on the right: a code for a phone, the address under it. */
+    const int box = 300, cx = (int)(x + w) - box - 64, column = cx - 64 - ((int)x + 64);
+    if (!ui->coffee_qr.size) pc5_qr_make(PC5_COFFEE, &ui->coffee_qr);
+    pc5_text(c, &ui->fonts, PC5_FACE_LABEL, cx + box / 2, (int)y + 96, C_TEXT, "Like PC5?", box, 1);
+    qr_draw(c, &ui->coffee_qr, cx, (int)y + 124, box);
+    pc5_round_rect(c, (float)cx, y + 444, (float)box, 60, 30, 0xffffdd00u);
+    pc5_text(c, &ui->fonts, PC5_FACE_LABEL, cx + box / 2, (int)y + 484, 0xff0d0c22u, "Buy me a coffee", box - 24, 1);
+    pc5_text(c, &ui->fonts, PC5_FACE_SMALL, cx + box / 2, (int)y + 548, C_DIM, "buymeacoffee.com/bornaradusin", box + 100, 1);
     for (int i = 0; i < 3; i++)
-        ty += 42 * pc5_text_wrap(c, &ui->fonts, PC5_FACE_BODY, (int)x + 64, ty, (int)w - 128, 3, 42, C_TEXT,
-                                 paragraphs[i], 0) + 22;
+        ty += 42 * pc5_text_wrap(c, &ui->fonts, PC5_FACE_BODY, (int)x + 64, ty, column, 3, 42, C_TEXT, paragraphs[i], 0) + 22;
     snprintf(line, sizeof(line), "Games are kept in %.150s", ui->root);
-    pc5_text(c, &ui->fonts, PC5_FACE_BODY, (int)x + 64, ty + 20, C_DIM, line, (int)w - 128, 0);
+    pc5_text(c, &ui->fonts, PC5_FACE_BODY, (int)x + 64, ty + 20, C_DIM, line, column, 0);
     if (!pc5_free_bytes(ui->root, &free_bytes)) {
         pc5_size_text(free_bytes, space, sizeof(space));
         snprintf(line, sizeof(line), "%s free on the console", space);
-        pc5_text(c, &ui->fonts, PC5_FACE_BODY, (int)x + 64, ty + 68, C_DIM, line, (int)w - 128, 0);
+        pc5_text(c, &ui->fonts, PC5_FACE_BODY, (int)x + 64, ty + 68, C_DIM, line, column, 0);
     }
     Hint list[] = { { back_glyph(ui), "Back" } };
     hints(ui, c, (int)x + 64, (int)(y + h - 48), list, 1);
@@ -2702,8 +2743,63 @@ static void message_dialog(Pc5Ui *ui, Pc5Canvas *c)
     }
     pc5_text_wrap(c, &ui->fonts, PC5_FACE_HEAD, (int)x + 140, (int)y + 112, (int)w - 204, 2, 50, C_TEXT, ui->message_title, 0);
     pc5_text_wrap(c, &ui->fonts, PC5_FACE_BODY, (int)x + 140, (int)y + 190, (int)w - 204, 6, 42, C_DIM, ui->message_body, 0);
-    Hint list[] = { { accept_glyph(ui), "OK" } };
-    hints(ui, c, (int)x + 140, (int)(y + h - 48), list, 1);
+    Hint list[] = { { accept_glyph(ui), "OK" }, { G_TRIANGLE, "Report on GitHub" } };
+    hints(ui, c, (int)x + 140, (int)(y + h - 48), list, ui->message_report ? 2 : 1);
+}
+
+/* A rectangle of one color, pixel for pixel (the QR code's modules, which must stay sharp). */
+static void fill(Pc5Canvas *c, int x, int y, int w, int h, uint32_t color)
+{
+    for (int py = y < 0 ? 0 : y; py < y + h && py < c->h; py++)
+        for (int px = x < 0 ? 0 : x; px < x + w && px < c->w; px++) c->px[(size_t)py * (size_t)c->stride + (size_t)px] = color;
+}
+
+/* A QR code, black on white with its quiet zone, as large as fits a box of that side
+ * centred at its place. Returns the side drawn (0: none). */
+static int qr_draw(Pc5Canvas *c, const Pc5Qr *qr, int x, int y, int box)
+{
+    if (!qr->size) return 0;
+    int modules = qr->size + 8, scale = box / modules, side = modules * scale;
+    if (scale < 1) return 0;
+    x += (box - side) / 2;
+    y += (box - side) / 2;
+    fill(c, x, y, side, side, 0xffffffffu);
+    for (int my = 0; my < qr->size; my++)
+        for (int mx = 0; mx < qr->size;) {
+            int run = 0;
+            while (mx + run < qr->size && pc5_qr_dark(qr, mx + run, my)) run++;
+            if (run) fill(c, x + (4 + mx) * scale, y + (4 + my) * scale, run * scale, scale, 0xff000000u);
+            mx += run ? run : 1;
+        }
+    return side;
+}
+
+/* Report on GitHub: the form's link as a QR code, and what to do with it. */
+static void report_screen(Pc5Ui *ui, Pc5Canvas *c)
+{
+    float w = 1500, h = 700, x = (W - w) / 2, y = (H - h) / 2;
+    char line[400], where[PC5_PATH * 2 + 80];
+    dim(c, 170);
+    panel(c, x, y, w, h);
+    pc5_text(c, &ui->fonts, PC5_FACE_HEAD, (int)x + 80, (int)y + 100, C_TEXT, "Report on GitHub", 0, 0);
+    int box = 560, qx = (int)(x + w) - box - 70, qy = (int)y + 70;
+    qr_draw(c, &ui->report_qr, qx, qy, box);
+    int tx = (int)x + 80, tw = qx - tx - 60;
+    const char *game = ui->report_game[0] ? ui->report_game : "The game";
+    if (ui->report_qr.size)
+        snprintf(line, sizeof(line), "1. Scan the code with your phone. GitHub's form for a new issue opens, filled in with %s, "
+                 "PC5's version and what PC5 saw.", game);
+    else
+        snprintf(line, sizeof(line), "1. On your phone or computer, open %s and choose New issue.", "github.com/bornaradusin/PC5/issues");
+    int at = (int)y + 190;
+    at += 42 * pc5_text_wrap(c, &ui->fonts, PC5_FACE_BODY, tx, at, tw, 4, 42, C_DIM, line, 0) + 24;
+    snprintf(where, sizeof(where), "2. Copy %s off the console, from %s/logs, as you copy files to it.", pc5_report_file(&ui->report),
+             ui->root);
+    at += 42 * pc5_text_wrap(c, &ui->fonts, PC5_FACE_BODY, tx, at, tw, 4, 42, C_DIM, where, 0) + 24;
+    pc5_text_wrap(c, &ui->fonts, PC5_FACE_BODY, tx, at, tw, 3, 42, C_DIM,
+                  "3. Say what happened, attach the zip, and submit. You need a GitHub account.", 0);
+    Hint list[] = { { back_glyph(ui), "Back" } };
+    hints(ui, c, tx, (int)(y + h - 48), list, 1);
 }
 
 static void start_screen(Pc5Ui *ui, Pc5Canvas *c, const char *line, int can_skip)
@@ -2840,6 +2936,7 @@ void pc5_ui_draw(Pc5Ui *ui, Pc5Canvas *c)
         }
         break;
     case S_MESSAGE: message_dialog(ui, c); break;
+    case S_REPORT: library_screen(ui, c); report_screen(ui, c); break;
     case S_LAUNCH: {
         int index = pc5_library_find(&ui->library, ui->launch_id);
         snprintf(line, sizeof(line), "Starting %s", index >= 0 ? ui->library.games[index].title : "the game");

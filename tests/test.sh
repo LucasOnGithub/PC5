@@ -26,10 +26,17 @@ common=(-std=c11 -Wall -Wextra -Wpedantic -Werror -D_DEFAULT_SOURCE -Ititle -I"$
 cc "${common[@]}" -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -DPC5_HEAP_ONLY \
     tests/test_pc5.c title/pc5_base.c title/pc5_controls.c title/pc5_cover.c title/pc5_draw.c title/pc5_game.c title/pc5_image.c title/pc5_json.c \
     title/pc5_library.c title/pc5_logs.c title/pc5_matrix.c title/pc5_pe.c title/pc5_settings.c title/pc5_source.c \
-    title/pc5_stb.c title/pc5_ui.c title/pc5_update.c title/pc5_home.c title/pc5_psfwd.c \
+    title/pc5_stb.c title/pc5_ui.c title/pc5_update.c title/pc5_home.c title/pc5_psfwd.c title/pc5_zip.c title/pc5_qr.c title/pc5_report.c \
     "${upstream[@]}" -lm \
     -o "$out/test_pc5"
 "$out/test_pc5" "$out/work" tests/fixtures "$out/programs" "$out/covers" "$out/fonts.bin"
+# The zip PC5 wrote (pc5_zip.c) opens as any zip does, with what was put in it.
+python3 -c "import sys, zipfile
+z = zipfile.ZipFile(sys.argv[1]); assert z.testzip() is None
+assert z.read('text.log') == bytes(b'PC5 log line, repeated.\\n'[i % 24] for i in range(40000))
+assert z.read('game/users/prospero/noise.dmp') == bytes((((i * 2654435761) & 0xffffffff) >> 13) & 255 for i in range(3000))
+assert z.read('empty.txt') == b'' and z.read('k\\u00e4ytt\\u00e4j\\u00e4.txt') == b'x'
+for kept in sys.argv[2:]: assert zipfile.ZipFile(kept).testzip() is None" "$out/work/zip-test.zip" "$out"/work/logs-root/logs/*.zip
 
 # The HTTPS client, with mbedTLS built for this computer, against a local server: a
 # certificate from a test CA (trusted), one from nobody (refused), redirects, chunks.
@@ -75,7 +82,7 @@ if [[ ${1:-} == --shots ]]; then
     cc "${common[@]}" -O2 tests/shots.c title/pc5_base.c title/pc5_controls.c title/pc5_cover.c title/pc5_draw.c title/pc5_game.c \
         title/pc5_image.c title/pc5_json.c title/pc5_library.c title/pc5_logs.c title/pc5_matrix.c title/pc5_pe.c \
         title/pc5_settings.c title/pc5_source.c title/pc5_stb.c title/pc5_ui.c title/pc5_update.c title/pc5_home.c \
-        title/pc5_psfwd.c "${upstream[@]}" -lm -o "$out/draw-shots"
+        title/pc5_psfwd.c title/pc5_zip.c title/pc5_qr.c title/pc5_report.c "${upstream[@]}" -lm -o "$out/draw-shots"
     mkdir -p "$out/shots" "$out/shotwork"
     "$out/draw-shots" "$out/shots" "$out/shotwork" "$out/covers" "$out/programs" "$out/fonts.bin"
     python3 -c "import sys, pathlib; from PIL import Image

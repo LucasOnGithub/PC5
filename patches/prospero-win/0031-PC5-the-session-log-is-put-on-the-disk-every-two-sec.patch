@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bornaradusin <bornaradusin@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 14:55:00 +0000
+Subject: [PATCH] PC5: the session log is put on the disk every two seconds
+
+The writer saved records every 100 ms, but only the end of a session and
+the filesystem's own flushes put them on the disk: a console that froze
+during a game and was switched off lost the end of the log, the part that
+says what happened. The writer now syncs the session file at most every
+two seconds while records come, and each chunk before it rotates.
+---
+ native/pw_diagnostics.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/native/pw_diagnostics.c b/native/pw_diagnostics.c
+index 731b9a8..e3b2a68 100644
+--- a/native/pw_diagnostics.c
++++ b/native/pw_diagnostics.c
+@@ -56,6 +56,18 @@ static uint64_t retry_interval_ns = 5000000000ull;
+ /* The space a chunk keeps for the signal path: pw_diagnostics_emergency()
+  * writes up to 164 bytes past what the writer counted. */
+ enum { PW_DIAGNOSTICS_RESERVE = 192, PW_DIAGNOSTICS_CADENCE_NS = 100000000 };
++/* How often the writer has the session file put on the disk (fsync): a
++ * console that freezes and is switched off keeps the log up to then, not
++ * only what the filesystem had flushed by itself. Writer thread only. */
++#define PW_DIAGNOSTICS_SYNC_NS 2000000000ull
++static uint64_t last_sync;
++
++static uint64_t monotonic_ns(void)
++{
++    struct timespec clock;
++    clock_gettime(CLOCK_MONOTONIC, &clock);
++    return (uint64_t)clock.tv_sec * 1000000000ull + (uint64_t)clock.tv_nsec;
++}
+ 
+ static int put_all(int target, const char *data, size_t length)
+ {
+@@ -99,6 +111,7 @@ static void disk_failed(int error)
+  * records stay in order across them. */
+ static int rotate(void)
+ {
++    (void)fsync(fd);
+     close(fd); fd = -1;
+     if (rename(current, rotations++ ? previous : first) != 0) { disk_failed(errno); return -1; }
+     fd = open(current, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+@@ -192,6 +205,10 @@ static void pass(void)
+     writing = 1;
+     pthread_mutex_unlock(&lock);
+     save(draining, length);
++    if (fd >= 0 && length) {
++        uint64_t now = monotonic_ns();
++        if (now - last_sync >= PW_DIAGNOSTICS_SYNC_NS) { (void)fsync(fd); last_sync = now; }
++    }
+     send_records(draining, length);
+     pthread_mutex_lock(&lock);
+     writing = 0;

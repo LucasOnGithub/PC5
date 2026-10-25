@@ -177,6 +177,50 @@ static Pc5Ui *open_ui(const char *root, int network)
     return ui;
 }
 
+/* The console's clock, for the logs PC5 files when it opens. */
+static int64_t shot_time(void *context, int *offset_s)
+{
+    (void)context;
+    if (offset_s) *offset_s = 0;
+    return 1793000000;
+}
+
+/* PC5 opening after a game crashed: its message, then Report on GitHub. */
+static void crash_shots(const char *root)
+{
+    static const char *roots[2];
+    static char usb[PC5_PATH], template_prefix[PC5_PATH];
+    char file[PC5_PATH], text[2048];
+    Pc5Library library;
+    Pc5Platform platform = { NULL, { NULL, offline }, fake_clock, fake_play, NULL, NULL, shot_time, 0 };
+
+    make_library(root, 3, 1);
+    pc5_library_load(root, &library);
+    if (!library.count) return;
+    fmt(file, sizeof(file), "%s/logs/next.txt", root);
+    put(file, "2\n");
+    fmt(text, sizeof(text), "PW_REPORT/1 build=abc profile=%s cycle=1 pid=9 time=1792999000\n"
+        "REC seq=1 t=1.0 PW_WINE64 ntdll=/app0/ntdll.prx prefix=/data/prospero-win/prefixes/%s exe=C:\\Games\\%s\\Game.exe\n"
+        "REC seq=2 t=1.1 PC5 system firmware=12.40 data_free=250.0GB version=" PC5_VERSION "\n"
+        "REC seq=3 t=60.0 WINE wine: Unhandled page fault on read access to 0000000000000000 at address 000000014001D11A "
+        "(thread 0024), handed to the program's own crash handler\n", library.games[0].id, library.games[0].id,
+        library.games[0].title);
+    fmt(file, sizeof(file), "%s/logs/session-0.log", root);
+    put(file, text);
+    fmt(usb, sizeof(usb), "%s/usb0", work);
+    roots[0] = usb;
+    fmt(template_prefix, sizeof(template_prefix), "%s/app0/pc5/prefix", work);
+    Pc5UiConfig config = { root, template_prefix, fonts, roots, NULL, NULL, NULL };
+    Pc5Ui *ui = pc5_ui_create(&config, &platform);
+    until(ui, "message");
+    settle(ui);
+    save("17-issue-crashed");
+    step(ui, PC5_KEY_TRIANGLE, 1);
+    settle(ui);
+    save("17b-report-on-github");
+    pc5_ui_destroy(ui);
+}
+
 int main(int argc, char **argv)
 {
     char root[PC5_PATH], file[PC5_PATH], from[PC5_PATH];
@@ -415,6 +459,7 @@ int main(int argc, char **argv)
         }
         pc5_game_end(&game, -1);
     }
+    crash_shots(root);
     pc5_free(canvas.px);
     pc5_buf_free(&names);
     return 0;

@@ -1,8 +1,10 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
-/* PC5: keeping logs only when something went wrong (pc5_logs.h). */
+/* PC5: keeping logs for a report (pc5_logs.h). */
 #include "pc5_logs.h"
+#include "pc5_zip.h"
 
 #include <dirent.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,6 +16,15 @@
  * session also has session-N.start.log (how it began) and
  * session-N.previous.log (the part before the newest). */
 enum { SESSIONS = 8, NO_PICTURE_S = 60 };
+
+/* The game's own files kept with its log: a log's last 2 MiB, a dump of up
+ * to 16 MiB, 32 files and 40 MiB in all, found among 20000 entries at most,
+ * written from just before the session began to a minute after it ended. */
+enum {
+    GAME_TEXT_MAX = 2 << 20, GAME_DUMP_MAX = 16 << 20, GAME_FILES_MAX = 32, GAME_DEPTH_MAX = 8,
+    GAME_ENTRIES_MAX = 20000, GAME_BEFORE_S = 2, GAME_AFTER_S = 60,
+};
+#define GAME_BYTES_MAX (40ull << 20)
 
 /* The rest of the line after needle, if the line holds it. */
 static const char *after(const char *line, const char *end, const char *needle)
@@ -33,6 +44,15 @@ static void line_text(const char *from, const char *end, char *out, size_t size)
     out[n] = 0;
 }
 
+/* A word of the line (up to the next space). */
+static void word(const char *from, const char *end, char *out, size_t size)
+{
+    size_t n = 0;
+    while (from + n < end && from[n] != ' ' && from[n] != '\r' && n + 1 < size) n++;
+    memcpy(out, from, n);
+    out[n] = 0;
+}
+
 Pc5LogProblem pc5_log_classify(const char *text, size_t length, Pc5LogIssue *issue)
 {
     const char *end_of_text = text + length, *line = text;
@@ -46,10 +66,7 @@ Pc5LogProblem pc5_log_classify(const char *text, size_t length, Pc5LogIssue *iss
         const char *end = memchr(line, '\n', (size_t)(end_of_text - line)), *found;
         if (!end) end = end_of_text;
         if (line == text && (found = after(line, end, " profile="))) {
-            size_t n = 0;
-            while (found + n < end && found[n] != ' ' && n + 1 < sizeof(issue->profile)) n++;
-            memcpy(issue->profile, found, n);
-            issue->profile[n] = 0;
+            word(found, end, issue->profile, sizeof(issue->profile));
             if ((found = after(line, end, " time="))) issue->time = strtoll(found, NULL, 10);
         }
         if ((found = after(line, end, " t="))) {
@@ -79,8 +96,18 @@ Pc5LogProblem pc5_log_classify(const char *text, size_t length, Pc5LogIssue *iss
             const char *shown = after(line, end, " shown="), *vk = after(line, end, " vk_shown=");
             if ((shown && strtoull(shown, NULL, 10) > 0) || (vk && strtoull(vk, NULL, 10) > 0)) picture = 1;
         }
+        /* Where the game is: its prefix, its program, and the console it ran on. */
+        if (!issue->prefix[0] && after(line, end, "PW_WINE64 profile id=") && (found = after(line, end, " prefix=")))
+            word(found, end, issue->prefix, sizeof(issue->prefix));
+        if (!issue->exe[0] && after(line, end, "PW_WINE64 ntdll=") && (found = after(line, end, " exe=")))
+            line_text(found, end, issue->exe, sizeof(issue->exe));
+        if (!issue->firmware[0] && after(line, end, "PC5 system ") && (found = after(line, end, " firmware=")))
+            word(found, end, issue->firmware, sizeof(issue->firmware));
         line = end + 1;
     }
+    issue->closed = ended;
+    issue->ended = issue->time;
+    if (first_t >= 0 && last_t > first_t) issue->ended += (int64_t)(last_t - first_t);
     if (!strcmp(issue->profile, "launcher")) {
         if (pc5_problem) {
             issue->problem = PC5_LOG_PC5_PROBLEM;
@@ -100,9 +127,21 @@ Pc5LogProblem pc5_log_classify(const char *text, size_t length, Pc5LogIssue *iss
         /* A game closed with the PS button soon after starting looks the same when it
          * ended unasked (no end line): both are reported, a quick close rarely. */
         issue->problem = PC5_LOG_NO_PICTURE;
-        (void)ended;
     }
     return issue->problem;
+}
+
+const char *pc5_log_problem_text(Pc5LogProblem problem)
+{
+    switch (problem) {
+    case PC5_LOG_GAME_CRASHED: return "stopped with an error";
+    case PC5_LOG_NO_PICTURE: return "closed before showing anything";
+    case PC5_LOG_FORCED: return "had to be closed";
+    case PC5_LOG_CRASHED: return "ended unexpectedly";
+    case PC5_LOG_PC5_PROBLEM: return "PC5 logged a problem";
+    case PC5_LOG_FINE: break;
+    }
+    return "nothing went wrong that PC5 could see";
 }
 
 /* ---- tidying ------------------------------------------------------------------------ */
@@ -164,38 +203,331 @@ static int read_session(const char *logs, int session, Pc5Buf *text)
     return 0;
 }
 
-/* Moves session-N.log (and its .previous.log and .start.log, the session's
- * earlier parts) to kind-<when>_<profile>.log, -earlier.log and -start.log;
- * the new path in out. */
-static int keep(const char *logs, int session, const char *kind, const Pc5LogIssue *issue, int offset_s, int64_t now,
-                char *out, size_t size)
-{
-    char when[32], from[PC5_PATH], to[PC5_PATH];
+/* ---- the game's own files ------------------------------------------------------------- */
 
-    if (stamp(issue->time ? issue->time : now, offset_s, when, sizeof(when))) return -1;
+static int contains_ci(const char *text, const char *needle)
+{
+    size_t n = strlen(needle);
+    for (; *text; text++) {
+        size_t i = 0;
+        while (i < n && text[i] && pc5_lower((unsigned char)text[i]) == needle[i]) i++;
+        if (i == n) return 1;
+    }
+    return 0;
+}
+
+/* What a file of this name is to a report: 1 a log (its end is enough), 2 a
+ * crash dump (whole or not at all), 0 nothing. */
+static int game_file_kind(const char *name)
+{
+    if (pc5_ends_with_ci(name, ".dmp") || pc5_ends_with_ci(name, ".mdmp")) return 2;
+    if (pc5_ends_with_ci(name, ".log")) return 1;
+    if (pc5_ends_with_ci(name, ".txt"))
+        return contains_ci(name, "log") || contains_ci(name, "crash") || contains_ci(name, "error");
+    if (pc5_ends_with_ci(name, ".html") || pc5_ends_with_ci(name, ".htm"))
+        return contains_ci(name, "log") || contains_ci(name, "crash");
+    if (pc5_ends_with_ci(name, ".xml") || pc5_ends_with_ci(name, ".json") || pc5_ends_with_ci(name, ".runtime-xml"))
+        return contains_ci(name, "crash");
+    return 0;
+}
+
+typedef struct Collect {
+    Pc5Zip *zip;
+    Pc5Buf *about;
+    int64_t from, to;
+    int offset_s;
+    int files, entries;
+    uint64_t bytes;
+} Collect;
+
+/* The last max bytes of a file (all of it when it is smaller); *cut when the start was left out. */
+static int read_end(const char *path, uint64_t size, size_t max, Pc5Buf *out, int *cut)
+{
+    int fd = open(path, O_RDONLY);
+    size_t want = size > max ? max : (size_t)size;
+    *cut = size > max;
+    if (fd < 0) return -1;
+    if ((*cut && lseek(fd, (off_t)(size - want), SEEK_SET) < 0) || pc5_buf_reserve(out, want)) {
+        close(fd);
+        return -1;
+    }
+    while (out->len < want) {
+        ssize_t n = read(fd, out->data + out->len, want - out->len);
+        if (n <= 0) break;
+        out->len += (size_t)n;
+    }
+    close(fd);
+    return 0;
+}
+
+static void windows_path(const char *rel, char *out, size_t size)
+{
+    size_t n = 0;
+    if (size < 4) return;
+    out[n++] = 'C'; out[n++] = ':'; out[n++] = '\\';
+    for (; *rel && n + 1 < size; rel++) out[n++] = *rel == '/' ? '\\' : *rel;
+    out[n] = 0;
+}
+
+static void walk(Collect *c, const char *dir, const char *rel, int depth)
+{
+    DIR *d = opendir(dir);
+    struct dirent *entry;
+
+    if (!d) return;
+    while ((entry = readdir(d)) && c->entries < GAME_ENTRIES_MAX && c->files < GAME_FILES_MAX) {
+        char full[PC5_PATH], inner[PC5_PATH], shown[PC5_PATH];
+        struct stat st;
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        c->entries++;
+        if (pc5_join(full, sizeof(full), dir, entry->d_name) ||
+            pc5_format(inner, sizeof(inner), "%s%s%s", rel, rel[0] ? "/" : "", entry->d_name) || stat(full, &st))
+            continue;
+        if (S_ISDIR(st.st_mode)) {
+            if (depth < GAME_DEPTH_MAX) walk(c, full, inner, depth + 1);
+            continue;
+        }
+        int kind = S_ISREG(st.st_mode) ? game_file_kind(entry->d_name) : 0;
+        if (!kind || (int64_t)st.st_mtime < c->from || (int64_t)st.st_mtime > c->to) continue;
+        windows_path(inner, shown, sizeof(shown));
+        uint64_t size = (uint64_t)st.st_size;
+        char amount[32];
+        pc5_size_text(size, amount, sizeof(amount));
+        if (kind == 2 && size > GAME_DUMP_MAX) {
+            pc5_buf_printf(c->about, "  left out, too large to attach: %s (%s)\n", shown, amount);
+            continue;
+        }
+        uint64_t taken = kind == 1 && size > GAME_TEXT_MAX ? GAME_TEXT_MAX : size;
+        if (c->bytes + taken > GAME_BYTES_MAX) {
+            pc5_buf_printf(c->about, "  left out, no room: %s (%s)\n", shown, amount);
+            continue;
+        }
+        Pc5Buf data = { 0 };
+        char name[PC5_PATH + 8];
+        int cut = 0;
+        if (!read_end(full, size, kind == 1 ? GAME_TEXT_MAX : GAME_DUMP_MAX, &data, &cut) &&
+            !pc5_format(name, sizeof(name), "game/%s", inner) &&
+            !pc5_zip_add(c->zip, name, data.data, data.len, (int64_t)st.st_mtime + c->offset_s)) {
+            c->files++;
+            c->bytes += data.len;
+            pc5_buf_printf(c->about, "  %s (%s%s)\n", shown, amount, cut ? ", its last 2 MB" : "");
+        }
+        pc5_buf_free(&data);
+    }
+    closedir(d);
+}
+
+/* Where the game's files are: its prefix's drive_c, under root/prefixes (the
+ * name the log gives, so the same log read anywhere finds them). */
+static int game_drive(const char *root, const Pc5LogIssue *issue, char *out, size_t size)
+{
+    const char *name = strrchr(issue->prefix, '/');
+    name = name ? name + 1 : issue->prefix;
+    if (!name[0]) name = issue->profile;
+    if (!name[0] || !strcmp(name, "default") || strstr(name, "..")) return -1;
+    return pc5_format(out, size, "%s/prefixes/%s/drive_c", root, name);
+}
+
+/* The folder the game's program is in, under drive_c: C:\Games\Name\x64\game.exe gives
+ * Games/Name (its top two folders, where a game writes beside itself). */
+static int game_folder(const char *exe, char *out, size_t size)
+{
+    const char *p = exe;
+    size_t n = 0;
+    int parts = 0;
+    if (pc5_lower((unsigned char)p[0]) < 'a' || pc5_lower((unsigned char)p[0]) > 'z' || p[1] != ':' || p[2] != '\\')
+        return -1;
+    for (p += 3; *p && n + 1 < size; p++) {
+        if (*p == '\\') {
+            if (++parts == 2) break;
+            out[n++] = '/';
+        } else {
+            out[n++] = *p;
+        }
+    }
+    out[n] = 0;
+    return parts >= 1 && n && !strstr(out, "..") ? 0 : -1;
+}
+
+static void collect_game_files(const char *root, Pc5LogIssue *issue, Pc5Zip *zip, Pc5Buf *about, int offset_s)
+{
+    char drive[PC5_PATH], dir[PC5_PATH], folder[PC5_PATH];
+    Collect c = { zip, about, issue->time - GAME_BEFORE_S, issue->ended + GAME_AFTER_S, offset_s, 0, 0, 0 };
+
+    if (game_drive(root, issue, drive, sizeof(drive)) || !pc5_is_dir(drive)) return;
+    pc5_buf_puts(about, "\nThe game's own files, written while it ran:\n");
+    size_t before = about->len;
+    if (!pc5_join(dir, sizeof(dir), drive, "users")) walk(&c, dir, "users", 1);
+    if (!game_folder(issue->exe, folder, sizeof(folder)) && strncmp(folder, "users/", 6) &&
+        !pc5_join(dir, sizeof(dir), drive, folder))
+        walk(&c, dir, folder, 2);
+    if (about->len == before) pc5_buf_puts(about, "  none\n");
+    issue->files = c.files;
+}
+
+/* ---- keeping a session ---------------------------------------------------------------- */
+
+static void about_page(Pc5Buf *about, const Pc5LogIssue *issue, const char *when, const char *base)
+{
+    pc5_buf_printf(about, "Kept by PC5 %s for a report: https://github.com/bornaradusin/PC5/issues\n\n", PC5_VERSION);
+    if (!strcmp(issue->profile, "launcher")) pc5_buf_printf(about, "PC5's own session, begun %s.\n", when);
+    else pc5_buf_printf(about, "The game %s, begun %s (the console's clock).\n", issue->profile, when);
+    if (issue->exe[0]) pc5_buf_printf(about, "Program: %s\n", issue->exe);
+    if (issue->firmware[0]) pc5_buf_printf(about, "Console firmware: %s\n", issue->firmware);
+    pc5_buf_printf(about, "What PC5 saw: %s%s%s\n", pc5_log_problem_text(issue->problem), issue->detail[0] ? ": " : "",
+                   issue->detail);
+    if (!issue->closed)
+        pc5_buf_puts(about, "Its log has no end line: it was closed with the PS button, or the console stopped while it ran.\n");
+    pc5_buf_printf(about, "\nPC5's log: %s.log, with %s-earlier.log and %s-start.log when the session was long.\n", base, base,
+                   base);
+}
+
+static int part_path(const char *logs, int session, const char *part, char *out, size_t size)
+{
+    return pc5_format(out, size, "%s/session-%d.%slog", logs, session, part);
+}
+
+/* The session's parts as plain files, kind-<when>_<profile>.log, -earlier.log and
+ * -start.log: when a zip can't be written. */
+static int keep_plain(const char *logs, int session, const char *base, char *out, size_t size)
+{
+    static const char *const parts[][2] = { { "", "" }, { "previous.", "-earlier" }, { "start.", "-start" } };
+    char from[PC5_PATH], to[PC5_PATH];
+    for (int i = 0; i < 3; i++) {
+        if (part_path(logs, session, parts[i][0], from, sizeof(from)) ||
+            pc5_format(to, sizeof(to), "%s/%s%s.log", logs, base, parts[i][1]))
+            return -1;
+        if (!pc5_exists(from)) continue;
+        if (rename(from, to)) return i ? 0 : -1;
+        if (!i) pc5_copy(out, size, to);
+    }
+    return 0;
+}
+
+/* Keeps session N as kind-<when>_<profile>.zip: its log's parts, the files the game wrote
+ * while it ran, and a page saying what PC5 saw. The path in issue->file. */
+static int keep(const char *root, const char *logs, int session, const char *kind, Pc5LogIssue *issue, int offset_s,
+                int64_t now)
+{
+    static const char *const parts[][2] = { { "start.", "-start" }, { "previous.", "-earlier" }, { "", "" } };
+    char when[32], base[PC5_PATH], zip_path[PC5_PATH], log_path[PC5_PATH], when_text[48];
+    Pc5Buf about = { 0 };
+    Pc5Zip zip;
+    int64_t at = issue->time ? issue->time : now;
+
+    if (stamp(at, offset_s, when, sizeof(when))) return -1;
     for (int n = 1; n < 100; n++) {
         char suffix[8] = "";
         if (n > 1) snprintf(suffix, sizeof(suffix), "-%d", n);
-        if (pc5_format(to, sizeof(to), "%s/%s-%s_%s%s.log", logs, kind, when, issue->profile, suffix)) return -1;
-        if (!pc5_exists(to)) break;
+        if (pc5_format(base, sizeof(base), "%s-%s_%s%s", kind, when, issue->profile, suffix) ||
+            pc5_format(zip_path, sizeof(zip_path), "%s/%s.zip", logs, base) ||
+            pc5_format(log_path, sizeof(log_path), "%s/%s.log", logs, base))
+            return -1;
+        if (!pc5_exists(zip_path) && !pc5_exists(log_path)) break;
     }
-    if (pc5_format(from, sizeof(from), "%s/session-%d.log", logs, session) || rename(from, to)) return -1;
-    pc5_copy(out, size, to);
-    static const char *const parts[][2] = { { "previous.", "-earlier" }, { "start.", "-start" } };
-    for (int i = 0; i < 2; i++)
-        if (!pc5_format(from, sizeof(from), "%s/session-%d.%slog", logs, session, parts[i][0]) && pc5_exists(from)) {
-            char earlier[PC5_PATH];
-            size_t n = strlen(to);
-            if (n > 4 && !pc5_format(earlier, sizeof(earlier), "%.*s%s.log", (int)(n - 4), to, parts[i][1]))
-                rename(from, earlier);
+    pc5_copy(when_text, sizeof(when_text), when);
+    if (strlen(when_text) == 16) { when_text[10] = ' '; when_text[13] = ':'; }
+
+    if (!pc5_zip_open(&zip, zip_path)) {
+        int failed = 0;
+        for (int i = 0; i < 3 && !failed; i++) {
+            char from[PC5_PATH], name[PC5_PATH + 16];
+            Pc5Buf data = { 0 };
+            struct stat st;
+            if (part_path(logs, session, parts[i][0], from, sizeof(from)) || stat(from, &st)) continue;
+            failed = pc5_read_file(from, &data, 64u << 20) || pc5_format(name, sizeof(name), "%s%s.log", base, parts[i][1]) ||
+                     pc5_zip_add(&zip, name, data.data, data.len, (int64_t)st.st_mtime + offset_s);
+            pc5_buf_free(&data);
         }
+        if (!failed) {
+            about_page(&about, issue, when_text, base);
+            if (strcmp(issue->profile, "launcher")) collect_game_files(root, issue, &zip, &about, offset_s);
+            failed = pc5_zip_add(&zip, "about.txt", about.data, about.len, now + offset_s);
+        }
+        pc5_buf_free(&about);
+        if (!failed && !pc5_zip_close(&zip)) {
+            for (int i = 0; i < 3; i++) {
+                char from[PC5_PATH];
+                if (!part_path(logs, session, parts[i][0], from, sizeof(from))) unlink(from);
+            }
+            pc5_copy(issue->file, sizeof(issue->file), zip_path);
+            return 0;
+        }
+        if (failed) pc5_zip_abandon(&zip);
+    }
+    issue->files = 0;
+    return keep_plain(logs, session, base, issue->file, sizeof(issue->file));
+}
+
+/* A kept log's name: kind-YYYY-MM-DD_HH-MM_<profile>[-N] then .zip, .log, -earlier.log or
+ * -start.log. Its time in when (16 characters) and 1 when it is profile's. */
+static int kept_for(const char *name, const char *kind, const char *profile, char when[17])
+{
+    size_t k = strlen(kind), p = strlen(profile);
+    static const char *const ends[] = { ".zip", ".log", "-earlier.log", "-start.log" };
+    if (strncmp(name, kind, k) || name[k] != '-' || strlen(name) < k + 18 || name[k + 17] != '_') return 0;
+    memcpy(when, name + k + 1, 16);
+    when[16] = 0;
+    const char *rest = name + k + 18;
+    if (strncmp(rest, profile, p)) return 0;
+    rest += p;
+    if (rest[0] == '-' && rest[1] >= '0' && rest[1] <= '9') {
+        const char *digits = rest + 1;
+        while (*digits >= '0' && *digits <= '9') digits++;
+        for (int i = 0; i < 4; i++)
+            if (!strcmp(digits, ends[i])) return 1;
+    }
+    for (int i = 0; i < 4; i++)
+        if (!strcmp(rest, ends[i])) return 1;
     return 0;
+}
+
+/* Of a game's logs kept as log-... (it went well), only the newest stays. */
+static void keep_newest(const char *logs, const char *profile)
+{
+    char newest[17] = "", when[17], path[PC5_PATH];
+    DIR *dir;
+    struct dirent *entry;
+
+    for (int pass = 0; pass < 2; pass++) {
+        if (!(dir = opendir(logs))) return;
+        while ((entry = readdir(dir))) {
+            if (!kept_for(entry->d_name, "log", profile, when)) continue;
+            if (!pass) {
+                if (strcmp(when, newest) > 0) memcpy(newest, when, sizeof(newest));
+            } else if (strcmp(when, newest) < 0 && !pc5_join(path, sizeof(path), logs, entry->d_name)) {
+                unlink(path);
+            }
+        }
+        closedir(dir);
+    }
+}
+
+int pc5_logs_newest(const char *root, const char *profile, char *out, size_t size)
+{
+    char logs[PC5_PATH], when[17], best[17] = "", name[PC5_PATH] = "";
+    DIR *dir;
+    struct dirent *entry;
+
+    if (pc5_format(logs, sizeof(logs), "%s/logs", root) || !(dir = opendir(logs))) return -1;
+    while ((entry = readdir(dir))) {
+        const char *n = entry->d_name;
+        if (pc5_ends_with_ci(n, "-earlier.log") || pc5_ends_with_ci(n, "-start.log")) continue;
+        if ((kept_for(n, "issue", profile, when) || kept_for(n, "log", profile, when)) &&
+            (strcmp(when, best) > 0 || (!strcmp(when, best) && pc5_ends_with_ci(n, ".zip")))) {
+            memcpy(best, when, sizeof(best));
+            pc5_copy(name, sizeof(name), n);
+        }
+    }
+    closedir(dir);
+    return name[0] ? pc5_join(out, size, logs, name) : -1;
 }
 
 int pc5_logs_tidy(const char *root, int keep_all, int64_t now, int offset_s, Pc5LogIssue *newest)
 {
     char logs[PC5_PATH], path[PC5_PATH], marker[PC5_PATH];
-    int current, issues = 0;
+    char played[SESSIONS][PC5_ID];
+    int current, issues = 0, games = 0;
     DIR *dir;
     struct dirent *entry;
 
@@ -218,19 +550,24 @@ int pc5_logs_tidy(const char *root, int keep_all, int64_t now, int offset_s, Pc5
             if (!issue.problem) issue.problem = PC5_LOG_CRASHED;
             unlink(marker);
         }
+        int game = strcmp(issue.profile, "launcher") != 0;
         if (issue.problem) {
-            if (!keep(logs, session, "issue", &issue, offset_s, now, issue.file, sizeof(issue.file))) {
+            if (!keep(root, logs, session, "issue", &issue, offset_s, now)) {
                 issues++;
                 if (newest && issue.time >= newest->time) *newest = issue;
             }
-        } else if (keep_all) {
-            keep(logs, session, "log", &issue, offset_s, now, issue.file, sizeof(issue.file));
+        } else if (keep_all || game) {
+            /* A game's newest session stays even when it went well: a problem without a
+             * crash (no sound, a wrong picture) still has its log. */
+            if (!keep(root, logs, session, "log", &issue, offset_s, now) && game && !keep_all && games < SESSIONS)
+                pc5_copy(played[games++], PC5_ID, issue.profile);
         } else {
             unlink(path);
             if (!pc5_format(path, sizeof(path), "%s/session-%d.previous.log", logs, session)) unlink(path);
             if (!pc5_format(path, sizeof(path), "%s/session-%d.start.log", logs, session)) unlink(path);
         }
     }
+    for (int i = 0; i < games; i++) keep_newest(logs, played[i]);
     /* Anything older than a week, but the session running now. */
     if ((dir = opendir(logs))) {
         char now_name[32] = "", now_earlier[48] = "", now_start[48] = "";
@@ -241,9 +578,9 @@ int pc5_logs_tidy(const char *root, int keep_all, int64_t now, int offset_s, Pc5
         }
         while ((entry = readdir(dir))) {
             struct stat st;
-            if (!pc5_ends_with_ci(entry->d_name, ".log") || !strcmp(entry->d_name, now_name) ||
-                !strcmp(entry->d_name, now_earlier) || !strcmp(entry->d_name, now_start) ||
-                pc5_join(path, sizeof(path), logs, entry->d_name) ||
+            if ((!pc5_ends_with_ci(entry->d_name, ".log") && !pc5_ends_with_ci(entry->d_name, ".zip")) ||
+                !strcmp(entry->d_name, now_name) || !strcmp(entry->d_name, now_earlier) ||
+                !strcmp(entry->d_name, now_start) || pc5_join(path, sizeof(path), logs, entry->d_name) ||
                 stat(path, &st) || !S_ISREG(st.st_mode))
                 continue;
             if ((int64_t)st.st_mtime < now - (int64_t)PC5_LOG_DAYS * 86400) unlink(path);

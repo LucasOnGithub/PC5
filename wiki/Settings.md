@@ -26,8 +26,8 @@ Changes are saved at once, in `/data/prospero-win/pc5/settings.txt`. Settings fo
 | In games › | Vibration, light bar and adaptive triggers. See [In games](#in-games). |
 | Overlay › | The overlay shown over every game. See [Overlay](#overlay). |
 | Updates › | Checking GitHub for a newer PC5. The row shows the last answer. See [Updates](#updates). |
-| Keep all logs | **Off** (the default): only the logs of sessions that went wrong are kept. **On**: every session's log is kept. Either way, logs are kept for 7 days. See [Reporting a problem](Reporting-a-problem). |
-| About PC5 | The version, where games are kept, the free space on the console, and credits. |
+| Keep all logs | **Off** (the default): the logs of sessions that went wrong are kept, and each game's newest session. **On**: every session's log is kept, PC5's own too. Either way, each is one zip, kept for 7 days. See [Reporting a problem](Reporting-a-problem). |
+| About PC5 | The version, where games are kept, the free space on the console, and a QR code for Buy Me a Coffee. |
 
 ## In games
 
@@ -76,7 +76,7 @@ When a newer PC5 is out, the console shows a notification once for that release,
 
 ## About PC5
 
-Shows the PC5 version and title ID (`PPSA11018`), what PC5 runs games with, where games are kept (`/data/prospero-win`) and the free space on the console. Press **○** to close it.
+Shows the PC5 version and title ID (`PPSA11018`), what PC5 runs games with, where games are kept (`/data/prospero-win`) and the free space on the console. If you like PC5, scan the QR code with your phone: it opens PC5's [Buy Me a Coffee](https://www.buymeacoffee.com/bornaradusin) page. Press **○** to close it.
 
 ![The About PC5 screen](images/about.png)
 *About PC5. Give this version when you report a problem.*

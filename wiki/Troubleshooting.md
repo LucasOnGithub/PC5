@@ -30,7 +30,7 @@ When something doesn't work, PC5 usually says why in a message. This page lists 
 | *Game* can't start: PC5 can't read the app's .NET runtime | The app's folder is incomplete. Copy the `PPSA11018` folder to the console again. See [Updating PC5](Installing-and-updating#updating-pc5). |
 | *Game* didn't start: The console refused to start it | Try again. If it happens again, close PC5 and open it again. |
 | *Game* closed before showing anything | PC5 may have started the wrong program: use **△ › Change program**. If you added [launch options](Launch-options), try without them. Otherwise, [report it](Reporting-a-problem). |
-| *Game* stopped with an error | The game crashed. Try the newest PC5, then [report it](Reporting-a-problem) with the log PC5 names. |
+| *Game* stopped with an error | The game crashed. Try the newest PC5, then [report it](Reporting-a-problem): **△** on the message opens GitHub's issue form with a QR code; attach the zip PC5 names. |
 | *Game* had to be closed | The game didn't close when asked, so PC5 ended it. It may not have saved. |
 | PC5 ended unexpectedly last time | PC5 itself stopped. [Report it](Reporting-a-problem) with the log PC5 names. |
 

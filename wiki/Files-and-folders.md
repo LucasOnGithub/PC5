@@ -31,7 +31,7 @@ PC5 keeps everything where prospero-win keeps it, in `/data/prospero-win` on the
 | `profiles/<game>.profile` | The game's prospero-win profile. | No: PC5 writes it again each time the game starts. Use `launch.txt` for launch options. |
 | `covers/` | Your own covers for installed games. | Yes. See [Covers](Covers#for-a-game-already-installed). |
 | `pc5/settings.txt` | PC5's [Settings](Settings). | Change them in PC5. A missing file, or a line PC5 doesn't know, gives the default. |
-| `logs/` | Session logs: `session-N.log` while running, then `issue-…` or `log-…` files, kept for seven days. | Copy them off to [report a problem](Reporting-a-problem). |
+| `logs/` | Session logs: `session-N.log` while running, then one `issue-….zip` or `log-….zip` per session (with the game's own logs and crash files), kept for seven days. | Copy the zip off to [report a problem](Reporting-a-problem). |
 
 ## Backing up a game's saves
 
