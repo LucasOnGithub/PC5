@@ -73,6 +73,7 @@ Choose a game in the library and press **△**.
 | Button mapping | Only with Keyboard & mouse: what each button and stick sends. See [Controllers](Controllers#button-mapping). |
 | Frame generation | **Off** (the default) or **30 → 60 fps**. See [Frame generation](#frame-generation) below. |
 | Resolution | Only for games drawn with Direct3D, Vulkan or OpenGL: **1080p** (the default), **1440p** or **4K**. See [Resolution](#resolution) below. |
+| Aspect ratio | **Keep** (the default) or **Stretch**. See [Aspect ratio](#aspect-ratio) below. |
 | Memory | Only for 32-bit games: **4 GB** (the default since 1.4.0) or **2 GB**. A 32-bit game gets 4 GB of address space, room for big textures and mods. Set 2 GB for a game that misbehaves with it. |
 | Change program | The program PC5 starts for this game ("Now: …"). Choose another one if PC5 picked the wrong one. See [Choosing the right program](Installing-games#choosing-the-right-program). |
 | Home screen tile | **Off** or **On**: a tile on the PS5's home screen that starts this game. See [Home screen tiles](Home-screen-tiles). |
@@ -105,6 +106,14 @@ A game drawn with Direct3D, Vulkan or OpenGL can be drawn at **1080p** (the defa
 - The console shows 1080p and 4K pictures as they are, and a 1440p one scaled up to 4K.
 - A higher resolution is slower: 1440p is nearly twice the work of 1080p, and 4K four times. A game that is already slow at 1080p gets slower.
 - Games drawn with DirectDraw or plain Windows drawing are drawn at 1080p, so the row isn't shown for them.
+- A change takes effect the next time the game starts.
+
+## Aspect ratio
+
+A game whose picture has another shape than the screen's, such as a 4:3 game, is shown in its own shape with black bars beside it. **△ › Aspect ratio › Stretch** fills the screen with it instead, kept for that game.
+
+- A stretched picture is wider than it was drawn: round things look oval.
+- Set the game's own resolution in its options to the 4:3 one it was made for, such as 1024x768: a game that draws its own bars inside a 16:9 picture keeps them, as PC5 can't tell them from the picture.
 - A change takes effect the next time the game starts.
 
 ## .NET games

@@ -99,6 +99,15 @@ Hold the **touchpad** and **Options** together for **two seconds**, whichever mo
 
 This combo always leaves the game. Don't use it to close a pop-up.
 
+## Typing in a game
+
+Click the **touchpad with two fingers** in a game, whichever mode is chosen, and the PS5's on-screen keyboard opens over the game. Type, then choose **Done**: the text is typed into the game, where its text box has the cursor (a name, a chat line, a server's address). **Cancel** closes the keyboard without typing anything.
+
+- Put the cursor in the game's text box first, with the controller or the pointer.
+- The game gets the text as characters typed on Windows. A game that reads the keyboard's keys rather than the characters typed doesn't see it.
+- The two-finger click itself never reaches the game. A click with one finger reaches it as before.
+- If the game needs Enter to accept the text, press the button that sends Enter, or ✕ in its menu.
+
 ## A game's Windows pop-ups
 
 Some games show a Windows box before they start, such as a warning about the computer's specs or a Yes / No question. With **Xbox controller** or **DualSense**:

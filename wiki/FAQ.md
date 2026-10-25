@@ -54,6 +54,15 @@ For a game that keeps 30 fps, turn on **△ › Frame generation**. It shows the
 **Do .NET games run?**
 Since 1.5.0, yes: .NET Framework games and tools (XNA through FNA, MonoGame, WinForms) run with Wine Mono, the open-source stand-in for Microsoft's .NET that Wine itself uses. The first time a .NET game starts, PC5 sets it up once for every game. Programs that mix .NET and C++ (C++/CLI) don't run, and some WPF doesn't. See [.NET games](Playing-games#net-games).
 
+**How do I type into a game?**
+Click the touchpad with two fingers: the PS5's on-screen keyboard opens over the game, and what you type is typed into the game when you choose Done. See [Typing in a game](Controllers#typing-in-a-game).
+
+**Can I make a 4:3 game fill the screen?**
+Yes: **△ › Aspect ratio › Stretch**. The picture gets wider than it was drawn. See [Aspect ratio](Playing-games#aspect-ratio).
+
+**My game has its own launcher. Does it work?**
+Since 1.6.0, usually: when the launcher starts the game, PC5 closes the launcher and starts the game in its place. A launcher that needs a store's client (Steam, Epic, EA, Ubisoft) still doesn't work. See [What runs and what doesn't](Installing-games#what-runs-and-what-doesnt).
+
 **Can a game run at 1440p or 4K?**
 Yes, a game drawn with Direct3D, Vulkan or OpenGL: **△ › Resolution**. 1080p is the default. 4K is four times the work of 1080p, so a game that is already slow gets slower. See [Resolution](Playing-games#resolution).
 
