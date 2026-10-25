@@ -412,6 +412,33 @@ static void test_sources(void)
               !strcmp(folder.exes[0].path, "LibertyTown.exe"), "the game, not its starter: %s",
               folder.exe_count ? folder.exes[0].path : "");
     }
+    /* A game whose name holds a helper's word (Crashlands), beside a real crash reporter. */
+    {
+        char file[PC5_PATH], from[PC5_PATH];
+        path(from, sizeof(from), "%s/game64.exe", programs);
+        path(file, sizeof(file), "%s/stubs/Crashlands 2/Crashlands2.exe", work);
+        copy_file(from, file);
+        path(dir, sizeof(dir), "%s/stubs/Crashlands 2", work);
+        CHECK(!pc5_folder_inspect(dir, "Crashlands 2", &folder) && !folder.problem[0] && folder.exe_count == 1 &&
+              !strcmp(folder.exes[0].path, "Crashlands2.exe"), "a game named Crash…: %s %s", folder.problem,
+              folder.exe_count ? folder.exes[0].path : "");
+        path(file, sizeof(file), "%s/stubs/Crashlands 2/UnityCrashHandler64.exe", work);
+        copy_file(from, file);
+        CHECK(!pc5_folder_inspect(dir, "Crashlands 2", &folder) && !folder.problem[0] &&
+              !strcmp(folder.exes[0].path, "Crashlands2.exe"), "the game before its crash handler: %s",
+              folder.exe_count ? folder.exes[0].path : "");
+        /* A folder's only program is the game, a helper's word in its name or not; an installer isn't. */
+        path(file, sizeof(file), "%s/stubs/Wreck/ServerQuest.exe", work);
+        copy_file(from, file);
+        path(dir, sizeof(dir), "%s/stubs/Wreck", work);
+        CHECK(!pc5_folder_inspect(dir, "Wreck", &folder) && !folder.problem[0] && folder.exe_count == 1,
+              "the only program: %s", folder.problem);
+        path(file, sizeof(file), "%s/stubs/Installer only/setup.exe", work);
+        copy_file(from, file);
+        path(dir, sizeof(dir), "%s/stubs/Installer only", work);
+        CHECK(!pc5_folder_inspect(dir, "Installer only", &folder) && strstr(folder.problem, "only has installers"),
+              "an installer alone isn't a game: %s", folder.problem);
+    }
 }
 
 /* ---- the library: installing and uninstalling -------------------------------------------------- */
@@ -1601,7 +1628,49 @@ static void test_dotnet(void)
     CHECK(pc5_runtime_begin(&runtime, root, app, program) == 1, "a copy cut short is made again");
     while (!(step = pc5_runtime_step(&runtime, 1)) && steps < 200) steps++;
     pc5_runtime_end(&runtime);
-    CHECK(step == -1 && strstr(runtime.error, "can't copy"), "a missing file fails: %s", runtime.error);
+    CHECK(step == -1 && strstr(runtime.error, "has no libmono-2.0-x86_64.dll") && strstr(runtime.error, "PPSA11018"),
+          "a file missing from the app is named, not taken for a full console: %s", runtime.error);
+}
+
+/* A game's Windows from an older PC5 gets the system DLLs the template has since gained. */
+static void test_prefix_system(void)
+{
+    char root_dir[PC5_PATH], app[PC5_PATH], file[PC5_PATH];
+    Pc5Buf text = { 0 };
+    static const char *const listed[] = { "drive_c/windows/system32/kept.dll", "drive_c/windows/syswow64/winegstreamer.dll",
+                                          "drive_c/windows/system32/winegstreamer.dll", "drive_c/windows/system32/sub/deep.dll",
+                                          "drive_c/windows/system32/notes.txt", "drive_c/users/prospero/x.dll" };
+
+    path(root_dir, sizeof(root_dir), "%s/system-root", work);
+    path(app, sizeof(app), "%s/system-app", work);
+    for (size_t i = 0; i < sizeof(listed) / sizeof(listed[0]); i++) {
+        path(file, sizeof(file), "%s/pc5/prefix/%s", app, listed[i]);
+        write_text(file, "from the template");
+        pc5_buf_printf(&text, "%s\n", listed[i]);
+    }
+    path(file, sizeof(file), "%s/pc5/prefix.list", app);
+    pc5_write_file(file, text.data, text.len);
+    pc5_buf_free(&text);
+    path(file, sizeof(file), "%s/prefixes/old/drive_c/windows/system32/kept.dll", root_dir);
+    write_text(file, "the game's own");
+    CHECK(pc5_prefix_system(root_dir, "old", app) == 2, "the two decoders added");
+    path(file, sizeof(file), "%s/prefixes/old/drive_c/windows/syswow64/winegstreamer.dll", root_dir);
+    CHECK(!pc5_read_file(file, &text, 4096) && text.len == 17, "the 32-bit one");
+    pc5_buf_free(&text);
+    path(file, sizeof(file), "%s/prefixes/old/drive_c/windows/system32/kept.dll", root_dir);
+    CHECK(!pc5_read_file(file, &text, 4096) && text.len == 14, "what it had stays as it was");
+    pc5_buf_free(&text);
+    path(file, sizeof(file), "%s/prefixes/old/drive_c/windows/system32/sub/deep.dll", root_dir);
+    CHECK(!pc5_exists(file), "only the folders' own DLLs");
+    path(file, sizeof(file), "%s/prefixes/old/drive_c/users/prospero/x.dll", root_dir);
+    CHECK(!pc5_exists(file), "nothing outside system32 and syswow64");
+    path(file, sizeof(file), "%s/prefixes/old/pc5/template.txt", root_dir);
+    CHECK(!pc5_read_file(file, &text, 4096) && !strncmp((char *)text.data, PC5_VERSION, strlen(PC5_VERSION)), "noted");
+    pc5_buf_free(&text);
+    path(file, sizeof(file), "%s/prefixes/old/drive_c/windows/syswow64/winegstreamer.dll", root_dir);
+    unlink(file);
+    CHECK(pc5_prefix_system(root_dir, "old", app) == 0 && !pc5_exists(file), "once for each PC5 version");
+    CHECK(pc5_prefix_system(root_dir, "default", app) == 0, "not the default prefix");
 }
 
 static void test_prefix_dxvk(void)
@@ -2676,6 +2745,7 @@ int main(int argc, char **argv)
     test_prefix_media();
     test_home();
     test_own_covers();
+    test_prefix_system();
     test_prefix_dxvk();
     test_dotnet();
     test_keyboard();

@@ -28,6 +28,7 @@ When something doesn't work, PC5 usually says why in a message. This page lists 
 | *Game* can't start: PC5's notes on this game are missing | Uninstall the game from its menu (**△**) and install it again. |
 | *Game* can't start: PC5 can't copy the .NET runtime (or make its folders, or finish its copy): is the console full? | Setting up .NET the first time needs about 300 MB free. Free up space on the console, then start the game again to finish setting it up. |
 | *Game* can't start: PC5 can't read the app's .NET runtime | The app's folder is incomplete. Copy the `PPSA11018` folder to the console again. See [Updating PC5](Installing-and-updating#updating-pc5). |
+| *Game* can't start: The app's .NET runtime has no *file* | The app's folder is incomplete: that file didn't arrive. Copy the `PPSA11018` folder to the console again. PC5 1.6.1 and older said "is the console full?" here when the app had been unzipped on a Windows PC, however much space was free: update to 1.6.2 or newer. |
 | *Game* didn't start: The console refused to start it | Try again. If it happens again, close PC5 and open it again. |
 | *Game* closed before showing anything | PC5 may have started the wrong program: use **△ › Change program**. If you added [launch options](Launch-options), try without them. Otherwise, [report it](Reporting-a-problem). |
 | *Game* stopped with an error | The game crashed. Try the newest PC5, then [report it](Reporting-a-problem): **△** on the message opens GitHub's issue form with a QR code; attach the zip PC5 names. |

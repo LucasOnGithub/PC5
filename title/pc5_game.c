@@ -133,6 +133,59 @@ static int copy_file(const char *from, const char *to)
     return ok ? 0 : -1;
 }
 
+int pc5_prefix_system(const char *root, const char *prefix, const char *app)
+{
+    char note[PC5_PATH], has[64], list[PC5_PATH];
+    Pc5Buf text = { 0 };
+    int copied = 0, failed = 0;
+
+    if (!prefix || !prefix[0] || !strcmp(prefix, "default") || !app || !app[0]) return 0;
+    if (pc5_format(note, sizeof(note), "%s/prefixes/%s/pc5/template.txt", root, prefix) ||
+        pc5_format(list, sizeof(list), "%s/pc5/prefix.list", app))
+        return -1;
+    first_line(note, has, sizeof(has));
+    if (!strcmp(has, PC5_VERSION)) return 0;
+    if (!pc5_is_file(list)) return 0;   /* an app without its template's list */
+    if (pc5_read_file(list, &text, 16u << 20) || pc5_buf_terminate(&text)) {
+        pc5_buf_free(&text);
+        return -1;
+    }
+    for (char *line = (char *)text.data, *next; line && *line; line = next) {
+        next = strchr(line, '\n');
+        if (next) *next++ = 0;
+        char from[PC5_PATH], to[PC5_PATH], part[PC5_PATH];
+        if ((strncmp(line, "drive_c/windows/system32/", 25) && strncmp(line, "drive_c/windows/syswow64/", 25)) ||
+            strchr(line + 25, '/') || !pc5_ends_with_ci(line, ".dll"))
+            continue;
+        if (pc5_format(from, sizeof(from), "%s/pc5/prefix/%s", app, line) ||
+            pc5_format(to, sizeof(to), "%s/prefixes/%s/%s", root, prefix, line) ||
+            pc5_format(part, sizeof(part), "%s.pc5-part", to)) {
+            failed = 1;
+            continue;
+        }
+        if (pc5_exists(to)) continue;
+        char *slash = strrchr(to, '/');
+        *slash = 0;
+        int folder_made = !pc5_mkdirs(to);
+        *slash = '/';
+        /* Written beside and renamed into place: a cut-short copy leaves nothing half there. */
+        if (!folder_made || copy_file(from, part) || rename(part, to)) {
+            unlink(part);
+            failed = 1;
+            continue;
+        }
+        copied++;
+    }
+    pc5_buf_free(&text);
+    if (failed) return -1;
+    char folder[PC5_PATH], line[64];
+    snprintf(line, sizeof(line), "%s\n", PC5_VERSION);
+    if (pc5_format(folder, sizeof(folder), "%s/prefixes/%s/pc5", root, prefix) || pc5_mkdirs(folder) ||
+        pc5_write_file(note, line, strlen(line)))
+        return -1;
+    return copied;
+}
+
 int pc5_prefix_dxvk(const char *root, const char *prefix, const char *app)
 {
     static const char *const dlls[] = { "d3d8.dll", "d3d9.dll", "d3d10core.dll", "d3d11.dll", "dxgi.dll",
@@ -342,6 +395,14 @@ int pc5_runtime_step(Pc5Runtime *runtime, int budget_ms)
             char folder[PC5_PATH];
             pc5_copy(folder, sizeof(folder), to);
             *strrchr(folder, '/') = 0;   /* its folder, should the list not name it */
+            if (!pc5_is_file(from)) {
+                /* Not a full disk: the app's own copy lacks it (copied off a PC without it). */
+                const char *name = strrchr(line, '/');
+                snprintf(runtime->error, sizeof(runtime->error),
+                         "The app's .NET runtime has no %.80s. Copy the PPSA11018 folder to the console again.",
+                         name ? name + 1 : line);
+                return -1;
+            }
             if (pc5_mkdirs(folder) || copy_file(from, part) || rename(part, to)) {
                 unlink(part);
                 snprintf(runtime->error, sizeof(runtime->error), "PC5 can't copy the .NET runtime: is the console full?");
@@ -378,6 +439,8 @@ void pc5_game_begin(Pc5GameSession *game, const Pc5GameOps *ops, const char *roo
     if (prefix && app && app[0]) {
         int media = pc5_prefix_media(root, prefix, app);
         if (media) say(game, "PC5 prefix media %s", media > 0 ? "registered" : "registration failed");
+        int system = pc5_prefix_system(root, prefix, app);
+        if (system) say(game, "PC5 prefix system files %s %d", system > 0 ? "added" : "failed", system > 0 ? system : 0);
         int dxvk = pc5_prefix_dxvk(root, prefix, app);
         if (dxvk) say(game, "PC5 prefix DXVK %s", dxvk > 0 ? "updated" : "update failed");
         int dotnet = pc5_prefix_dotnet(root, prefix, app);

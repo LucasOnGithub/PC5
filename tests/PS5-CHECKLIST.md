@@ -152,12 +152,20 @@ With ShadowMountPlus and elfldr running.
 | # | Do | Expect | Expect in the log |
 | --- | --- | --- | --- |
 | 65 | A game that loads Direct3D or Vulkan itself (Enshrouded), installed before 1.6.1: open its menu, then start it once and open the menu again | the Resolution row shows after the start | `PC5 profile` with `graphics = dxvk` (or vkd3d) for it |
-| 66 | Any session (PC5, then a game) | | `PC5 system firmware=… data_free=… version=1.6.1` in both logs |
+| 66 | Any session (PC5, then a game) | | `PC5 system firmware=… data_free=… version=…` (the version in Options › About PC5) in both logs |
 | 67 | A game with a crash handler of its own that crashes (Grim Dawn 64-bit) | PC5 says the game stopped with an error when it opens next | `wine: … handed to the program's own crash handler` followed by `wine: crash report:` lines |
 | 68 | In that message, press △ | a QR code; scanning it opens GitHub's New issue form for PC5, its title and text filled in | `PC5 report log=issue-….zip link=… qr=…` |
 | 69 | Copy the zip it names off the console and open it | PC5's log, about.txt, and under game/ the game's own logs and dumps from that session | |
 | 70 | Play a game that works, close it, open PC5 | a `log-…_<game>.zip` for it in `logs/`; playing it again leaves only the newer one | |
 | 71 | During a game, hold the power button until the console turns off; start it, open PC5 | that game's newest `log-…` (or `issue-…`) zip holds the session up to a few seconds before the power went | its about.txt says the log has no end line |
+
+## Fixes (1.6.2)
+
+| # | Do | Expect | Expect in the log |
+| --- | --- | --- | --- |
+| 72 | Unzip `PPSA11018.zip` on a Windows PC, copy the folder to the console with a USB drive, then start a .NET game for the first time | the .NET copy finishes and the game starts | `PC5 dotnet runtime copied entries=…`, no `PC5 problem play` |
+| 73 | Install a game whose program's name holds a helper's word (Crashlands 2's `Crashlands2.exe`) | it installs, with that program chosen | `PC5 install … exe=Crashlands2.exe` |
+| 74 | Start a game installed with 1.6.0 or older | it starts as before | `PC5 prefix system files added …` the first time, nothing the next time |
 
 A non-zero `rc=` on the light bar or triggers lines means the console refused that call; send
 that log.

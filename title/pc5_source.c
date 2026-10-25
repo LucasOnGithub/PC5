@@ -117,18 +117,49 @@ static int helper_folder(const char *relative)
     return 0;
 }
 
-/* Programs that are never the game. */
-static int helper_program(const char *name)
+/* Programs that are never the game: installers, runtimes and archivers. */
+static int installer_program(const char *name)
 {
-    static const char *const words[] = { "unins", "setup", "install", "update", "patch", "redist", "dxsetup",
-                                         "dxweb", "dotnet", "crash", "report", "easyanticheat", "battleye",
-                                         "beservice", "errorreport", "prereq", "physx", "oalinst", "editor",
-                                         "dedicated", "server", "uploader", "cefprocess", "subprocess",
-                                         "notification", "touchup", "activation", "register", "quicksfv",
-                                         "7z", "unrar", "cleanup", "repair", "diagnos", "benchmark", "helper" };
+    static const char *const words[] = { "unins", "setup", "install", "redist", "dxsetup", "dxweb", "dotnet",
+                                         "prereq", "physx", "oalinst", "quicksfv", "7z", "unrar" };
     for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); i++)
         if (contains_ci(name, words[i])) return 1;
     return 0;
+}
+
+/* Programs that are rarely the game: crash reporters, updaters, anti-cheat, servers,
+ * editors and helpers. ("crash" alone would take Crashlands for a crash reporter.) */
+static int helper_program(const char *name)
+{
+    static const char *const words[] = { "update", "patch", "crashreport", "crashhandler", "crashsender",
+                                         "crashpad", "crash_report", "crash_handler", "crashupload", "crash_upload",
+                                         "crashdump", "bugsplat", "report", "easyanticheat", "battleye", "beservice",
+                                         "editor", "dedicated", "server", "uploader", "cefprocess", "subprocess",
+                                         "notification", "touchup", "activation", "register", "cleanup", "repair",
+                                         "diagnos", "benchmark", "helper" };
+    for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); i++)
+        if (contains_ci(name, words[i])) return 1;
+    return 0;
+}
+
+/* Letters and digits only, lower case ("Crashlands 2" and "Crashlands2" alike). */
+static void squeeze(const char *text, char *out, size_t size)
+{
+    size_t n = 0;
+    for (; *text && n + 1 < size; text++)
+        if ((*text >= 'a' && *text <= 'z') || (*text >= '0' && *text <= '9') || (*text >= 'A' && *text <= 'Z'))
+            out[n++] = (char)pc5_lower((unsigned char)*text);
+    out[n] = 0;
+}
+
+/* A program named after its folder (Crashlands2.exe in "Crashlands 2") is the game, whatever
+ * else its name says. */
+static int named_like(const char *folder, const char *base)
+{
+    char a[PC5_NAME * 2], b[PC5_NAME * 2];
+    squeeze(folder, a, sizeof(a));
+    squeeze(base, b, sizeof(b));
+    return strlen(a) >= 4 && strlen(b) >= 4 && (strstr(a, b) || strstr(b, a));
 }
 
 /* A name Windows (or the profile format) can't take. */
@@ -189,7 +220,8 @@ static int score_program(const Pc5Folder *folder, const Pc5Exe *exe, const char 
     snprintf(base, sizeof(base), "%.*s", (int)(strlen(name) > 4 ? strlen(name) - 4 : strlen(name)), name);
     for (const char *p = relative; *p; p++) depth += *p == '/';
     if (exe->pe.dll) return -1000;
-    if (helper_folder(relative) || helper_program(name)) score -= 1000;
+    if (helper_folder(relative) || installer_program(name) || (helper_program(name) && !named_like(folder->name, base)))
+        score -= 1000;
     if (contains_ci(name, "launch") || contains_ci(name, "config") || contains_ci(name, "settings")) score -= 40;
     if (contains_ci(name, "-shipping")) score += 60;
     if (!exe->pe.gui) score -= 30;
@@ -307,6 +339,12 @@ int pc5_folder_inspect(const char *path, const char *name, Pc5Folder *folder)
     for (int i = 0; i < walk.all_count; i++)
         for (int k = 0; k < walk.all_count; k++)
             if (i != k && starter_of(walk.all[i].path, walk.all[k].path)) { walk.all[i].score -= 80; break; }
+    /* The folder's only program, unless it installs something, is the game: a helper's
+     * name on it is a coincidence. */
+    if (walk.all_count == 1 && walk.all[0].score <= -500 && !walk.all[0].pe.dll) {
+        const char *slash = strrchr(walk.all[0].path, '/'), *name = slash ? slash + 1 : walk.all[0].path;
+        if (!helper_folder(walk.all[0].path) && !installer_program(name)) walk.all[0].score += 1000;
+    }
     qsort(walk.all, (size_t)walk.all_count, sizeof(Pc5Exe), by_score);
     for (int i = 0; i < walk.all_count && folder->exe_count < PC5_EXES; i++)
         if (walk.all[i].score > -500 || folder->exe_count == 0) folder->exes[folder->exe_count++] = walk.all[i];

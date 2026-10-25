@@ -131,6 +131,14 @@ def media_fragment(wine: Path, made: Path, work: Path, env: dict) -> str:
     return "".join("\n" + "\n".join(registered[key]) + "\n" for key in added)
 
 
+def windows_name(path: str) -> bool:
+    """Whether Windows (and exFAT) can hold every part of this relative path."""
+    for part in path.split("/"):
+        if not part or part.endswith((".", " ")) or any(c in '\\:*?"<>|' or ord(c) < 32 for c in part):
+            return False
+    return True
+
+
 def install_mono(wine: Path, msi: Path, made: Path, env: dict) -> str:
     """Wine Mono installed into made; the sections it added to system.reg."""
     before = registry_sections((made / "system.reg").read_text(encoding="latin-1"))
@@ -209,6 +217,16 @@ def main() -> int:
     fonts = name_fonts(args.wine, made, work, env)
 
     files, dirs, links = pw_prefix.local_tree(made)
+    # A name Windows and exFAT can't hold doesn't survive the trip to the console: the app
+    # is unzipped on a PC or copied from a USB drive. Wine's msiexec leaves empty files
+    # named like "System.Core.dll?" beside Wine Mono's assemblies; they are nothing, and
+    # PC5's copy of the runtime stopped at the first one missing on the console.
+    unholdable = {key for key in files if not windows_name(key)}
+    if any(files[key].stat().st_size for key in unholdable):
+        sys.exit("make-prefix: a file with content has a name Windows can't hold: " + min(unholdable))
+    files = {key: path for key, path in files.items() if key not in unholdable}
+    if any(d and not windows_name(d) for d in dirs):
+        sys.exit("make-prefix: a folder has a name Windows can't hold: " + min(d for d in dirs if d and not windows_name(d)))
     # Wine Mono's runtime goes beside the template, not in it (6. above).
     runtime = "drive_c/windows/mono/"
     mono_files = {key[len(runtime):]: path for key, path in files.items() if key.startswith(runtime)}
@@ -278,7 +296,8 @@ def main() -> int:
     print(f"make-prefix: {target}: {len(listed)} entries, {size >> 20} MB; "
           f"prefix-media.reg: {media.count(chr(10) + '[')} keys; prefix-dotnet.reg: {dotnet.count(chr(10) + '[')} keys; "
           f"prefix-fonts.reg: {len(FONT_REPLACEMENTS)} font names; "
-          f"Wine Mono {args.mono_version}: {len(mono_listed)} entries, {mono_size >> 20} MB")
+          f"Wine Mono {args.mono_version}: {len(mono_listed)} entries, {mono_size >> 20} MB; "
+          f"left out, empty and unholdable on Windows: {len(unholdable)}")
     return 0
 
 

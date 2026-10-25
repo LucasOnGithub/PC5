@@ -105,6 +105,13 @@ typedef struct Pc5GameSession {
  * ("" or "default" for root/prefix). 1 appended, 0 already there, -1 when it
  * couldn't be done. */
 int pc5_prefix_media(const char *root, const char *prefix, const char *app);
+/* A game's Windows made by an older PC5 lacks the system files later ones added to the
+ * template (winegstreamer.dll for videos and music, among them): a 32-bit game then can't
+ * load them at all. The DLLs in the app's template (pc5/prefix.list, system32 and
+ * syswow64) that the game's Windows hasn't got are copied in, once for each PC5 version
+ * (the game's pc5/template.txt). prefix is the game's prefix name; the default prefix is
+ * not PC5's. How many were copied, or -1 (tried again at the next start). */
+int pc5_prefix_system(const char *root, const char *prefix, const char *app);
 /* DXVK is in each game's Windows, copied from the app's prefix when the game
  * was installed. When the app's DXVK (named in its pc5/dxvk.txt) is not the
  * one the game's Windows has (its pc5/dxvk.txt), the app's DLLs replace the

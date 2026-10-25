@@ -107,7 +107,7 @@ PC5 needs the game's size plus about 1.5 GB of free space before it starts copyi
 
 ## Choosing the right program
 
-A game's folder often has several programs: the game, a launcher, a settings tool, an uninstaller. PC5 ranks them and starts the one most likely to be the game. It leaves out installers, uninstallers, crash reporters, redistributables and similar tools.
+A game's folder often has several programs: the game, a launcher, a settings tool, an uninstaller. PC5 ranks them and starts the one most likely to be the game. It leaves out installers, uninstallers, crash reporters, redistributables and similar tools. A program named like its game's folder isn't taken for a tool because of a word in its name (`Crashlands2.exe` in `Crashlands 2`), and a folder with one program starts that program unless it is an installer.
 
 If PC5 picked the wrong one (for example, the game closes at once, or a settings window opens instead of the game):
 

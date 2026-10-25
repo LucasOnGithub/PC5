@@ -79,6 +79,12 @@ def main() -> int:
     if any(line.startswith("drive_c/windows/mono/") for line in
            ((app / "pc5" / "prefix.list").read_text().split("\n") if (app / "pc5/prefix.list").is_file() else [])):
         problems.append("pc5/prefix.list holds Wine Mono's runtime, which every game would copy")
+    # Every name has to survive the PC or USB drive the app is copied through (exFAT, Windows).
+    for path in app.rglob("*"):
+        name = path.name
+        if name.endswith((".", " ")) or any(c in '\\:*?"<>|' or ord(c) < 32 for c in name):
+            problems.append(f"{path.relative_to(app)} has a name Windows and exFAT can't hold")
+            break
     if problems:
         sys.exit("make-app: " + "; ".join(problems))
 
