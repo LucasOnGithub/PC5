@@ -118,15 +118,16 @@ def main() -> int:
         f"**{len(games)} game{'s' * (len(games) != 1)}, {len(reports)} report{'s' * (len(reports) != 1)}:** "
         + ", ".join(f"{RESULTS[result]} {counts[result]}" for result in RESULTS) + ".",
         "",
-        "| Game | How it runs | PC5 | Store and version | Controller | Settings that helped | Report |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
+        "| Game | How it runs | PC5 | Store and version | Controller | Settings that helped | Notes | Report |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for r in reports:
         lines.append(f"| {cell(r['game'], 60)} | {RESULTS[r['result']]} | {cell(r['pc5'], 12)} | {cell(r['edition'], 40)} | "
-                     f"{cell(r['controller'], 20)} | {cell(r['settings'])} | [#{r['number']}]({r['url']}) by "
+                     f"{cell(r['controller'], 20)} | {cell(r['settings'])} | {cell(r['notes'], 200)} | "
+                     f"[#{r['number']}]({r['url']}) by "
                      f"{cell(r['author'], 40)}, {r['date']} |")
     if not reports:
-        lines.append("| *No reports yet* | | | | | | |")
+        lines.append("| *No reports yet* | | | | | | | |")
     lines += ["", "A game that crashes or doesn't start: please also open an "
               f"[issue](https://github.com/{owner}/{name}/issues) with its log, so it can be fixed."]
 
