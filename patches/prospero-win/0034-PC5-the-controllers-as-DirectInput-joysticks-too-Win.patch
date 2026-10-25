@@ -1,0 +1,669 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bornaradusin <bornaradusin@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 21:30:00 +0000
+Subject: [PATCH] PC5: the controllers as DirectInput joysticks too (Wine patch
+ 0927)
+
+In xinput mode a game that reads its controller with DirectInput, or
+with winmm's joystick calls, found none: they look through the HID
+stack, which a title can't run. Wine patch 0927 makes each player's
+controller a DirectInput joystick as Windows shows an Xbox 360
+controller, so those games find it, and a game that reads Xbox
+controllers with XInput still leaves it out of DirectInput.
+---
+ PUBLICATION_ALLOWLIST.txt                     |   1 +
+ ...controllers-as-directinput-joysticks.patch | 633 ++++++++++++++++++
+ 2 files changed, 634 insertions(+)
+ create mode 100644 wine/patches/0927-dinput-the-ps5-title-s-controllers-as-directinput-joysticks.patch
+
+diff --git a/PUBLICATION_ALLOWLIST.txt b/PUBLICATION_ALLOWLIST.txt
+index 3492c3b..d840589 100644
+--- a/PUBLICATION_ALLOWLIST.txt
++++ b/PUBLICATION_ALLOWLIST.txt
+@@ -571,6 +571,7 @@ wine/patches/0923-ntdll-ps5-hand-a-launcher-s-game-to-the-title.patch
+ wine/patches/0924-kernelbase-crash-report-before-the-program-s-own-handler.patch
+ wine/patches/0925-musl-compute-in-sse2-on-i386-whatever-the-x87-precision.patch
+ wine/patches/0926-xinput-windows-gaming-input-up-to-four-ps5-title-controllers.patch
++wine/patches/0927-dinput-the-ps5-title-s-controllers-as-directinput-joysticks.patch
+ 
+ 
+ 
+diff --git a/wine/patches/0927-dinput-the-ps5-title-s-controllers-as-directinput-joysticks.patch b/wine/patches/0927-dinput-the-ps5-title-s-controllers-as-directinput-joysticks.patch
+new file mode 100644
+index 0000000..9a40f33
+--- /dev/null
++++ b/wine/patches/0927-dinput-the-ps5-title-s-controllers-as-directinput-joysticks.patch
+@@ -0,0 +1,633 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: prospero-win <prospero-win@invalid>
++Date: Sun, 25 Oct 2026 21:30:00 +0000
++Subject: [PATCH] dinput: The PS5 title's controllers as DirectInput joysticks.
++
++DirectInput finds joysticks through the HID stack, which a PS5 title
++can't run, so in xinput mode a game that reads its controller with
++DirectInput (or winmm's joystick calls, which go through DirectInput)
++found none: only XInput and Windows.Gaming.Input saw the title's
++controllers (patches 0470, 0477 and 0926).
++
++Each title controller that is connected is now a joystick as Windows
++shows an Xbox 360 controller: "Controller (XBOX 360 For Windows)",
++045e:028e, a gamepad; X and Y the left stick, Rx and Ry the right one,
++Z both triggers (the left one up from the middle, the right one down),
++the D-pad a hat and ten buttons, in Windows' order. As on Windows it has
++no force feedback, and its path names it an XInput device (IG_00 to
++IG_03), so a game that reads such controllers with XInput leaves it out
++here. While acquired, a waitable timer has the input thread read it
++every 4 ms, so buffered data and event notification work as for a HID
++joystick; GetDeviceState and Poll read it at once. A controller that
++disconnects makes its device unplugged. Anywhere but in a title the
++Unix library finds no title and nothing changes.
++---
++ dlls/dinput/Makefile.in      |    3 
++ dlls/dinput/dinput.c         |   10 +
++ dlls/dinput/dinput_private.h |    3 
++ dlls/dinput8/Makefile.in     |    3 
++ dlls/dinput/title_pad.c      |  530 ++++++++++++++++++++++++++++++++++++++++++
++ 5 files changed, 546 insertions(+), 3 deletions(-)
++
++diff --git a/dlls/dinput/Makefile.in b/dlls/dinput/Makefile.in
++--- a/dlls/dinput/Makefile.in
+++++ b/dlls/dinput/Makefile.in
++@@ -17,4 +17,5 @@
++ 	dinput_main.c \
++ 	joystick_hid.c \
++ 	keyboard.c \
++-	mouse.c
+++	mouse.c \
+++	title_pad.c
++diff --git a/dlls/dinput/dinput.c b/dlls/dinput/dinput.c
++--- a/dlls/dinput/dinput.c
+++++ b/dlls/dinput/dinput.c
++@@ -288,12 +288,13 @@
++              IsEqualGUID( &GUID_SysMouseEm, guid ) ||
++              IsEqualGUID( &GUID_SysMouseEm2, guid ))
++         hr = mouse_create_device( impl, guid, &device );
++-    else
+++    else if (title_pad_create_device( impl, guid, &device ) != DI_OK)
++     {
++         hr = hid_joystick_create_device( impl, guid, &device );
++         if (hr == DIERR_DEVICENOTREG && SUCCEEDED(hr = hid_joystick_refresh_devices()))
++             hr = hid_joystick_create_device( impl, guid, &device );
++     }
+++    else hr = DI_OK;
++ 
++     if (FAILED(hr)) return hr;
++ 
++@@ -390,6 +391,13 @@
++             if (hr == DI_OK && try_enum_device( device_type, callback, &instance, context, flags ) == DIENUM_STOP)
++                 return DI_OK;
++         }
+++        /* a PS5 title's controllers, after its own HID devices as a PC lists them */
+++        for (i = 0; i < 4; i++)
+++        {
+++            hr = title_pad_enum_device( type, flags, &instance, impl->dwVersion, i );
+++            if (hr == DI_OK && try_enum_device( device_type, callback, &instance, context, flags ) == DIENUM_STOP)
+++                return DI_OK;
+++        }
++     }
++ 
++     return DI_OK;
++diff --git a/dlls/dinput/dinput_private.h b/dlls/dinput/dinput_private.h
++--- a/dlls/dinput/dinput_private.h
+++++ b/dlls/dinput/dinput_private.h
++@@ -57,6 +57,9 @@
++ extern HRESULT hid_joystick_enum_device( DWORD type, DWORD flags, DIDEVICEINSTANCEW *instance, DWORD version, int index );
++ extern HRESULT hid_joystick_create_device( struct dinput *dinput, const GUID *guid, IDirectInputDevice8W **out );
++ extern HRESULT hid_joystick_refresh_devices(void);
+++/* A PS5 title's controllers, players 0 to 3 (title_pad.c). */
+++extern HRESULT title_pad_enum_device( DWORD type, DWORD flags, DIDEVICEINSTANCEW *instance, DWORD version, int index );
+++extern HRESULT title_pad_create_device( struct dinput *dinput, const GUID *guid, IDirectInputDevice8W **out );
++ extern void hid_joystick_cleanup_devices(void);
++ 
++ struct DevicePlayer {
++diff --git a/dlls/dinput8/Makefile.in b/dlls/dinput8/Makefile.in
++--- a/dlls/dinput8/Makefile.in
+++++ b/dlls/dinput8/Makefile.in
++@@ -18,4 +18,5 @@
++ 	dinput_main.c \
++ 	joystick_hid.c \
++ 	keyboard.c \
++-	mouse.c
+++	mouse.c \
+++	title_pad.c
++diff --git a/dlls/dinput/title_pad.c b/dlls/dinput/title_pad.c
++new file mode 100644
++--- /dev/null
+++++ b/dlls/dinput/title_pad.c
++@@ -0,0 +1,530 @@
+++/*
+++ * The PS5 title's controllers as DirectInput joysticks
+++ *
+++ * Copyright 2026 prospero-win
+++ *
+++ * This library is free software; you can redistribute it and/or
+++ * modify it under the terms of the GNU Lesser General Public
+++ * License as published by the Free Software Foundation; either
+++ * version 2.1 of the License, or (at your option) any later version.
+++ *
+++ * This library is distributed in the hope that it will be useful,
+++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+++ * Lesser General Public License for more details.
+++ *
+++ * You should have received a copy of the GNU Lesser General Public
+++ * License along with this library; if not, write to the Free Software
+++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+++ */
+++
+++/* A PS5 title runs Wine in its own process, with no winedevice for a HID
+++ * stack, so joystick_hid.c finds only the HID devices the title makes itself
+++ * (its DualSense, in dualsense mode). In xinput mode the title keeps each
+++ * player's controller where xinput's Unix library (xinput1_3.so) reads it;
+++ * here each connected one is a joystick as Windows shows an Xbox 360
+++ * controller: "Controller (XBOX 360 For Windows)", 045e:028e, X and Y the
+++ * left stick, Rx and Ry the right one, Z both triggers (the left one up from
+++ * the middle, the right one down), the D-pad a hat and ten buttons. As on
+++ * Windows it has no force feedback, which games ask of XInput, and its path
+++ * names it an XInput device (IG_), so a game that reads such controllers with
+++ * XInput leaves it out here. The input thread reads it every few
+++ * milliseconds while it is acquired, so buffered data and event notification
+++ * work as for a HID joystick. winmm's joystick calls go through DirectInput
+++ * and find it too. Anywhere but in a title the library finds no title and
+++ * nothing changes. */
+++
+++#include <stdarg.h>
+++#include <string.h>
+++
+++#include "ntstatus.h"
+++#define WIN32_NO_STATUS
+++#include "windef.h"
+++#include "winbase.h"
+++#include "winternl.h"
+++#include "winuser.h"
+++#include "winerror.h"
+++#include "devguid.h"
+++#include "dinput.h"
+++#include "xinput.h"
+++
+++#include "dinput_private.h"
+++#include "device_private.h"
+++
+++#include "../xinput1_3/unixlib.h"
+++
+++#include "wine/debug.h"
+++
+++WINE_DEFAULT_DEBUG_CHANNEL(dinput);
+++
+++enum { TITLE_PAD_AXES = 5, TITLE_PAD_BUTTONS = 10, TITLE_PAD_READ_MS = 4 };
+++
+++/* {6f1d2b61-0c14-4f2b-9a3d-5053355f5000}, the player's index in the last byte */
+++static const GUID title_pad_guid = { 0x6f1d2b61, 0x0c14, 0x4f2b, { 0x9a, 0x3d, 0x50, 0x53, 0x35, 0x5f, 0x50, 0x00 } };
+++static const WCHAR title_pad_name[] = L"Controller (XBOX 360 For Windows)";
+++
+++static const struct dinput_device_vtbl title_pad_vtbl;
+++
+++struct title_pad
+++{
+++    struct dinput_device base;
+++    UINT32 index;              /* XInput's: the player, 0 to 3 */
+++    WCHAR path[MAX_PATH];
+++};
+++
+++static inline struct title_pad *impl_from_IDirectInputDevice8W( IDirectInputDevice8W *iface )
+++{
+++    return CONTAINING_RECORD( CONTAINING_RECORD( iface, struct dinput_device, IDirectInputDevice8W_iface ), struct title_pad, base );
+++}
+++
+++static unixlib_handle_t title_pads;
+++
+++static BOOL WINAPI find_title( INIT_ONCE *once, void *param, void **context )
+++{
+++    UNICODE_STRING name = RTL_CONSTANT_STRING( L"xinput1_3" );
+++    unixlib_module_t module;
+++    unixlib_handle_t handle;
+++    NTSTATUS status;
+++
+++    if ((status = __wine_load_unix_lib( &name, &module, &handle )))
+++    {
+++        TRACE( "no Unix library, status %#lx\n", status );
+++        return TRUE;
+++    }
+++    if ((status = __wine_unix_call( handle, unix_pad_init, NULL )))
+++    {
+++        TRACE( "no title, status %#lx\n", status );
+++        __wine_unload_unix_lib( module );
+++        return TRUE;
+++    }
+++    TRACE( "the title's controllers are joysticks\n" );
+++    title_pads = handle;
+++    return TRUE;
+++}
+++
+++/* TRUE and player index's controller while it is connected. */
+++static BOOL read_title_pad( UINT32 index, struct xinput_pad_state *pad )
+++{
+++    static INIT_ONCE once = INIT_ONCE_STATIC_INIT;
+++    struct xinput_pad_state_params params = {.index = index};
+++
+++    memset( pad, 0, sizeof(*pad) );
+++    InitOnceExecuteOnce( &once, find_title, NULL, NULL );
+++    if (!title_pads || index >= XUSER_MAX_COUNT) return FALSE;
+++    if (__wine_unix_call( title_pads, unix_pad_state_at, &params ) || !params.state.connected) return FALSE;
+++    *pad = params.state;
+++    return TRUE;
+++}
+++
+++static BOOL title_pad_index( const GUID *guid, UINT32 *index )
+++{
+++    GUID base = *guid;
+++
+++    base.Data4[7] = 0;
+++    if (!IsEqualGUID( &base, &title_pad_guid ) || guid->Data4[7] >= XUSER_MAX_COUNT) return FALSE;
+++    *index = guid->Data4[7];
+++    return TRUE;
+++}
+++
+++HRESULT title_pad_enum_device( DWORD type, DWORD flags, DIDEVICEINSTANCEW *instance, DWORD version, int index )
+++{
+++    struct xinput_pad_state pad;
+++    DWORD size;
+++
+++    TRACE( "type %#lx, flags %#lx, instance %p, version %#lx, index %d.\n", type, flags, instance, version, index );
+++
+++    if (index < 0 || !read_title_pad( index, &pad )) return DIERR_DEVICENOTREG;
+++
+++    size = instance->dwSize;
+++    memset( instance, 0, size );
+++    instance->dwSize = size;
+++    instance->guidInstance = title_pad_guid;
+++    instance->guidInstance.Data4[7] = index;
+++    instance->guidProduct = dinput_pidvid_guid;
+++    instance->guidProduct.Data1 = MAKELONG( 0x045e, 0x028e );
+++    if (version >= 0x0800) instance->dwDevType = DI8DEVTYPE_GAMEPAD | (DI8DEVTYPEGAMEPAD_STANDARD << 8) | DIDEVTYPE_HID;
+++    else instance->dwDevType = DIDEVTYPE_JOYSTICK | (DIDEVTYPEJOYSTICK_GAMEPAD << 8) | DIDEVTYPE_HID;
+++    lstrcpynW( instance->tszInstanceName, title_pad_name, MAX_PATH );
+++    lstrcpynW( instance->tszProductName, title_pad_name, MAX_PATH );
+++    instance->wUsagePage = 0x01;   /* generic desktop */
+++    instance->wUsage = 0x05;       /* gamepad */
+++    return DI_OK;
+++}
+++
+++static BOOL try_enum_object( struct dinput_device *impl, const DIPROPHEADER *filter, DWORD flags, enum_object_callback callback,
+++                             UINT index, DIDEVICEOBJECTINSTANCEW *instance, void *data )
+++{
+++    if (flags != DIDFT_ALL && !(flags & DIDFT_GETTYPE( instance->dwType ))) return DIENUM_CONTINUE;
+++
+++    switch (filter->dwHow)
+++    {
+++    case DIPH_DEVICE:
+++        return callback( impl, index, NULL, instance, data );
+++    case DIPH_BYOFFSET:
+++        if (filter->dwObj != instance->dwOfs) return DIENUM_CONTINUE;
+++        return callback( impl, index, NULL, instance, data );
+++    case DIPH_BYID:
+++        if ((filter->dwObj & 0x00ffffff) != (instance->dwType & 0x00ffffff)) return DIENUM_CONTINUE;
+++        return callback( impl, index, NULL, instance, data );
+++    case DIPH_BYUSAGE:
+++        if (HIWORD( filter->dwObj ) != instance->wUsagePage || LOWORD( filter->dwObj ) != instance->wUsage)
+++            return DIENUM_CONTINUE;
+++        return callback( impl, index, NULL, instance, data );
+++    }
+++
+++    return DIENUM_CONTINUE;
+++}
+++
+++/* The objects in the order Windows lists an Xbox 360 controller's: the five
+++ * axes, the hat, the ten buttons. */
+++static HRESULT title_pad_enum_objects( IDirectInputDevice8W *iface, const DIPROPHEADER *filter,
+++                                       DWORD flags, enum_object_callback callback, void *context )
+++{
+++    static const struct { const GUID *type; DWORD offset; WORD usage; const WCHAR *name; } axes[TITLE_PAD_AXES] =
+++    {
+++        { &GUID_XAxis, DIJOFS_X, 0x30, L"X Axis" },
+++        { &GUID_YAxis, DIJOFS_Y, 0x31, L"Y Axis" },
+++        { &GUID_ZAxis, DIJOFS_Z, 0x32, L"Z Axis" },
+++        { &GUID_RxAxis, DIJOFS_RX, 0x33, L"X Rotation" },
+++        { &GUID_RyAxis, DIJOFS_RY, 0x34, L"Y Rotation" },
+++    };
+++    struct title_pad *impl = impl_from_IDirectInputDevice8W( iface );
+++    DIDEVICEOBJECTINSTANCEW instance = {.dwSize = sizeof(instance)};
+++    UINT index = 0, i;
+++    BOOL ret;
+++
+++    for (i = 0; i < TITLE_PAD_AXES; i++)
+++    {
+++        instance.guidType = *axes[i].type;
+++        instance.dwOfs = axes[i].offset;
+++        instance.dwType = DIDFT_ABSAXIS | DIDFT_MAKEINSTANCE( i );
+++        instance.dwFlags = DIDOI_ASPECTPOSITION;
+++        instance.wUsagePage = 0x01;
+++        instance.wUsage = axes[i].usage;
+++        lstrcpynW( instance.tszName, axes[i].name, MAX_PATH );
+++        ret = try_enum_object( &impl->base, filter, flags, callback, index++, &instance, context );
+++        if (ret != DIENUM_CONTINUE) return DIENUM_STOP;
+++    }
+++
+++    instance.guidType = GUID_POV;
+++    instance.dwOfs = DIJOFS_POV( 0 );
+++    instance.dwType = DIDFT_POV | DIDFT_MAKEINSTANCE( 0 );
+++    instance.dwFlags = 0;
+++    instance.wUsagePage = 0x01;
+++    instance.wUsage = 0x39;   /* hat switch */
+++    lstrcpynW( instance.tszName, L"Hat Switch", MAX_PATH );
+++    ret = try_enum_object( &impl->base, filter, flags, callback, index++, &instance, context );
+++    if (ret != DIENUM_CONTINUE) return DIENUM_STOP;
+++
+++    for (i = 0; i < TITLE_PAD_BUTTONS; i++)
+++    {
+++        instance.guidType = GUID_Button;
+++        instance.dwOfs = DIJOFS_BUTTON( i );
+++        instance.dwType = DIDFT_PSHBUTTON | DIDFT_MAKEINSTANCE( i );
+++        instance.dwFlags = 0;
+++        instance.wUsagePage = 0x09;   /* buttons */
+++        instance.wUsage = i + 1;
+++        swprintf( instance.tszName, MAX_PATH, L"Button %u", i );
+++        ret = try_enum_object( &impl->base, filter, flags, callback, index++, &instance, context );
+++        if (ret != DIENUM_CONTINUE) return DIENUM_STOP;
+++    }
+++
+++    return DIENUM_CONTINUE;
+++}
+++
+++/* What an axis reports before the game sets its range: 0 to 65535, centred. */
+++static BOOL init_object_properties( struct dinput_device *device, UINT index, struct hid_value_caps *caps,
+++                                    const DIDEVICEOBJECTINSTANCEW *instance, void *data )
+++{
+++    struct object_properties *properties;
+++
+++    if (index == -1) return DIENUM_STOP;
+++    properties = device->object_properties + index;
+++    properties->bit_size = 16;
+++    properties->logical_min = properties->physical_min = 0;
+++    properties->logical_max = properties->physical_max = 65535;
+++    properties->range_min = 0;
+++    properties->range_max = instance->dwType & DIDFT_AXIS ? 65535 : 35900;
+++    properties->saturation = 10000;
+++    properties->granularity = 1;
+++    return DIENUM_CONTINUE;
+++}
+++
+++/* An axis from 0..65535 to the game's range, with its dead zone and
+++ * saturation, as joystick_hid.c scales a HID axis. */
+++static LONG scale_axis( LONG value, const struct object_properties *properties )
+++{
+++    LONG log_ctr = 32767, log_min = 0, log_max = 65535, phy_min = properties->range_min, phy_max = properties->range_max, phy_ctr;
+++
+++    phy_ctr = phy_min + (phy_max - phy_min) / 2;
+++    value -= log_ctr;
+++    if (value <= 0)
+++    {
+++        log_max = MulDiv( log_min - log_ctr, properties->deadzone, 10000 );
+++        log_min = MulDiv( log_min - log_ctr, properties->saturation, 10000 );
+++        phy_max = phy_ctr;
+++    }
+++    else
+++    {
+++        log_min = MulDiv( log_max - log_ctr, properties->deadzone, 10000 );
+++        log_max = MulDiv( log_max - log_ctr, properties->saturation, 10000 );
+++        phy_min = phy_ctr;
+++    }
+++
+++    if (value <= log_min) return phy_min;
+++    if (value >= log_max) return phy_max;
+++    return phy_min + MulDiv( value - log_min, phy_max - phy_min, log_max - log_min );
+++}
+++
+++/* The D-pad as a hat: hundredths of a degree clockwise from up, -1 centred. */
+++static DWORD hat_position( WORD buttons )
+++{
+++    BOOL up = buttons & XINPUT_GAMEPAD_DPAD_UP, down = buttons & XINPUT_GAMEPAD_DPAD_DOWN;
+++    BOOL left = buttons & XINPUT_GAMEPAD_DPAD_LEFT, right = buttons & XINPUT_GAMEPAD_DPAD_RIGHT;
+++
+++    if (up && down) up = down = FALSE;
+++    if (left && right) left = right = FALSE;
+++    if (up) return right ? 4500 : left ? 31500 : 0;
+++    if (down) return right ? 13500 : left ? 22500 : 18000;
+++    if (right) return 9000;
+++    if (left) return 27000;
+++    return (DWORD)-1;
+++}
+++
+++/* The controller's state into the device's, an event for each object that
+++ * changed. Holds the base's critical section. */
+++static HRESULT title_pad_update( struct title_pad *impl )
+++{
+++    static const WORD buttons[TITLE_PAD_BUTTONS] =
+++    {
+++        XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_B, XINPUT_GAMEPAD_X, XINPUT_GAMEPAD_Y,
+++        XINPUT_GAMEPAD_LEFT_SHOULDER, XINPUT_GAMEPAD_RIGHT_SHOULDER,
+++        XINPUT_GAMEPAD_BACK, XINPUT_GAMEPAD_START,
+++        XINPUT_GAMEPAD_LEFT_THUMB, XINPUT_GAMEPAD_RIGHT_THUMB,
+++    };
+++    IDirectInputDevice8W *iface = &impl->base.IDirectInputDevice8W_iface;
+++    struct xinput_pad_state pad;
+++    LONG raw[TITLE_PAD_AXES], value, old;
+++    DWORD time, seq, hat;
+++    BOOL changed = FALSE;
+++    UINT i, index = 0;
+++    BYTE *state = impl->base.device_state;
+++
+++    if (!read_title_pad( impl->index, &pad ))
+++    {
+++        if (impl->base.status == STATUS_ACQUIRED) impl->base.status = STATUS_UNPLUGGED;
+++        return DIERR_INPUTLOST;
+++    }
+++
+++    time = GetCurrentTime();
+++    seq = impl->base.dinput->evsequence++;
+++    raw[0] = pad.thumb_lx + 32768;
+++    raw[1] = 32767 - pad.thumb_ly;
+++    raw[2] = 0x8000 + (pad.left_trigger - pad.right_trigger) * 128;
+++    raw[3] = pad.thumb_rx + 32768;
+++    raw[4] = 32767 - pad.thumb_ry;
+++    for (i = 0; i < TITLE_PAD_AXES; i++, index++)
+++    {
+++        static const DWORD offsets[TITLE_PAD_AXES] = { DIJOFS_X, DIJOFS_Y, DIJOFS_Z, DIJOFS_RX, DIJOFS_RY };
+++        value = scale_axis( max( 0, min( 65535, raw[i] ) ), impl->base.object_properties + index );
+++        old = *(LONG *)(state + offsets[i]);
+++        *(LONG *)(state + offsets[i]) = value;
+++        if (old != value)
+++        {
+++            queue_event( iface, index, value, time, seq );
+++            changed = TRUE;
+++        }
+++    }
+++
+++    hat = hat_position( pad.buttons );
+++    old = *(LONG *)(state + DIJOFS_POV( 0 ));
+++    *(DWORD *)(state + DIJOFS_POV( 0 )) = hat;
+++    if ((DWORD)old != hat)
+++    {
+++        queue_event( iface, index, hat, time, seq );
+++        changed = TRUE;
+++    }
+++    index++;
+++
+++    for (i = 0; i < TITLE_PAD_BUTTONS; i++, index++)
+++    {
+++        BYTE pressed = pad.buttons & buttons[i] ? 0x80 : 0;
+++        if (state[DIJOFS_BUTTON( i )] == pressed) continue;
+++        state[DIJOFS_BUTTON( i )] = pressed;
+++        queue_event( iface, index, pressed, time, seq );
+++        changed = TRUE;
+++    }
+++
+++    if (changed && impl->base.hEvent) SetEvent( impl->base.hEvent );
+++    return DI_OK;
+++}
+++
+++static HRESULT title_pad_poll( IDirectInputDevice8W *iface )
+++{
+++    struct title_pad *impl = impl_from_IDirectInputDevice8W( iface );
+++    HRESULT hr;
+++
+++    EnterCriticalSection( &impl->base.crit );
+++    hr = title_pad_update( impl );
+++    LeaveCriticalSection( &impl->base.crit );
+++    return hr;
+++}
+++
+++/* The input thread, each time the device's timer fires while it is acquired. */
+++static HRESULT title_pad_read( IDirectInputDevice8W *iface )
+++{
+++    struct title_pad *impl = impl_from_IDirectInputDevice8W( iface );
+++    HRESULT hr;
+++
+++    EnterCriticalSection( &impl->base.crit );
+++    hr = title_pad_update( impl );
+++    if (FAILED(hr)) CancelWaitableTimer( impl->base.read_event );
+++    LeaveCriticalSection( &impl->base.crit );
+++    return hr;
+++}
+++
+++static HRESULT title_pad_acquire( IDirectInputDevice8W *iface )
+++{
+++    struct title_pad *impl = impl_from_IDirectInputDevice8W( iface );
+++    struct xinput_pad_state pad;
+++    LARGE_INTEGER due = {.QuadPart = -10000 * TITLE_PAD_READ_MS};
+++    UINT i;
+++
+++    if (!read_title_pad( impl->index, &pad )) return DIERR_UNPLUGGED;
+++
+++    /* Centred and released, so the first read sends what is held. */
+++    for (i = 0; i < TITLE_PAD_AXES; i++)
+++    {
+++        static const DWORD offsets[TITLE_PAD_AXES] = { DIJOFS_X, DIJOFS_Y, DIJOFS_Z, DIJOFS_RX, DIJOFS_RY };
+++        const struct object_properties *properties = impl->base.object_properties + i;
+++        *(LONG *)(impl->base.device_state + offsets[i]) = properties->range_min + (properties->range_max - properties->range_min) / 2;
+++    }
+++    *(DWORD *)(impl->base.device_state + DIJOFS_POV( 0 )) = (DWORD)-1;
+++    for (i = 0; i < TITLE_PAD_BUTTONS; i++) impl->base.device_state[DIJOFS_BUTTON( i )] = 0;
+++    title_pad_update( impl );
+++
+++    if (!SetWaitableTimer( impl->base.read_event, &due, TITLE_PAD_READ_MS, NULL, NULL, FALSE ))
+++        WARN( "SetWaitableTimer failed, error %lu\n", GetLastError() );
+++    return DI_OK;
+++}
+++
+++static HRESULT title_pad_unacquire( IDirectInputDevice8W *iface )
+++{
+++    struct title_pad *impl = impl_from_IDirectInputDevice8W( iface );
+++
+++    CancelWaitableTimer( impl->base.read_event );
+++    return DI_OK;
+++}
+++
+++static void title_pad_destroy( IDirectInputDevice8W *iface )
+++{
+++    struct title_pad *impl = impl_from_IDirectInputDevice8W( iface );
+++
+++    CloseHandle( impl->base.read_event );
+++}
+++
+++static HRESULT title_pad_get_property( IDirectInputDevice8W *iface, DWORD property,
+++                                       DIPROPHEADER *header, const DIDEVICEOBJECTINSTANCEW *instance )
+++{
+++    struct title_pad *impl = impl_from_IDirectInputDevice8W( iface );
+++
+++    switch (property)
+++    {
+++    case (DWORD_PTR)DIPROP_PRODUCTNAME:
+++    {
+++        DIPROPSTRING *value = (DIPROPSTRING *)header;
+++        lstrcpynW( value->wsz, impl->base.instance.tszProductName, MAX_PATH );
+++        return DI_OK;
+++    }
+++    case (DWORD_PTR)DIPROP_INSTANCENAME:
+++    {
+++        DIPROPSTRING *value = (DIPROPSTRING *)header;
+++        lstrcpynW( value->wsz, impl->base.instance.tszInstanceName, MAX_PATH );
+++        return DI_OK;
+++    }
+++    case (DWORD_PTR)DIPROP_VIDPID:
+++    {
+++        DIPROPDWORD *value = (DIPROPDWORD *)header;
+++        value->dwData = MAKELONG( 0x045e, 0x028e );
+++        return DI_OK;
+++    }
+++    case (DWORD_PTR)DIPROP_JOYSTICKID:
+++    {
+++        DIPROPDWORD *value = (DIPROPDWORD *)header;
+++        value->dwData = impl->index;
+++        return DI_OK;
+++    }
+++    case (DWORD_PTR)DIPROP_GUIDANDPATH:
+++    {
+++        DIPROPGUIDANDPATH *value = (DIPROPGUIDANDPATH *)header;
+++        value->guidClass = GUID_DEVCLASS_HIDCLASS;
+++        lstrcpynW( value->wszPath, impl->path, MAX_PATH );
+++        return DI_OK;
+++    }
+++    }
+++
+++    return DIERR_UNSUPPORTED;
+++}
+++
+++HRESULT title_pad_create_device( struct dinput *dinput, const GUID *guid, IDirectInputDevice8W **out )
+++{
+++    static const DIPROPHEADER filter =
+++    {
+++        .dwSize = sizeof(filter),
+++        .dwHeaderSize = sizeof(filter),
+++        .dwHow = DIPH_DEVICE,
+++    };
+++    struct xinput_pad_state pad;
+++    struct title_pad *impl;
+++    UINT32 index;
+++    HRESULT hr;
+++
+++    TRACE( "dinput %p, guid %s, out %p\n", dinput, debugstr_guid( guid ), out );
+++
+++    *out = NULL;
+++    if (!title_pad_index( guid, &index ) || !read_title_pad( index, &pad )) return DIERR_DEVICENOTREG;
+++
+++    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+++    dinput_device_init( &impl->base, &title_pad_vtbl, guid, dinput );
+++    impl->base.crit.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": struct title_pad*->base.crit");
+++    impl->index = index;
+++    swprintf( impl->path, MAX_PATH, L"\\\\?\\hid#vid_045e&pid_028e&ig_%02u#ps5&title&%u#{4d1e55b2-f16f-11cf-88cb-001111000030}",
+++              index, index );
+++
+++    title_pad_enum_device( 0, 0, &impl->base.instance, dinput->dwVersion, index );
+++    impl->base.caps.dwDevType = impl->base.instance.dwDevType;
+++    impl->base.caps.dwFirmwareRevision = 100;
+++    impl->base.caps.dwHardwareRevision = 100;
+++    impl->base.dwCoopLevel = DISCL_NONEXCLUSIVE | DISCL_BACKGROUND;
+++
+++    if (!(impl->base.read_event = CreateWaitableTimerW( NULL, FALSE, NULL )))
+++    {
+++        hr = DIERR_OUTOFMEMORY;
+++        goto failed;
+++    }
+++    if (FAILED(hr = dinput_device_init_device_format( &impl->base.IDirectInputDevice8W_iface ))) goto failed;
+++    title_pad_enum_objects( &impl->base.IDirectInputDevice8W_iface, &filter, DIDFT_ALL, init_object_properties, NULL );
+++
+++    *out = &impl->base.IDirectInputDevice8W_iface;
+++    return DI_OK;
+++
+++failed:
+++    IDirectInputDevice_Release( &impl->base.IDirectInputDevice8W_iface );
+++    return hr;
+++}
+++
+++static const struct dinput_device_vtbl title_pad_vtbl =
+++{
+++    title_pad_destroy,
+++    title_pad_poll,
+++    title_pad_read,
+++    title_pad_acquire,
+++    title_pad_unacquire,
+++    title_pad_enum_objects,
+++    title_pad_get_property,
+++    NULL,
+++    NULL,
+++    NULL,
+++    NULL,
+++    NULL,
+++};
++-- 
++2.43.0

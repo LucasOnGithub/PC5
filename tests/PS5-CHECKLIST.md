@@ -174,7 +174,7 @@ With ShadowMountPlus and elfldr running.
 | 75 | A 32-bit Direct3D 9 game that crashed after some minutes in `MSVCR90.dll` (Blur): play it for 15 minutes or more | it doesn't crash | no `crash report: at L"MSVCR90.dll"` |
 | 76 | Any 32-bit Direct3D 9 game that ran before | it runs as before: picture, sound, menus | |
 
-## More than one player (1.6.4)
+## More than one player (1.6.5)
 
 | # | Do | Expect | Expect in the log |
 | --- | --- | --- | --- |
@@ -184,6 +184,14 @@ With ShadowMountPlus and elfldr running.
 | 80 | The same game set to DualSense, with two controllers | player 1 is the DualSense (PlayStation buttons), player 2 an Xbox controller | `players=up-to-4`, `player 2 joined` |
 | 81 | A game set to Keyboard & mouse, with two controllers signed in | only player 1 controls it | `players=1` |
 | 82 | With two players in a game, hold the touchpad and Options on player 2's controller, then on player 1's | player 2's does nothing; player 1's leaves the game | `close requested by=combo` once |
+
+## DirectInput (1.6.5)
+
+| # | Do | Expect | Expect in the log |
+| --- | --- | --- | --- |
+| 83 | A game that reads its controller with DirectInput (Need for Speed: Most Wanted, 2005, without its XInput mod), set to Xbox controller | the controller works in the game and its controls menu: sticks, both triggers, D-pad, buttons | |
+| 84 | The same with two controllers signed in | the game lists two "Controller (XBOX 360 For Windows)" | |
+| 85 | A game that reads both XInput and DirectInput (most from after 2006) | each controller counts once, not twice | |
 
 A non-zero `rc=` on the light bar or triggers lines means the console refused that call; send
 that log.

@@ -8,11 +8,13 @@ PC5 lets each game see your controller in one of three ways: as an Xbox controll
 
 | Mode | The game sees | Use it for |
 | --- | --- | --- |
-| Xbox controller | An Xbox controller (XInput). **The default.** | Most games from the last twenty years, which look for an Xbox controller. Games that read controllers through Windows.Gaming.Input find it too. |
+| Xbox controller | An Xbox controller (XInput). **The default.** | Most games from the last twenty years, which look for an Xbox controller. Games that read controllers through Windows.Gaming.Input, DirectInput or Windows' joystick API find it too, as Windows shows an Xbox 360 controller. |
 | DualSense | A DualSense plugged in by USB, as on a PC. The game gets the touchpad and the motion sensors, and its own rumble, light bar and adaptive trigger effects reach the controller. | Games that know the DualSense, or look for controllers another way (DirectInput, raw input, SDL). |
 | Keyboard & mouse | A keyboard and a mouse. Each button and stick direction sends the key or mouse button you choose in **Button mapping**. | Games without controller support. |
 
 Which one to try: start with **Xbox controller**. If the game doesn't react to the controller, try **DualSense**. If the game has no controller support at all, use **Keyboard & mouse**.
+
+Older games that read controllers with DirectInput see the Xbox controller as Windows shows one: "Controller (XBOX 360 For Windows)", with both triggers on one axis (the left one up, the right one down), the D-pad as a hat and ten buttons. A mod that turns a game's DirectInput controls into XInput isn't needed for that from 1.6.5.
 
 A USB keyboard and mouse plugged into the PS5 work in every mode, alongside the controller.
 
