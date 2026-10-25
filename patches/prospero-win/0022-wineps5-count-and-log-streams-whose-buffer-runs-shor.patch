@@ -6,8 +6,6 @@ Subject: [PATCH] wineps5: count and log streams whose buffer runs short
 The mixer ignored how many frames pw_audio_mix_add() could take, so an
 application that refilled late was heard as gaps with nothing logged.
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01A9xZzd6eUvy4WLFbfGr4Yi
 (cherry picked from commit dd172b447f563f3232656f53d5cf10805f570be5)
 ---
  wine/wineps5/unix.c | 33 ++++++++++++++++++++++++++++++++-

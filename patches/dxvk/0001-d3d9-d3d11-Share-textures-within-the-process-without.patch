@@ -29,9 +29,6 @@ itself once they share a Vulkan device:
   make resources on one device.
 - Both DLLs stay loaded once a device is shared, since each one's
   objects live on in the other's.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
 ---
  src/d3d11/d3d11.def              |   4 ++
  src/d3d11/d3d11_device.cpp       |  65 ++++++++++++-----

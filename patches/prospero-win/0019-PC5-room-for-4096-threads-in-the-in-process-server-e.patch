@@ -4,8 +4,6 @@ Date: Sun, 25 Oct 2026 08:44:04 +0000
 Subject: [PATCH] PC5: room for 4096 threads in the in-process server, ended
  threads dropped when it is full, and the count logged
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
 ---
  tests/test_pw_wine_threads.c |  4 +++-
  wine/ps5/pw_wine_threads.c   | 29 ++++++++++++++++++++++++++---

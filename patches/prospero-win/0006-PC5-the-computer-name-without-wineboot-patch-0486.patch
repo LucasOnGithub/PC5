@@ -14,9 +14,6 @@ configured name the prefix keeps, as wineboot would have copied it.
 Tested on the PC's Wine, 64- and 32-bit: with ActiveComputerName
 deleted, GetComputerNameW and GetComputerNameExW(ComputerNameNetBIOS)
 return the prefix's name.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
 ---
  PUBLICATION_ALLOWLIST.txt                     |  1 +
  docs/WINE_PS5_BUILD.md                        |  1 +

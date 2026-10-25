@@ -9,9 +9,6 @@ PC5's home screen tiles (the PS5 Forwarder Format) start the title with
 exit=1 for a game the launcher starts: when that game ends, the title
 closes instead of coming back to the launcher, so the player is on the
 home screen again.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
 ---
  native/wine64_main.c        | 40 +++++++++++++++++++++++++++++--------
  src/pw_wine_launch.c        | 20 ++++++++++++++++++-

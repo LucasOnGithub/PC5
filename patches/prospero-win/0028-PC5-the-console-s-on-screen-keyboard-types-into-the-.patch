@@ -1,0 +1,203 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bornaradusin <bornaradusin@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 10:58:58 +0000
+Subject: [PATCH] PC5: the console's on-screen keyboard types into the game
+ (Wine patch 0922)
+
+A click of the touchpad with two fingers opens the console's keyboard over
+the game (PC5's title code). Its text, once accepted, goes to Wine as input
+of a new kind, one UTF-16 unit each, which the PS5 driver types as Windows
+types a character from an input method (Wine patch 0922: KEYEVENTF_UNICODE,
+so the game gets WM_CHAR). The click is hidden from the game, from its
+press to its release.
+---
+ PUBLICATION_ALLOWLIST.txt                     |  1 +
+ native/wine64_main.c                          | 27 ++++++++++
+ tests/test_pw_wine_sink.c                     |  8 ++-
+ ...aracters-from-the-console-s-keyboard.patch | 51 +++++++++++++++++++
+ wine/ps5/pw_wine_sink.c                       |  1 +
+ wine/ps5/pw_wine_sink.h                       | 12 +++--
+ 6 files changed, 94 insertions(+), 6 deletions(-)
+ create mode 100644 wine/patches/0922-win32u-ps5-type-characters-from-the-console-s-keyboard.patch
+
+diff --git a/PUBLICATION_ALLOWLIST.txt b/PUBLICATION_ALLOWLIST.txt
+index 4a254f9..2658918 100644
+--- a/PUBLICATION_ALLOWLIST.txt
++++ b/PUBLICATION_ALLOWLIST.txt
+@@ -563,6 +563,7 @@ wine/patches/0918-ntdll-ps5-a-missing-image-is-not-found.patch
+ wine/patches/0919-dnsapi-report-unavailable-unix-backend.patch
+ wine/patches/0920-dxcore-a-gpu-adapter-has-the-graphics-and-compute-attributes.patch
+ wine/patches/0921-ntdll-ps5-4-gib-for-32-bit-programs.patch
++wine/patches/0922-win32u-ps5-type-characters-from-the-console-s-keyboard.patch
+ 
+ 
+ 
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+index d77ceb8..78e3c51 100644
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -1642,6 +1642,18 @@ int main(int argc, char **argv)
+         }
+ #endif
+         int pad_read = pad_status == PW_OK && post_input && pw_pad_ps5_read(&pad) == PW_OK;
++#ifdef PW_PC5
++        /* PC5's on-screen keyboard (the touchpad clicked with two fingers): the buttons
++         * it takes are hidden from the game this tick, and held again for the next read. */
++        uint32_t pc5_hidden = 0, pc5_held = pad.core.previous_buttons;
++        if (pad_read && pc5_game_on) {
++            pc5_hidden = pc5_game_keyboard(&pc5_game, pad.core.previous_buttons, pad.core.pressed_edges,
++                                           pad.core.released_edges, pad.touch.fingers);
++            pad.core.previous_buttons &= ~pc5_hidden;
++            pad.core.pressed_edges &= ~pc5_hidden;
++            pad.core.released_edges &= ~pc5_hidden;
++        }
++#endif
+         /* XInput controller 0: the DualSense, and in a script build the
+          * macro's controller added to it, every frame, so a scripted press
+          * stays down until its release. */
+@@ -1709,6 +1721,21 @@ int main(int argc, char **argv)
+                                (unsigned)right, pw_result_name(vibrate), pad.vibration_rc);
+             }
+         }
++#ifdef PW_PC5
++        pad.core.previous_buttons = pc5_held;
++        /* The keyboard's text, typed into the game as fast as Wine's queue takes it. */
++        if (pc5_game_on && post_input) {
++            size_t count = 0, sent = 0;
++            const uint16_t *text = pc5_game_keyboard_text(&pc5_game, &count);
++            while (sent < count) {
++                PwWineInput unit = { PW_WINE_INPUT_CHAR, text[sent], 0, 0, 1 };
++                if (post_input(&unit)) break;
++                sent++;
++                posted++;
++            }
++            if (sent) pc5_game_keyboard_typed(&pc5_game, sent);
++        }
++#endif
+         if (__atomic_load_n(&display_request, __ATOMIC_ACQUIRE) &&
+             !__atomic_load_n(&display_closed, __ATOMIC_RELAXED)) {
+             int closed = video_status == PW_OK ? pw_videoout_ps5_close(&video) : PW_OK;
+diff --git a/tests/test_pw_wine_sink.c b/tests/test_pw_wine_sink.c
+index b7f7282..d533f4c 100644
+--- a/tests/test_pw_wine_sink.c
++++ b/tests/test_pw_wine_sink.c
+@@ -290,9 +290,13 @@ int main(void)
+     /* A dialog key is a key the driver sends only to a dialog box: validated as one. */
+     e=(PwWineInput){PW_WINE_INPUT_DIALOG_KEY,0x0d,0,0,1};assert(!pw_wine_post_input(&e));
+     assert(pw_wine_next_input(&out) && out.type==PW_WINE_INPUT_DIALOG_KEY && out.code==0x0d && out.down==1);
++    /* A character is one UTF-16 unit, a surrogate too. */
++    e=(PwWineInput){PW_WINE_INPUT_CHAR,0xd83d,0,0,1};assert(!pw_wine_post_input(&e));
++    assert(pw_wine_next_input(&out) && out.type==PW_WINE_INPUT_CHAR && out.code==0xd83d && out.down==1);
+     PwWineInput bad[]={{0,1,0,0,1},{PW_WINE_INPUT_KEY,0,0,0,1},{PW_WINE_INPUT_KEY,256,0,0,1},
+                        {PW_WINE_INPUT_DIALOG_KEY,0,0,0,1},{PW_WINE_INPUT_DIALOG_KEY,300,0,0,1},
+-                       {PW_WINE_INPUT_KEY,65,0,0,2},{PW_WINE_INPUT_MOUSE_BUTTON,3,0,0,1},{99,0,0,0,0}};
++                       {PW_WINE_INPUT_KEY,65,0,0,2},{PW_WINE_INPUT_MOUSE_BUTTON,3,0,0,1},{99,0,0,0,0},
++                       {PW_WINE_INPUT_CHAR,0,0,0,1},{PW_WINE_INPUT_CHAR,0x10000,0,0,1},{PW_WINE_INPUT_CHAR,'a',0,0,0}};
+     for(unsigned i=0;i<sizeof(bad)/sizeof(bad[0]);i++)assert(pw_wine_post_input(&bad[i])==-1);
+     assert(pw_wine_post_input(NULL)==-1);
+     e=(PwWineInput){PW_WINE_INPUT_MOUSE_MOVE,0,1,2,0};
+@@ -301,7 +305,7 @@ int main(void)
+     for(int i=0;i<PW_WINE_INPUT_QUEUE;i++)assert(pw_wine_next_input(&out) && out.x==1 && out.y==2);
+     assert(!pw_wine_next_input(&out));
+     pw_wine_sink_stats(&s);
+-    assert(s.inputs_posted==3+PW_WINE_INPUT_QUEUE && s.inputs_delivered==s.inputs_posted);
++    assert(s.inputs_posted==4+PW_WINE_INPUT_QUEUE && s.inputs_delivered==s.inputs_posted);
+     assert(s.inputs_dropped==sizeof(bad)/sizeof(bad[0])+2);
+ 
+     /* The wake pipe: readable after a post, empty once drained. */
+diff --git a/wine/patches/0922-win32u-ps5-type-characters-from-the-console-s-keyboard.patch b/wine/patches/0922-win32u-ps5-type-characters-from-the-console-s-keyboard.patch
+new file mode 100644
+index 0000000..1d1b893
+--- /dev/null
++++ b/wine/patches/0922-win32u-ps5-type-characters-from-the-console-s-keyboard.patch
+@@ -0,0 +1,51 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: prospero-win <prospero-win@invalid>
++Date: Sun, 25 Oct 2026 10:39:17 +0000
++Subject: [PATCH] win32u: Let the PS5 driver type characters from the console's keyboard.
++
++The console's on-screen keyboard gives text, not keys: a name for a save,
++a server's address, a chat line. Input type 5 is one UTF-16 unit of that
++text, which the driver sends as Windows sends a character from an input
++method: KEYEVENTF_UNICODE, down and up, a VK_PACKET key that
++TranslateMessage turns into WM_CHAR. A character beyond the BMP comes as
++its two surrogates, one event each.
++---
++ dlls/win32u/ps5drv.c | 16 ++++++++++++++--
++ 1 file changed, 14 insertions(+), 2 deletions(-)
++
++diff --git a/dlls/win32u/ps5drv.c b/dlls/win32u/ps5drv.c
++--- a/dlls/win32u/ps5drv.c
+++++ b/dlls/win32u/ps5drv.c
++@@ -65,8 +65,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(ps5drv);
++ /* the layout of PwWineInput in wine/ps5/pw_wine_sink.h */
++ struct ps5_input
++ {
++-    UINT type;              /* 1 key, 2 mouse move, 3 mouse button, 4 dialog key */
++-    UINT code;              /* virtual key, or button 0 left 1 right 2 middle */
+++    UINT type;              /* 1 key, 2 mouse move, 3 mouse button, 4 dialog key, 5 character */
+++    UINT code;              /* virtual key, button 0 left 1 right 2 middle, or a UTF-16 unit */
++     INT  x, y;              /* mouse move: relative motion in desktop pixels */
++     UINT down;
++ };
++@@ -627,6 +627,18 @@ static BOOL ps5_ProcessEvents( DWORD mask )
++             if (is_extended_key( event.code )) input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
++             NtUserSendHardwareInput( hwnd, 0, &input, 0 );
++             break;
+++        case 5:
+++            /* A character typed on the console's on-screen keyboard, sent as
+++             * Windows sends one from an input method: a VK_PACKET key, down and
+++             * up, that TranslateMessage turns into WM_CHAR. A character beyond
+++             * the BMP comes as its two surrogates, one event each. */
+++            if (!event.code || event.code > 0xffff) break;
+++            input.ki.wScan = event.code;
+++            input.ki.dwFlags = KEYEVENTF_UNICODE;
+++            NtUserSendHardwareInput( hwnd, 0, &input, 0 );
+++            input.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+++            NtUserSendHardwareInput( hwnd, 0, &input, 0 );
+++            break;
++         case 2:
++             move_cursor( hwnd, event.x, event.y );
++             break;
++-- 
++2.43.0
++
+diff --git a/wine/ps5/pw_wine_sink.c b/wine/ps5/pw_wine_sink.c
+index 4219d62..1211d80 100644
+--- a/wine/ps5/pw_wine_sink.c
++++ b/wine/ps5/pw_wine_sink.c
+@@ -104,6 +104,7 @@ static int valid(const PwWineInput *e)
+     case PW_WINE_INPUT_DIALOG_KEY:return e->code>0 && e->code<256 && e->down<=1;
+     case PW_WINE_INPUT_MOUSE_MOVE:return 1;
+     case PW_WINE_INPUT_MOUSE_BUTTON:return e->code<=2 && e->down<=1;
++    case PW_WINE_INPUT_CHAR:return e->code>0 && e->code<=0xffff && e->down==1;
+     default:return 0;
+     }
+ }
+diff --git a/wine/ps5/pw_wine_sink.h b/wine/ps5/pw_wine_sink.h
+index 0d0d0f7..7289dcc 100644
+--- a/wine/ps5/pw_wine_sink.h
++++ b/wine/ps5/pw_wine_sink.h
+@@ -26,14 +26,18 @@ typedef int (*PwWinePresentSink)(void *context,const void *bgra,uint32_t width,u
+ 
+ /* DIALOG_KEY: a key the driver sends only while a dialog box is in front
+  * (Wine patch 0911), for answering a game's pop-up with the controller; a
+- * press is dropped otherwise, and a key sent down is always sent up. */
++ * press is dropped otherwise, and a key sent down is always sent up.
++ * CHAR: one UTF-16 unit of text typed on the console's on-screen keyboard,
++ * which the driver types as Windows types a character from an input method
++ * (Wine patch 0922); a character beyond the BMP is its two surrogates. */
+ enum { PW_WINE_INPUT_KEY=1,PW_WINE_INPUT_MOUSE_MOVE,PW_WINE_INPUT_MOUSE_BUTTON,PW_WINE_INPUT_DIALOG_KEY,
+-       PW_WINE_INPUT_QUEUE=256 };
++       PW_WINE_INPUT_CHAR,PW_WINE_INPUT_QUEUE=256 };
+ typedef struct PwWineInput {
+     uint32_t type;
+-    uint32_t code;      /* KEY, DIALOG_KEY: Windows virtual key; MOUSE_BUTTON: 0 left, 1 right, 2 middle */
++    uint32_t code;      /* KEY, DIALOG_KEY: Windows virtual key; MOUSE_BUTTON: 0 left, 1 right, 2 middle;
++                           CHAR: a UTF-16 unit */
+     int32_t x,y;        /* MOUSE_MOVE: relative motion in desktop pixels */
+-    uint32_t down;      /* KEY, MOUSE_BUTTON: 1 pressed, 0 released */
++    uint32_t down;      /* KEY, MOUSE_BUTTON: 1 pressed, 0 released; CHAR: 1 */
+ } PwWineInput;
+ 
+ /* The console's output format: interleaved left,right 16-bit frames at

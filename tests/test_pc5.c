@@ -610,7 +610,17 @@ static void test_install(void)
         pc5_profile_refresh(root, "neondrift", error, sizeof(error));
         pw_wine_library_load(pw, root);
         profile = pw_wine_library_find(pw, "neondrift");
-        CHECK(profile && profile->display.width == 1920, "and 1080p again");
+        CHECK(profile && profile->display.width == 1920 && profile->display.scaling == PW_GAME_SCALING_FIT,
+              "and 1080p again, its own shape");
+        controls.stretch = 1;
+        pc5_controls_save(root, "neondrift", &controls);
+        pc5_profile_refresh(root, "neondrift", error, sizeof(error));
+        pw_wine_library_load(pw, root);
+        profile = pw_wine_library_find(pw, "neondrift");
+        CHECK(profile && profile->display.scaling == PW_GAME_SCALING_STRETCH, "Aspect ratio Stretch: stretched");
+        controls.stretch = 0;
+        pc5_controls_save(root, "neondrift", &controls);
+        pc5_profile_refresh(root, "neondrift", error, sizeof(error));
     }
     /* A game drawn without Vulkan stays at 1080p, whatever its Resolution says. */
     {
@@ -633,6 +643,62 @@ static void test_install(void)
         char *line = strstr(text, "dll_overrides = "), *end = line ? strchr(line, '\n') : NULL;
         CHECK(line && end && end - line - 16 <= 256 && !memcmp(end - 4, "=n,b", 4) && *(end - 5) != ',', "cut at a name: %.*s",
               line && end ? (int)(end - line) : 0, line ? line : "");
+    }
+
+    /* A launcher's hand-off: Wine's file names the program it started; PC5 writes the
+     * profile for it, its arguments and working folder, once, and an ordinary start writes
+     * the game's own program again. */
+    {
+        char error[PC5_ERROR], handoff[PC5_PATH], dir[PC5_PATH];
+        CHECK(!pc5_handoff_env(root, "neondrift", handoff, sizeof(handoff), dir, sizeof(dir)) &&
+              strstr(handoff, "/prefixes/neondrift/pc5/handoff.txt") && !strcmp(dir, "C:\\Games\\NeonDrift\\"),
+              "the hand-off's file and folder: %s %s", handoff, dir);
+        CHECK(pc5_handoff_take(root, "neondrift", error, sizeof(error)) == 0, "no hand-off: nothing done");
+        path(file, sizeof(file), "%s/neondrift/drive_c/Games/NeonDrift/bin/Real Game.exe", prefixes);
+        write_text(file, "MZ");
+        write_text(handoff, "C:\\Games\\NeonDrift\\bin\\Real Game.exe\n"
+                            "\"C:\\Games\\NeonDrift\\bin\\Real Game.exe\" -token \"a b\" -fast  \nC:\\Games\\NeonDrift\n");
+        CHECK(pc5_handoff_take(root, "neondrift", error, sizeof(error)) == 1, "a hand-off taken: %s", error);
+        CHECK(!pc5_exists(handoff), "its file taken");
+        pw_wine_library_load(pw, root);
+        profile = pw_wine_library_find(pw, "neondrift");
+        CHECK(profile && !strcmp(profile->app.executable, "C:\\Games\\NeonDrift\\bin\\Real Game.exe") &&
+              !strcmp(profile->app.arguments, "-token \"a b\" -fast") &&
+              !strcmp(profile->app.working_directory, "C:\\Games\\NeonDrift"),
+              "the profile starts it: %s | %s | %s", profile ? profile->app.executable : "",
+              profile ? profile->app.arguments : "", profile ? profile->app.working_directory : "");
+        /* Outside the game's folder, or not there: refused, the profile as it was. */
+        write_text(handoff, "C:\\windows\\system32\\notepad.exe\nnotepad.exe\nC:\\windows\n");
+        CHECK(pc5_handoff_take(root, "neondrift", error, sizeof(error)) == -1 && strstr(error, "isn't one of the game's"),
+              "outside the folder: %s", error);
+        write_text(handoff, "C:\\Games\\NeonDrift\\..\\Other\\x.exe\nx.exe\nC:\\\n");
+        CHECK(pc5_handoff_take(root, "neondrift", error, sizeof(error)) == -1, "no climbing out");
+        write_text(handoff, "C:\\Games\\NeonDrift\\Missing.exe\nMissing.exe\nC:\\Games\\NeonDrift\n");
+        CHECK(pc5_handoff_take(root, "neondrift", error, sizeof(error)) == -1, "a program that isn't there");
+        /* A working folder outside the game's: the program's own. A bare program name: no arguments. */
+        write_text(handoff, "C:\\Games\\NeonDrift\\bin\\Real Game.exe\nRealGame\nC:\\users\n");
+        CHECK(pc5_handoff_take(root, "neondrift", error, sizeof(error)) == 1, "second in a row");
+        pw_wine_library_load(pw, root);
+        profile = pw_wine_library_find(pw, "neondrift");
+        CHECK(profile && !strcmp(profile->app.working_directory, "C:\\Games\\NeonDrift\\bin") && !profile->app.arguments[0],
+              "its own folder: %s", profile ? profile->app.working_directory : "");
+        /* Three in a row are the most: a launcher and a game that keep starting each other stop. */
+        write_text(handoff, "C:\\Games\\NeonDrift\\bin\\Real Game.exe\nx\nC:\\Games\\NeonDrift\n");
+        CHECK(pc5_handoff_take(root, "neondrift", error, sizeof(error)) == 1, "third in a row");
+        write_text(handoff, "C:\\Games\\NeonDrift\\bin\\Real Game.exe\nx\nC:\\Games\\NeonDrift\n");
+        CHECK(pc5_handoff_take(root, "neondrift", error, sizeof(error)) == -1 && strstr(error, "kept starting"),
+              "a fourth refused: %s", error);
+        /* An ordinary start: the game's own program, and the count starts again. */
+        CHECK(!pc5_profile_refresh(root, "neondrift", error, sizeof(error)), "ordinary start");
+        pw_wine_library_load(pw, root);
+        profile = pw_wine_library_find(pw, "neondrift");
+        CHECK(profile && !strstr(profile->app.executable, "Real Game"), "its own program again: %s",
+              profile ? profile->app.executable : "");
+        write_text(handoff, "C:\\Games\\NeonDrift\\bin\\Real Game.exe\nx\nC:\\Games\\NeonDrift\n");
+        CHECK(pc5_handoff_take(root, "neondrift", error, sizeof(error)) == 1, "a new chain");
+        CHECK(!pc5_profile_refresh(root, "neondrift", error, sizeof(error)), "and back");
+        path(file, sizeof(file), "%s/neondrift/drive_c/Games/NeonDrift/bin/Real Game.exe", prefixes);
+        unlink(file);
     }
 
     /* More games: an engine game (a second id from the same name isn't needed), an OpenGL one. */
@@ -1185,6 +1251,102 @@ static int fake_memory(uint64_t *used, uint64_t *total)
     *used = ((uint64_t)51 << 30) / 10;
     *total = ((uint64_t)125 << 30) / 10;
     return measured.memory_rc;
+}
+
+/* The on-screen keyboard: what the console's keyboard is doing, and what PC5 asked of it. */
+static struct {
+    int opens, closes, open_rc, state, accept;
+    uint32_t capacity;
+    uint16_t *buffer;
+    char log[512];
+} ime_seen;
+static int fake_keyboard_open(uint16_t *buffer, uint32_t capacity)
+{
+    ime_seen.opens++;
+    ime_seen.buffer = buffer;
+    ime_seen.capacity = capacity;
+    if (!ime_seen.open_rc) ime_seen.state = 1;
+    return ime_seen.open_rc;
+}
+static int fake_keyboard_state(void) { return ime_seen.state; }
+static int fake_keyboard_close(void)
+{
+    ime_seen.closes++;
+    ime_seen.state = 0;
+    return ime_seen.accept;
+}
+static void fake_keyboard_log(const char *line)
+{
+    size_t used = strlen(ime_seen.log);
+    snprintf(ime_seen.log + used, sizeof(ime_seen.log) - used, "%s\n", line);
+}
+
+/* The touchpad clicked with two fingers opens the keyboard, the click stays the
+ * keyboard's until released, and accepted text is typed once, in parts. */
+static void test_keyboard(void)
+{
+    enum { CROSS = 0x4000u, TOUCHPAD = 0x100000u };
+    const Pc5GameOps ops = { .log = fake_keyboard_log, .keyboard_open = fake_keyboard_open,
+                             .keyboard_state = fake_keyboard_state, .keyboard_close = fake_keyboard_close };
+    Pc5GameSession game;
+    size_t count = 0;
+    const uint16_t *text;
+
+    memset(&game, 0, sizeof(game));
+    game.ops = ops;
+    memset(&ime_seen, 0, sizeof(ime_seen));
+    CHECK(pc5_game_keyboard(&game, TOUCHPAD, TOUCHPAD, 0, 1) == 0 && !ime_seen.opens, "a one-finger click is the game's");
+    pc5_game_keyboard(&game, 0, 0, TOUCHPAD, 0);
+    CHECK(pc5_game_keyboard(&game, TOUCHPAD | CROSS, CROSS, 0, 2) == 0 && !ime_seen.opens, "and so is Cross with two fingers down");
+    pc5_game_keyboard(&game, 0, 0, TOUCHPAD | CROSS, 0);
+    CHECK(pc5_game_keyboard(&game, TOUCHPAD, TOUCHPAD, 0, 2) == TOUCHPAD && ime_seen.opens == 1 &&
+          ime_seen.capacity == PC5_KEYBOARD_TEXT && game.keyboard_open, "a two-finger click: the keyboard opens");
+    CHECK(pc5_game_keyboard(&game, TOUCHPAD, 0, 0, 2) == TOUCHPAD, "the click is hidden while held");
+    CHECK(pc5_game_keyboard(&game, 0, 0, TOUCHPAD, 0) == TOUCHPAD, "and its release too");
+    CHECK(pc5_game_keyboard(&game, 0, 0, 0, 0) == 0 && ime_seen.closes == 0, "then nothing is hidden, the keyboard still open");
+    text = pc5_game_keyboard_text(&game, &count);
+    CHECK(count == 0, "no text while it is open");
+    /* Accepted: "Né😀" (a surrogate pair at the end) */
+    static const uint16_t typed[] = { 'N', 0x00e9, 0xd83d, 0xde00, 0 };
+    memcpy(ime_seen.buffer, typed, sizeof(typed));
+    ime_seen.state = 2;
+    ime_seen.accept = 1;
+    CHECK(pc5_game_keyboard(&game, 0, 0, 0, 0) == 0 && ime_seen.closes == 1 && !game.keyboard_open, "done: closed once");
+    text = pc5_game_keyboard_text(&game, &count);
+    CHECK(count == 4 && text[0] == 'N' && text[1] == 0x00e9 && text[3] == 0xde00, "its text, unit by unit: %zu", count);
+    pc5_game_keyboard_typed(&game, 3);
+    text = pc5_game_keyboard_text(&game, &count);
+    CHECK(count == 1 && text[0] == 0xde00, "typed in parts: %zu left", count);
+    pc5_game_keyboard_typed(&game, 5);
+    text = pc5_game_keyboard_text(&game, &count);
+    CHECK(count == 0, "then none");
+    pc5_game_keyboard(&game, 0, 0, 0, 0);
+    CHECK(ime_seen.closes == 1, "a closed keyboard isn't closed again");
+    /* Cancelled: nothing to type. */
+    pc5_game_keyboard(&game, TOUCHPAD, TOUCHPAD, 0, 2);
+    ime_seen.buffer[0] = 'x';
+    ime_seen.state = 2;
+    ime_seen.accept = 0;
+    pc5_game_keyboard(&game, 0, 0, TOUCHPAD, 0);
+    text = pc5_game_keyboard_text(&game, &count);
+    CHECK(ime_seen.opens == 2 && ime_seen.closes == 2 && count == 0, "cancelled: nothing typed");
+    /* Refused: the click is still the keyboard's, nothing stays open. */
+    ime_seen.open_rc = -5;
+    CHECK(pc5_game_keyboard(&game, TOUCHPAD, TOUCHPAD, 0, 2) == TOUCHPAD && !game.keyboard_open &&
+          ime_seen.opens == 3, "refused: not open");
+    CHECK(strstr(ime_seen.log, "PC5 keyboard open rc=0") && strstr(ime_seen.log, "4 characters to type") &&
+          strstr(ime_seen.log, "typed 4 characters") && strstr(ime_seen.log, "cancelled") &&
+          strstr(ime_seen.log, "refused rc=0xfffffffb"), "the log says each: %s", ime_seen.log);
+    /* A game that ends with the keyboard open closes it. */
+    ime_seen.open_rc = 0;
+    pc5_game_keyboard(&game, 0, 0, TOUCHPAD, 0);
+    pc5_game_keyboard(&game, TOUCHPAD, TOUCHPAD, 0, 2);
+    pc5_game_end(&game, -1);
+    CHECK(ime_seen.closes == 3 && !game.keyboard_open, "the game's end closes it");
+    /* No keyboard on this console: the click stays the game's. */
+    pc5_game_keyboard(&game, 0, 0, TOUCHPAD, 0);
+    game.ops.keyboard_open = NULL;
+    CHECK(pc5_game_keyboard(&game, TOUCHPAD, TOUCHPAD, 0, 2) == 0, "without a keyboard, nothing is taken");
 }
 
 /* A game's prefix from before winegstreamer gets its registrations once. */
@@ -2179,6 +2341,11 @@ static void test_screens(const char *fonts)
     CHECK(controls_has("orbital-nine", "resolution = 2160p\n"), "then 4K");
     press(ui, PC5_KEY_RIGHT, &canvas);
     CHECK(controls_has("orbital-nine", "resolution = 1080p\n"), "then 1080p again");
+    press(ui, PC5_KEY_DOWN, &canvas);       /* Aspect ratio: Stretch, then Keep again */
+    press(ui, PC5_KEY_ACCEPT, &canvas);
+    CHECK(controls_has("orbital-nine", "aspect_ratio = stretch\n"), "Aspect ratio: Stretch");
+    press(ui, PC5_KEY_LEFT, &canvas);
+    CHECK(controls_has("orbital-nine", "aspect_ratio = keep\n"), "then Keep");
     press(ui, PC5_KEY_DOWN, &canvas);       /* Change program */
     press(ui, PC5_KEY_ACCEPT, &canvas);
     until_screen(ui, "programs", &canvas);
@@ -2201,8 +2368,8 @@ static void test_screens(const char *fonts)
 
     /* A game's menu: Home screen tile, made, then taken away. */
     press(ui, PC5_KEY_TRIANGLE, &canvas);
-    for (int i = 0; i < 5; i++) press(ui, PC5_KEY_DOWN, &canvas);   /* Play, Controller, Frame generation, Resolution,
-                                                                       Change program */
+    for (int i = 0; i < 6; i++) press(ui, PC5_KEY_DOWN, &canvas);   /* Play, Controller, Frame generation, Resolution,
+                                                                       Aspect ratio, Change program */
     press(ui, PC5_KEY_ACCEPT, &canvas);
     CHECK(!strcmp(pc5_ui_screen(ui), "message") && pc5_home_find(tiles, "orbital-nine", tile), "tile made: %s %s",
           pc5_ui_screen(ui), tile);
@@ -2273,6 +2440,7 @@ int main(int argc, char **argv)
     test_own_covers();
     test_prefix_dxvk();
     test_dotnet();
+    test_keyboard();
     test_game(fonts);
     test_screens(fonts);
     test_tile_start(fonts);

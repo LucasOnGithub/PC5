@@ -5,7 +5,7 @@
 A launcher for your own PC games on a PS5 that runs homebrew. PC5 shows your games as a row
 of covers, installs games from a USB drive in one copy each, and uninstalls them with their
 saves. It runs the games with [prospero-win](https://github.com/mpereiraesaa/prospero-win)
-(Wine on the PS5). The app is `PPSA11018`, its tile is called **PC5**. This is version 1.5.0.
+(Wine on the PS5). The app is `PPSA11018`, its tile is called **PC5**. This is version 1.6.0.
 
 No game is part of PC5, and PC5 downloads none: you install the games you own.
 
@@ -33,7 +33,7 @@ No game is part of PC5, and PC5 downloads none: you install the games you own.
    **touchpad** and **Options** for two seconds: the game is asked to close (it can save),
    and if it hasn't after five seconds it is ended. You are back in PC5.
 
-Each game has a menu (**△**): Play, Controller, Frame generation, Resolution, Memory (32-bit games),
+Each game has a menu (**△**): Play, Controller, Frame generation, Resolution, Aspect ratio, Memory (32-bit games),
 Change program (when PC5 started the wrong `.exe`), Home screen tile and Uninstall. Uninstalling deletes the game and everything it made: its saves, its settings,
 its shader cache, its cover, its home screen tile's folder. There is no backup and no undo. The USB drive is never
 written to.
@@ -48,6 +48,7 @@ written to.
 | Options | Settings |
 | On the review screen | L1 / R1 other covers, □ another program |
 | In a game | touchpad + Options for two seconds: back to PC5 |
+| In a game | the touchpad clicked with two fingers: the PS5's keyboard, to type into the game |
 | On a game's Windows pop-up | ✕ presses its highlighted button (OK, Yes), the D-pad moves between its buttons |
 
 A USB keyboard works too: arrows, Enter, Escape, F1 for Settings, F2 for □, F3 for △,
@@ -66,6 +67,12 @@ that game:
 
 A change takes effect the next time the game starts. Holding the touchpad and Options for two
 seconds leaves the game whichever is chosen.
+
+**Typing**: click the touchpad with two fingers in a game, whichever is chosen, and the PS5's
+on-screen keyboard opens over it. Type and choose Done: the text is typed into the game, where
+its text box has the cursor (a name, a chat line, an address), as characters typed on Windows.
+The click itself never reaches the game. A game that reads the keyboard's keys rather than the
+characters typed doesn't see the text.
 
 A pop-up a game shows in a Windows box (a warning before it starts, a Yes / No question) is
 answered with the controller in every mode: with the Xbox controller or the DualSense, ✕
@@ -198,6 +205,19 @@ or 4K (**△** › Resolution, kept for that game). The console shows 1080p and 
 they are, and a 1440p one scaled up to 4K. A higher resolution is slower: 4K is four times
 the work of 1080p.
 
+**Aspect ratio**: a picture of another shape than the screen's (a 4:3 game) is shown in its
+own shape, with black bars beside it; **△** › Aspect ratio › Stretch fills the screen with
+it instead, wider than it was drawn. A game that draws its own bars inside a 16:9 picture
+keeps them.
+
+**Launchers**: a game whose own launcher starts the game (another program in the game's
+folder) runs: the console can't run two programs at once, so when the launcher starts the
+game, it closes and PC5 starts the game in its place, with what the launcher gave it. Each
+start goes through the launcher again; **△** › Change program starts the game directly
+instead. A launcher that needs a store's client (Steam, Epic, EA, Ubisoft) still doesn't
+work, and programs whose names say they are helpers (crash reporters, installers, updaters)
+aren't started.
+
 **The game's own DLLs**: a game that carries Microsoft's Visual C++ runtimes, Direct3D
 compilers or D3DX helpers beside its program uses its own copies first, as Proton does for
 the runtimes; Wine's own stand in for those it doesn't carry.
@@ -301,10 +321,13 @@ version as a GitHub release with that tag, with `PPSA11018.zip`,
   GStreamer, and winedmo); Frame generation in RADV's `libvulkan.prx`; a game started from
   a home screen tile, and back to the home screen after it; the controller answering a
   game's Windows pop-up (Wine's PS5 driver sends ✕ and the D-pad only to a dialog box);
-  a crash report in the log, as the console runs no debugger; and the drive letters
-  without a mount manager (Wine's GetLogicalDrives), so a game sees C:.
+  a crash report in the log, as the console runs no debugger; the drive letters
+  without a mount manager (Wine's GetLogicalDrives), so a game sees C:; and the PS5's
+  on-screen keyboard typing into the game (Wine's PS5 driver types its text as characters).
 - `patches/dxvk/`: PC5's patch to DXVK 2.6.2-prospero2: textures shared between a game's
   Direct3D 9 and Direct3D 11 within the game, where memory can't be shared through handles.
+- `patches/radv/`: PC5's patch to RADV (PS5_Mesa): a picture of another shape stretched
+  over the whole screen, for a game's Aspect ratio.
 - `tools/`: the build, the Windows template (`make-prefix.py`), the font atlas
   (`make-font.py`) and the app (`make-app.py`). `art/make-art.py` draws the icon and the
   Home background.

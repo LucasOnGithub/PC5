@@ -4,8 +4,6 @@ Date: Sun, 25 Oct 2026 08:44:04 +0000
 Subject: [PATCH] PC5: programs are told the console has 16 GB, and how much is
  free (Wine patch 0914)
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
 ---
  PUBLICATION_ALLOWLIST.txt                     |   1 +
  ...5-tell-programs-the-console-s-memory.patch | 148 ++++++++++++++++++

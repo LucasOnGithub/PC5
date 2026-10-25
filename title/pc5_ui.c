@@ -110,9 +110,10 @@ static int page_rows(const Pc5Settings *set, int page, SettingRow rows[PAGE_ROWS
 
 /* A game's menu: its rows; Button mapping only while it plays the keyboard and mouse. */
 typedef enum GameRow {
-    GR_PLAY, GR_CONTROLLER, GR_BUTTONS, GR_FRAMEGEN, GR_RESOLUTION, GR_MEMORY, GR_PROGRAM, GR_HOME, GR_UNINSTALL
+    GR_PLAY, GR_CONTROLLER, GR_BUTTONS, GR_FRAMEGEN, GR_RESOLUTION, GR_ASPECT, GR_MEMORY, GR_PROGRAM, GR_HOME,
+    GR_UNINSTALL
 } GameRow;
-enum { GAME_ROWS = 9 };
+enum { GAME_ROWS = 10 };
 /* What a game is, for its menu's rows. */
 enum { GAME_32BIT = 1, GAME_VULKAN = 2 };
 
@@ -125,6 +126,7 @@ static int game_rows(const Pc5Controls *controls, int kind, GameRow rows[GAME_RO
     if (controls->mode == PC5_PAD_KEYBOARD) rows[n++] = GR_BUTTONS;
     rows[n++] = GR_FRAMEGEN;
     if (kind & GAME_VULKAN) rows[n++] = GR_RESOLUTION;
+    rows[n++] = GR_ASPECT;
     if (kind & GAME_32BIT) rows[n++] = GR_MEMORY;
     rows[n++] = GR_PROGRAM;
     rows[n++] = GR_HOME;
@@ -1201,10 +1203,10 @@ static void controls_changed(Pc5Ui *ui)
 {
     const Pc5Controls *k = &ui->controls;
     if (pc5_controls_save(ui->root, ui->launch_id, k)) say(ui, "PC5 problem controls %s: can't write them", ui->launch_id);
-    say(ui, "PC5 controls id=%s mode=%s left=%s right=%s speed=%d frame_generation=%d memory_32bit=%s resolution=%s",
-        ui->launch_id, pc5_pad_mode_name(k->mode), pc5_stick_use_name(k->stick[0]), pc5_stick_use_name(k->stick[1]),
-        k->speed, k->frame_generation, k->memory_2gb ? "2gb" : "4gb",
-        k->resolution == 2 ? "2160p" : k->resolution == 1 ? "1440p" : "1080p");
+    say(ui, "PC5 controls id=%s mode=%s left=%s right=%s speed=%d frame_generation=%d memory_32bit=%s resolution=%s "
+        "aspect_ratio=%s", ui->launch_id, pc5_pad_mode_name(k->mode), pc5_stick_use_name(k->stick[0]),
+        pc5_stick_use_name(k->stick[1]), k->speed, k->frame_generation, k->memory_2gb ? "2gb" : "4gb",
+        k->resolution == 2 ? "2160p" : k->resolution == 1 ? "1440p" : "1080p", k->stretch ? "stretch" : "keep");
 }
 
 /* A Button mapping row moves to its next (step 1) or previous (-1) value: 1 when it changed. */
@@ -1684,6 +1686,10 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
         } else if ((k & (PC5_KEY_LEFT | PC5_KEY_RIGHT | accept)) && row == GR_RESOLUTION) {
             int step = (k & PC5_KEY_LEFT) ? -1 : 1;
             ui->controls.resolution = (ui->controls.resolution + 3 + step) % 3;
+            controls_changed(ui);
+            ui->dirty = 1;
+        } else if ((k & (PC5_KEY_LEFT | PC5_KEY_RIGHT | accept)) && row == GR_ASPECT) {
+            ui->controls.stretch = !ui->controls.stretch;
             controls_changed(ui);
             ui->dirty = 1;
         } else if ((k & (PC5_KEY_LEFT | PC5_KEY_RIGHT | accept)) && row == GR_MEMORY) {
@@ -2243,7 +2249,7 @@ static void game_menu_screen(Pc5Ui *ui, Pc5Canvas *c, int chosen)
     GameRow rows[GAME_ROWS];
     int count = game_rows(&ui->controls, ui_game_kind(ui), rows);
 
-    float pitch = count > 8 ? 84 : count > 7 ? 92 : count > 6 ? 104 : 118;   /* nine rows fit above the hints */
+    float pitch = count > 9 ? 76 : count > 8 ? 84 : count > 7 ? 92 : count > 6 ? 104 : 118;   /* ten rows fit above the hints */
     pc5_text(c, &ui->fonts, PC5_FACE_SMALL, (int)x + 64, 182, C_DIM, game->playable ? game->detail : game->problem, 760 - 128, 0);
     for (int i = 0; i < count; i++) {
         float y = 226 + pitch * i;
@@ -2275,6 +2281,12 @@ static void game_menu_screen(Pc5Ui *ui, Pc5Canvas *c, int chosen)
                                                       : "Drawn at 1080p and shown at 4K by the console",
                        ui->controls.resolution == 2 ? "4K" : ui->controls.resolution == 1 ? "1440p" : "1080p");
             break;
+        case GR_ASPECT:
+            drawer_row(ui, c, x, y, pitch, chosen == i, "Aspect ratio",
+                       ui->controls.stretch ? "Stretched to fill the screen: a 4:3 picture gets wider"
+                                            : "The picture's own shape, with bars beside a 4:3 one",
+                       ui->controls.stretch ? "Stretch" : "Keep");
+            break;
         case GR_MEMORY:
             drawer_row(ui, c, x, y, pitch, chosen == i, "Memory",
                        ui->controls.memory_2gb ? "What Windows gives a 32-bit game that doesn't ask for more"
@@ -2298,7 +2310,8 @@ static void game_menu_screen(Pc5Ui *ui, Pc5Canvas *c, int chosen)
         }
     }
     Hint list[] = { { accept_glyph(ui), chosen < count && (rows[chosen] == GR_CONTROLLER || rows[chosen] == GR_FRAMEGEN ||
-                                                           rows[chosen] == GR_RESOLUTION || rows[chosen] == GR_MEMORY ||
+                                                           rows[chosen] == GR_RESOLUTION || rows[chosen] == GR_ASPECT ||
+                                                           rows[chosen] == GR_MEMORY ||
                                                            rows[chosen] == GR_HOME)
                                             ? "Change" : "Choose" },
                     { back_glyph(ui), "Back" } };

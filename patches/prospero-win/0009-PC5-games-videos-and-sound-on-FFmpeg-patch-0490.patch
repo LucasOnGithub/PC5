@@ -13,9 +13,6 @@ SDK. build_wine_ps5.sh (--ffmpeg-source) links winedmo.prx and
 winegstreamer.prx with it and wine/ps5/pw_ffmpeg_libc.c, the libc functions
 FFmpeg needs on the console. The host Wine builds winegstreamer's PE side.
 The package carries FFmpeg's licence and names its commit.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
 ---
  PUBLICATION_ALLOWLIST.txt                     |     3 +
  THIRD_PARTY.md                                |    16 +

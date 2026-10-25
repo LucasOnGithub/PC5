@@ -20,9 +20,6 @@ value can't be read is left out.
   before), pw_pc5_hud_stats takes what the title measures, and the tick
   adds the frame rate and the frames' average time from the flips.
 - The title passes PC5's lines and, once a second, its numbers.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
 ---
  native/wine64_main.c      |  24 ++--
  tools/link_radv_prx.sh    |   2 +-

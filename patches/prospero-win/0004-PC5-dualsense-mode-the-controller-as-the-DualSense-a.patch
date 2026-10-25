@@ -34,9 +34,6 @@ cfgmgr32, HID attributes, strings, preparsed data and caps, feature
 and input reports, queued, waiting and cancelled reads, writes and
 output reports, raw input devices and 250 reports a second, DirectInput
 enumeration, in 64- and 32-bit processes, and nothing without the mode.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
 ---
  Makefile                                      |    3 +-
  PUBLICATION_ALLOWLIST.txt                     |    5 +

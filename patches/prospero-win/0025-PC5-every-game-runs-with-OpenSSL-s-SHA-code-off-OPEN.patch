@@ -4,8 +4,6 @@ Date: Sun, 25 Oct 2026 09:21:11 +0000
 Subject: [PATCH] PC5: every game runs with OpenSSL's SHA code off
  (OPENSSL_ia32cap), as Proton does
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
 ---
  native/wine64_main.c | 7 ++++++-
  src/pw_wine_start.h  | 2 +-

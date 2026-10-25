@@ -1,11 +1,14 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 /* PC5's game ops on the console (pc5_game.h): libScePad's light bar and
  * adaptive triggers, VideoOut's second hardware cursor for the overlay over
- * the frames the title shows itself, and the overlay's numbers: the
- * process's CPU time, libkernel's temperatures and memory. */
+ * the frames the title shows itself, the overlay's numbers (the process's
+ * CPU time, libkernel's temperatures and memory), and the on-screen
+ * keyboard (libSceImeDialog). */
 #include "pc5_game.h"
 
 #include <stdint.h>
+#include <stdio.h>
+#include <time.h>
 #include <string.h>
 #include <sys/resource.h>
 #include <unistd.h>
@@ -169,10 +172,136 @@ static int memory(uint64_t *used, uint64_t *total)
     return 0;
 }
 
+/* ---- the on-screen keyboard -------------------------------------------------------------- */
+
+/* libSceImeDialog's parameters and result (SceImeDialogParam, SceImeDialogResult): the
+ * user, the keyboard's kind, languages, Enter's label, the input method, a filter, the
+ * options, the longest text and its buffer (UTF-16), where the panel goes on a 1920x1080
+ * screen and from which of its edges, a placeholder and a title (UTF-16). */
+typedef struct ImeDialogParam {
+    int32_t user_id, type;
+    uint64_t languages;
+    int32_t enter_label, input_method;
+    void *filter;
+    uint32_t option, max_text_length;
+    uint16_t *text;
+    float x, y;
+    int32_t horizontal, vertical;
+    const uint16_t *placeholder, *title;
+    int8_t reserved[16];
+} ImeDialogParam;
+_Static_assert(sizeof(ImeDialogParam) == 96, "SceImeDialogParam is 96 bytes");
+typedef struct ImeDialogResult { int32_t end_status; int8_t reserved[12]; } ImeDialogResult;
+enum { IME_DIALOG_MODULE = 0x0096, IME_STATUS_RUNNING = 1, IME_STATUS_FINISHED = 2, IME_END_OK = 0,
+       IME_CENTER = 1, IME_BOTTOM = 2, COMMON_DIALOG_ALREADY = (int)0x80B80002 };
+
+int sceSysmoduleLoadModule(uint16_t id);
+int sceSysmoduleGetModuleHandleInternal(uint32_t id, int32_t *handle);
+int sceKernelDlsym(int32_t handle, const char *symbol, void **address);
+int sceUserServiceGetInitialUser(int32_t *user);
+
+/* Looked up once, the first time: a fake-signed title may not load a system library by
+ * path, so the system loads it as its module, and its functions are looked up in it. The
+ * common dialog, which the keyboard needs set up first, is one of the libraries it uses. */
+static struct {
+    int looked, status;
+    int32_t handle;
+    int (*init)(const ImeDialogParam *, const void *);
+    int (*get_status)(void);
+    int (*get_result)(ImeDialogResult *);
+    int (*abort)(void);
+    int (*term)(void);
+    int (*common_init)(void);
+} ime;
+static void (*ps5_log)(const char *line);
+
+static void *ime_symbol(const char *name)
+{
+    void *address = NULL;
+    return sceKernelDlsym(ime.handle, name, &address) == 0 ? address : NULL;
+}
+
+static int ime_find(void)
+{
+    if (ime.looked) return ime.init && ime.get_status && ime.get_result && ime.term;
+    ime.looked = 1;
+    ime.handle = -1;
+    ime.status = sceSysmoduleLoadModule(IME_DIALOG_MODULE);
+    if (sceSysmoduleGetModuleHandleInternal(IME_DIALOG_MODULE, &ime.handle) || ime.handle < 0)
+        (void)sceSysmoduleGetModuleHandleInternal(0x80000000u | IME_DIALOG_MODULE, &ime.handle);
+    if (ime.handle >= 0) {
+        ime.init = (int (*)(const ImeDialogParam *, const void *))(uintptr_t)ime_symbol("sceImeDialogInit");
+        ime.get_status = (int (*)(void))(uintptr_t)ime_symbol("sceImeDialogGetStatus");
+        ime.get_result = (int (*)(ImeDialogResult *))(uintptr_t)ime_symbol("sceImeDialogGetResult");
+        ime.abort = (int (*)(void))(uintptr_t)ime_symbol("sceImeDialogAbort");
+        ime.term = (int (*)(void))(uintptr_t)ime_symbol("sceImeDialogTerm");
+        ime.common_init = (int (*)(void))(uintptr_t)ime_symbol("sceCommonDialogInitialize");
+    }
+    if (ps5_log) {
+        char line[160];
+        snprintf(line, sizeof(line), "PC5 keyboard module status=%#x handle=%d init=%d status=%d result=%d term=%d common=%d",
+                 (unsigned)ime.status, (int)ime.handle, ime.init != NULL, ime.get_status != NULL,
+                 ime.get_result != NULL, ime.term != NULL, ime.common_init != NULL);
+        ps5_log(line);
+    }
+    return ime.init && ime.get_status && ime.get_result && ime.term;
+}
+
+static int keyboard_open(uint16_t *buffer, uint32_t capacity)
+{
+    static const uint16_t title[] = u"Type into the game";
+
+    if (!ime_find()) return ime.status < 0 ? ime.status : -1;
+    if (ime.common_init) {
+        int rc = ime.common_init();
+        if (rc && rc != COMMON_DIALOG_ALREADY && ps5_log) {
+            char line[64];
+            snprintf(line, sizeof(line), "PC5 keyboard common dialog rc=%#x", (unsigned)rc);
+            ps5_log(line);
+        }
+    }
+    ImeDialogParam param = { 0 };
+    param.user_id = -1;
+    (void)sceUserServiceGetInitialUser(&param.user_id);
+    param.max_text_length = capacity - 1;
+    param.text = buffer;
+    param.x = 960.0f;   /* at the bottom, in the middle */
+    param.y = 1040.0f;
+    param.horizontal = IME_CENTER;
+    param.vertical = IME_BOTTOM;
+    param.title = title;
+    return ime.init(&param, NULL);
+}
+
+static int keyboard_state(void)
+{
+    int status = ime.get_status ? ime.get_status() : -1;
+    return status == IME_STATUS_RUNNING ? 1 : status == IME_STATUS_FINISHED ? 2 : status < 0 ? status : 0;
+}
+
+/* Its result, once finished; one still open is ended first (its end comes through
+ * the status, a second at most). */
+static int keyboard_close(void)
+{
+    ImeDialogResult result = { 0 };
+    int status = ime.get_status ? ime.get_status() : -1, rc;
+
+    if (status == IME_STATUS_RUNNING && ime.abort) {
+        struct timespec tick = { 0, 16000000 };
+        (void)ime.abort();
+        for (int i = 0; i < 60 && (status = ime.get_status()) == IME_STATUS_RUNNING; i++) nanosleep(&tick, NULL);
+    }
+    rc = status == IME_STATUS_FINISHED ? ime.get_result(&result) : -1;
+    if (ime.term) (void)ime.term();
+    return rc < 0 ? rc : result.end_status == IME_END_OK ? 1 : 0;
+}
+
 void pc5_game_ps5_ops(Pc5GameOps *ops, void (*log)(const char *line));
 void pc5_game_ps5_ops(Pc5GameOps *ops, void (*log)(const char *line))
 {
+    ps5_log = log;
     *ops = (Pc5GameOps){ .light_bar = light_bar, .light_bar_reset = light_bar_reset, .triggers = triggers,
                          .cursor = cursor, .log = log, .cpu_time_us = cpu_time_us, .cpu_count = cpu_count,
-                         .temperature = temperature, .memory = memory };
+                         .temperature = temperature, .memory = memory, .keyboard_open = keyboard_open,
+                         .keyboard_state = keyboard_state, .keyboard_close = keyboard_close };
 }

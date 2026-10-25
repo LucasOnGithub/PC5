@@ -7,9 +7,6 @@ The console runs no debugger, so a game's unhandled crash left only its
 kind and the faulting address: not which of the game's code led to it.
 Wine now logs the faulting thread's registers, where it faulted and the
 code addresses on its stack, each as module+offset.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
 ---
  PUBLICATION_ALLOWLIST.txt                     |   1 +
  ...base-crash-report-without-a-debugger.patch | 108 ++++++++++++++++++

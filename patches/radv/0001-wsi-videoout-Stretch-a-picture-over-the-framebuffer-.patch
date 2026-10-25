@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bornaradusin <bornaradusin@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 11:00:00 +0000
+Subject: [PATCH] wsi/videoout: Stretch a picture over the framebuffer when
+ PW_PC5_STRETCH=1
+
+A swapchain of a size VideoOut doesn't take (anything but 1920x1080 and
+3840x2160) is blitted into framebuffers of the smallest size it takes,
+fitted with bars where its shape differs: a 4:3 picture gets bars at its
+sides. PC5's Aspect ratio setting can ask for the whole screen instead:
+with PW_PC5_STRETCH=1 in the environment the picture is stretched over
+the whole framebuffer. The log line says which.
+---
+ src/vulkan/wsi/wsi_common_videoout.c | 13 ++++++++++---
+ 1 file changed, 10 insertions(+), 3 deletions(-)
+
+diff --git a/src/vulkan/wsi/wsi_common_videoout.c b/src/vulkan/wsi/wsi_common_videoout.c
+index 018d12e..552bf2d 100644
+--- a/src/vulkan/wsi/wsi_common_videoout.c
++++ b/src/vulkan/wsi/wsi_common_videoout.c
+@@ -1520,11 +1520,18 @@ videoout_surface_create_swapchain(VkIcdSurfaceBase *icd_surface, VkDevice device
+    chain->first = set * VIDEOOUT_BUFFERS;
+    chain->scaled = scaled;
+    chain->target = target;
+-   chain->rect = scaled ? wsi_videoout_fit_rect(extent, target) : (VkRect2D){.extent = extent};
++   /* PC5's Aspect ratio: PW_PC5_STRETCH=1 in the environment stretches a picture of
++    * another shape over the whole framebuffer, instead of fitting it with bars. */
++   const char *stretch = getenv("PW_PC5_STRETCH");
++   const bool fill = stretch && stretch[0] == '1' && !stretch[1];
++   chain->rect = !scaled ? (VkRect2D){.extent = extent}
++                 : fill  ? (VkRect2D){.extent = target}
++                         : wsi_videoout_fit_rect(extent, target);
+    if (scaled)
+       fprintf(stderr,
+-              "wsi/videoout: a %ux%u swapchain presents scaled to %ux%u at (%d, %d) of %ux%u framebuffers (set %u)\n",
+-              extent.width, extent.height, chain->rect.extent.width, chain->rect.extent.height, chain->rect.offset.x,
++              "wsi/videoout: a %ux%u swapchain presents %s to %ux%u at (%d, %d) of %ux%u framebuffers (set %u)\n",
++              extent.width, extent.height, fill ? "stretched" : "scaled", chain->rect.extent.width,
++              chain->rect.extent.height, chain->rect.offset.x,
+               chain->rect.offset.y, target.width, target.height, set);
+ 
+    for (uint32_t i = 0; i < num_images; i++) {

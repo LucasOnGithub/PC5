@@ -4,8 +4,6 @@ Date: Sun, 25 Oct 2026 09:04:12 +0000
 Subject: [PATCH] PC5: a session's log keeps how it began, and a run of the
  same line is saved once and counted
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
 ---
  native/pw_diagnostics.c     | 72 ++++++++++++++++++++++++++++---------
  native/pw_diagnostics.h     |  3 +-

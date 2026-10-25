@@ -5,8 +5,6 @@ Subject: [PATCH] PC5: four fixes from Mihawk OS (Wine patches 0917-0920):
  mains power, a missing program is not found, no crash in dnsapi without its
  resolver, the GPU is a graphics adapter in dxcore
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
 ---
  PUBLICATION_ALLOWLIST.txt                     |  4 +
  ...freebsd-no-battery-means-mains-power.patch | 34 ++++++++

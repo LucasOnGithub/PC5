@@ -8,9 +8,6 @@ a service the console never starts, so games saw no drives at all. A
 game that looks up the drive it runs from found none and crashed. When
 no drive is named, the drives are now the letters whose root folder
 exists: the prefix's C: and Z:.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
 ---
  PUBLICATION_ALLOWLIST.txt                     |  1 +
  ...lbase-drives-without-a-mount-manager.patch | 63 +++++++++++++++++++

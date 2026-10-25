@@ -6,7 +6,7 @@ or later. Parts from elsewhere, each under its own licence:
 | Part | From | Licence | Where |
 | --- | --- | --- | --- |
 | prospero-win v0.2.0 (644e32e) | <https://github.com/mpereiraesaa/prospero-win> | LGPL 2.1 or later | fetched by `tools/build.sh`, patched by `patches/prospero-win/` |
-| Wine, RADV/Mesa, Mesa Zink, the PS5 SDK and boilerplate, Lapy | as prospero-win's `THIRD_PARTY.md` and the app's `SOURCES.txt` list them | their own | fetched by `tools/build.sh` at pinned commits |
+| Wine, RADV/Mesa, Mesa Zink, the PS5 SDK and boilerplate, Lapy | as prospero-win's `THIRD_PARTY.md` and the app's `SOURCES.txt` list them | their own | fetched by `tools/build.sh` at pinned commits; RADV's (PS5_Mesa, MIT) patched by `patches/radv/` |
 | DXVK 2.6.2-prospero2 (a6f6dcc) | <https://github.com/mpereiraesaa/dxvk> | zlib | fetched by `tools/build.sh`, patched by `patches/dxvk/` (marked as changed by PC5) and built for the Windows template |
 | PS5 Forwarder Format (22e8762) | <https://github.com/heydemoura/ps5-forwarder-format> | GPL 3.0 or later | `title/third_party/psfwd/` (psfwd, unchanged, built into the eboot); its `template/eboot.bin` and `sce_module/libc.prx`, unchanged, in the app's `pc5/forwarder/` for the home screen tiles |
 | FFmpeg 8.1.3 (1041abd) | <https://github.com/FFmpeg/FFmpeg> | LGPL 2.1 or later (only its LGPL parts are built) | fetched by `tools/build.sh`, built into `winedmo.prx` and `winegstreamer.prx` for games' videos and sound |

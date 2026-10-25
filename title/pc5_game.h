@@ -59,7 +59,17 @@ typedef struct Pc5GameOps {
     unsigned (*cpu_count)(void);
     int (*temperature)(int sensor, int *celsius);
     int (*memory)(uint64_t *used, uint64_t *total);
+    /* The console's on-screen keyboard over the game: open it for text written to
+     * buffer (UTF-16, capacity units with the terminator), 0 or the console's error;
+     * its state, 0 not open, 1 open, 2 done, negative on an error; and once done,
+     * close it: 1 when the text was accepted, 0 when cancelled, negative on an error. */
+    int (*keyboard_open)(uint16_t *buffer, uint32_t capacity);
+    int (*keyboard_state)(void);
+    int (*keyboard_close)(void);
 } Pc5GameOps;
+
+/* The on-screen keyboard's text, in UTF-16 units with the terminator. */
+enum { PC5_KEYBOARD_TEXT = 256 };
 
 typedef struct Pc5GameSession {
     Pc5GameOps ops;
@@ -81,6 +91,11 @@ typedef struct Pc5GameSession {
     uint64_t stats_at, stats_cpu_us;
     int stats_logged;
     int frame_generation;         /* the game's Frame generation (PW_PC5_FRAMEGEN for libvulkan.prx) */
+    /* The on-screen keyboard: open, its text, how much of the accepted text is typed,
+     * and the buttons PC5 took from the game for it. */
+    int keyboard_open;
+    uint16_t keyboard_text[PC5_KEYBOARD_TEXT];
+    uint32_t keyboard_length, keyboard_typed, keyboard_taken;
 } Pc5GameSession;
 
 /* A game's Windows made before winegstreamer (the media decoders) was built
@@ -159,6 +174,17 @@ int pc5_game_overlay_sample(Pc5GameSession *game, uint64_t now_ms, PwPc5HudStats
 /* Every tick while the title shows the frames itself: the overlay, once a
  * second; frames is how many it has shown. */
 void pc5_game_hud(Pc5GameSession *game, int videoout, uint64_t frames, uint64_t now_ms);
+/* The console's on-screen keyboard, every tick with the controller's held buttons,
+ * new presses and releases (libScePad's bits) and the fingers on the touchpad: the
+ * touchpad clicked with two fingers opens it, and its text, once accepted, is typed
+ * into the game (pc5_game_keyboard_text). Returns the buttons the game shouldn't see
+ * this tick: that click, from its press to its release. */
+uint32_t pc5_game_keyboard(Pc5GameSession *game, uint32_t held, uint32_t pressed, uint32_t released,
+                           unsigned fingers);
+/* The accepted text not yet typed: its units, and how many in count (0: none). */
+const uint16_t *pc5_game_keyboard_text(const Pc5GameSession *game, size_t *count);
+/* count units of it were typed. */
+void pc5_game_keyboard_typed(Pc5GameSession *game, size_t count);
 /* The game has ended: the controller as the console had it. */
 void pc5_game_end(Pc5GameSession *game, int pad);
 

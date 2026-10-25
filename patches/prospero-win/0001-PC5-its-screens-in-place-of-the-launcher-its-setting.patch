@@ -36,9 +36,6 @@ granted (the console counts _000, _001, ... up when one is left behind),
 for the runtime and for restarting the title; and
 tools/build_native.sh takes PW_TITLE_ID, PW_LAPY_DIR (a Lapy helper built
 for that title), PW_EXTRA_SOURCES, PW_EXTRA_CFLAGS and PW_EXTRA_LIBS.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
 ---
  native/pw_wine_library.h  |   2 +-
  native/wine64_main.c      | 294 ++++++++++++++++++++++++++++++++++++--

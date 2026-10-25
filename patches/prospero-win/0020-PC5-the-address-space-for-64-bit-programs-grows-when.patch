@@ -4,8 +4,6 @@ Date: Sun, 25 Oct 2026 08:51:48 +0000
 Subject: [PATCH] PC5: the address space for 64-bit programs grows when it is
  full (Wine patch 0916)
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
 ---
  PUBLICATION_ALLOWLIST.txt                     |   1 +
  ...-a-thread-alert-without-a-descriptor.patch |   2 +-

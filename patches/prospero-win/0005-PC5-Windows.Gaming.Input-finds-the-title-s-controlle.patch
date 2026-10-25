@@ -23,9 +23,6 @@ and triggers read as XInput gives them; the RawGameController's ids,
 counts, reading and name; vibration reaches the title and reads back;
 GamepadRemoved and GamepadAdded when the controller goes and returns.
 Without a title no gamepad appears.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
 ---
  PUBLICATION_ALLOWLIST.txt                     |   1 +
  docs/CONTROLS.md                              |   4 +-

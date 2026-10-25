@@ -2,6 +2,7 @@
 /* PC5 in a game's process (pc5_game.h). */
 #include "pc5_game.h"
 #include "pc5_controls.h"
+#include "pc5_library.h"
 #include "pc5_pe.h"
 #include "pw_pc5_hud.h"
 
@@ -384,25 +385,42 @@ void pc5_game_begin(Pc5GameSession *game, const Pc5GameOps *ops, const char *roo
         int fonts = pc5_prefix_fonts(root, prefix, app);
         if (fonts) say(game, "PC5 prefix fonts %s", fonts > 0 ? "named" : "naming failed");
     }
-    /* Frame generation, which libvulkan.prx reads from the environment, and a
-     * 32-bit game's address space, which Wine does (patch 0921: 4 GB unless
-     * PW_LARGE_ADDRESS_AWARE=0). */
-    int memory_2gb = 0;
+    /* Frame generation and the aspect ratio, which libvulkan.prx reads from the
+     * environment (the picture of a game drawn on the CPU follows its profile's
+     * scaling), and a 32-bit game's address space, which Wine does (patch 0921:
+     * 4 GB unless PW_LARGE_ADDRESS_AWARE=0). */
+    int memory_2gb = 0, stretch = 0;
     if (prefix && prefix[0]) {
         Pc5Controls controls;
         pc5_controls_load(root, prefix, &controls);
         game->frame_generation = controls.frame_generation;
         memory_2gb = controls.memory_2gb;
+        stretch = controls.stretch;
     }
     if (game->frame_generation) setenv("PW_PC5_FRAMEGEN", "1", 1);
     else unsetenv("PW_PC5_FRAMEGEN");
+    if (stretch) setenv("PW_PC5_STRETCH", "1", 1);
+    else unsetenv("PW_PC5_STRETCH");
+    /* A launcher that starts the game: Wine hands that program to PC5 (Wine patch 0923,
+     * pc5_handoff_take), which starts it in the launcher's place. */
+    char handoff[PC5_PATH], handoff_dir[PC5_PATH];
+    if (prefix && prefix[0] && strcmp(prefix, "default") &&
+        !pc5_handoff_env(root, prefix, handoff, sizeof(handoff), handoff_dir, sizeof(handoff_dir))) {
+        unlink(handoff);   /* one left from before was never taken */
+        setenv("PW_HANDOFF", handoff, 1);
+        setenv("PW_HANDOFF_DIR", handoff_dir, 1);
+    } else {
+        unsetenv("PW_HANDOFF");
+        unsetenv("PW_HANDOFF_DIR");
+    }
     if (memory_2gb) setenv("PW_LARGE_ADDRESS_AWARE", "0", 1);
     else unsetenv("PW_LARGE_ADDRESS_AWARE");
     say(game, "PC5 game fps=%d overlay=%#x corner=%d vibration=%d light=%d triggers=%d trigger_rumble=%d "
-        "trigger_resistance=%d tint=%06x frame_generation=%d memory_32bit=%s", game->settings.fps,
+        "trigger_resistance=%d tint=%06x frame_generation=%d memory_32bit=%s aspect_ratio=%s", game->settings.fps,
         pc5_game_overlay_lines(&game->settings), (int)game->settings.fps_corner, game->settings.vibration,
         (int)game->settings.light_bar, (int)game->settings.triggers, game->settings.trigger_rumble,
-        game->settings.trigger_resistance, (unsigned)game->cover_tint, game->frame_generation, memory_2gb ? "2gb" : "4gb");
+        game->settings.trigger_resistance, (unsigned)game->cover_tint, game->frame_generation, memory_2gb ? "2gb" : "4gb",
+        stretch ? "stretch" : "keep");
 }
 
 const uint32_t *pc5_game_loading(Pc5GameSession *game, uint64_t now_ms)
@@ -637,9 +655,69 @@ void pc5_game_hud(Pc5GameSession *game, int videoout, uint64_t frames, uint64_t 
     game->hud_shown = 1;
 }
 
+/* ---- the on-screen keyboard -------------------------------------------------------------- */
+
+enum { PAD_TOUCHPAD = 0x100000u };
+
+uint32_t pc5_game_keyboard(Pc5GameSession *game, uint32_t held, uint32_t pressed, uint32_t released,
+                           unsigned fingers)
+{
+    /* The touchpad is the game's again from the tick after the click's release; the
+     * release is PC5's too. */
+    uint32_t hidden = game->keyboard_taken;
+    if (released & PAD_TOUCHPAD || !(held & PAD_TOUCHPAD)) game->keyboard_taken = 0;
+
+    if (game->keyboard_open) {
+        int state = game->ops.keyboard_state ? game->ops.keyboard_state() : -1;
+        if (state == 1) return hidden;
+        int accepted = game->ops.keyboard_close ? game->ops.keyboard_close() : -1;
+        game->keyboard_open = 0;
+        if (state == 2 && accepted == 1) {
+            uint32_t length = 0;
+            while (length < PC5_KEYBOARD_TEXT - 1 && game->keyboard_text[length]) length++;
+            game->keyboard_length = length;
+            game->keyboard_typed = 0;
+            say(game, "PC5 keyboard text: %u characters to type", (unsigned)length);
+        } else {
+            say(game, "PC5 keyboard closed: %s (state %d, %d)",
+                state == 2 && accepted == 0 ? "cancelled" : "failed", state, accepted);
+        }
+        return hidden;
+    }
+    if ((pressed & PAD_TOUCHPAD) && fingers >= 2 && game->ops.keyboard_open) {
+        /* Taken from the game even when the keyboard can't open, so the game never sees it. */
+        game->keyboard_taken = PAD_TOUCHPAD;
+        hidden |= PAD_TOUCHPAD;
+        memset(game->keyboard_text, 0, sizeof(game->keyboard_text));
+        game->keyboard_length = game->keyboard_typed = 0;   /* text not typed yet goes */
+        int rc = game->ops.keyboard_open(game->keyboard_text, PC5_KEYBOARD_TEXT);
+        game->keyboard_open = rc == 0;
+        say(game, "PC5 keyboard %s rc=%#x", rc ? "refused" : "open", (unsigned)rc);
+    }
+    return hidden;
+}
+
+const uint16_t *pc5_game_keyboard_text(const Pc5GameSession *game, size_t *count)
+{
+    *count = game->keyboard_typed < game->keyboard_length ? game->keyboard_length - game->keyboard_typed : 0;
+    return game->keyboard_text + game->keyboard_typed;
+}
+
+void pc5_game_keyboard_typed(Pc5GameSession *game, size_t count)
+{
+    size_t left = game->keyboard_length - game->keyboard_typed;
+    game->keyboard_typed += (uint32_t)(count < left ? count : left);
+    if (game->keyboard_typed == game->keyboard_length && game->keyboard_length) {
+        say(game, "PC5 keyboard typed %u characters", (unsigned)game->keyboard_length);
+        game->keyboard_length = game->keyboard_typed = 0;
+    }
+}
+
 void pc5_game_end(Pc5GameSession *game, int pad)
 {
     Pc5Trigger off = { .mode = PC5_TRIGGER_OFF };
+    if (game->keyboard_open && game->ops.keyboard_close) game->ops.keyboard_close();
+    game->keyboard_open = 0;
     if (pad >= 0 && game->triggers_sent && game->ops.triggers) game->ops.triggers(pad, &off, &off);
     if (pad >= 0 && game->light_sent && game->ops.light_bar_reset) game->ops.light_bar_reset(pad);
     pc5_matrix_destroy(game->matrix);

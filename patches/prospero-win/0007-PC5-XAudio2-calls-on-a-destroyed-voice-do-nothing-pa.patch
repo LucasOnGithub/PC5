@@ -28,9 +28,6 @@ a voice sending only to a destroyed submix is made, and SetOutputVoices
 to it does nothing; without a mastering voice either, creating one
 fails cleanly. The same program on the earlier DLL queues the destroyed
 voice's buffer on the next voice and crashes.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
 ---
  PUBLICATION_ALLOWLIST.txt                     |   1 +
  docs/WINE_PS5_BUILD.md                        |   1 +

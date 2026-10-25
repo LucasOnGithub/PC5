@@ -62,6 +62,10 @@ int pc5_info_text(const Pc5Info *info, char *out, size_t size);
  * "" (pc5_own_dlls: the game's own Microsoft DLLs, which then go first). */
 int pc5_profile_text(const char *id, const Pc5Info *info, const char *arguments, const Pc5Controls *controls,
                      const char *own_dlls, char *out, size_t size);
+/* The same, with the working folder working_directory (a Windows path) in place of the
+ * program's own when it isn't NULL. */
+int pc5_profile_text_at(const char *id, const Pc5Info *info, const char *arguments, const Pc5Controls *controls,
+                        const char *own_dlls, const char *working_directory, char *out, size_t size);
 /* The Microsoft DLLs (Visual C++ runtimes, Direct3D compilers, D3DX) the game's program
  * folder holds, lower case and without .dll, "," between them, in name order, as many as
  * fit; how many were found. */
@@ -69,6 +73,18 @@ int pc5_own_dlls(const char *folder, char *out, size_t size);
 /* Writes the game's profile again, with the launch options in launch.txt
  * beside its program (so options can be changed without reinstalling). */
 int pc5_profile_refresh(const char *root, const char *id, char *error, size_t size);
+/* A game's launcher starting the game, a second program, which a PS5 title can't have:
+ * Wine writes that program to a file instead (its path, command line and working folder,
+ * a line each) and ends (Wine patch 0923). pc5_handoff_env: the file
+ * (root/prefixes/<id>/pc5/handoff.txt) and the game's folder as Windows names it
+ * (C:\Games\<folder>\), which Wine gets as PW_HANDOFF and PW_HANDOFF_DIR; 0, or -1 when
+ * they don't fit. pc5_handoff_take: that file, taken: the profile written for that program,
+ * its arguments and its working folder, for the game's next start (an ordinary start
+ * writes it for the game's own program again). 1 when it was written, 0 when there was
+ * none, -1 when it was refused (why in error): a program outside the game's folder or not
+ * there, or a fourth hand-off in a row. */
+int pc5_handoff_env(const char *root, const char *id, char *file, size_t file_size, char *dir, size_t dir_size);
+int pc5_handoff_take(const char *root, const char *id, char *error, size_t size);
 /* The folder PC5 copied a game into (prefixes/<id>/drive_c/Games/<folder>). */
 int pc5_game_folder(const char *root, const char *id, char *out, size_t size);
 /* Makes a PC5 game start another of its programs (folder: its copy, read with

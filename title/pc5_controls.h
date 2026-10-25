@@ -45,6 +45,7 @@ typedef struct Pc5Controls {
     int frame_generation;         /* 1: the game held at 30 fps, shown at 60 (libvulkan.prx's frame generation) */
     int memory_2gb;               /* 1: a 32-bit game keeps 2 GB of address space, not the 4 GB it gets */
     int resolution;               /* 0: 1920x1080, 1: 2560x1440, 2: 3840x2160 (games drawn through Vulkan) */
+    int stretch;                  /* 1: the picture stretched to fill the 16:9 screen, 0: its own shape */
 } Pc5Controls;
 
 /* A key, mouse button or nothing, as prospero-win names it in a profile, and as

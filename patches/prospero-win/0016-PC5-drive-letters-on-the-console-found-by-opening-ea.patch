@@ -9,9 +9,6 @@ which the console's runtime-made drive links do not answer, so games
 still saw no drives. The fallback now opens each root, as MihawkOS's
 patch 0161 does, always counts the drive Windows is on, and logs the
 letters it found.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
 ---
  ...lbase-drives-without-a-mount-manager.patch | 48 +++++++++++--------
  1 file changed, 29 insertions(+), 19 deletions(-)

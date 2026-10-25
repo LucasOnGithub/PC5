@@ -1,0 +1,196 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bornaradusin <bornaradusin@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 11:17:13 +0000
+Subject: [PATCH] PC5: a game's launcher starts the game in its place (Wine
+ patch 0923)
+
+A launcher that starts the game itself, a second process, which a PS5
+title can't have, hands that program over instead: Wine writes it to the
+file PC5 names (PW_HANDOFF) and ends, if it is a Windows program in the
+game's folder (PW_HANDOFF_DIR), not the one running and not a helper by
+its name. When that Wine ends, PC5 writes the game's profile for the
+program, with the launcher's arguments and working folder, and the title
+starts it, back to PC5 or to the home screen after it as before. Three
+hand-offs in a row are the most.
+---
+ PUBLICATION_ALLOWLIST.txt                     |   1 +
+ native/wine64_main.c                          |  25 ++++-
+ ...-hand-a-launcher-s-game-to-the-title.patch | 104 ++++++++++++++++++
+ 3 files changed, 129 insertions(+), 1 deletion(-)
+ create mode 100644 wine/patches/0923-ntdll-ps5-hand-a-launcher-s-game-to-the-title.patch
+
+diff --git a/PUBLICATION_ALLOWLIST.txt b/PUBLICATION_ALLOWLIST.txt
+index 2658918..84a06de 100644
+--- a/PUBLICATION_ALLOWLIST.txt
++++ b/PUBLICATION_ALLOWLIST.txt
+@@ -564,6 +564,7 @@ wine/patches/0919-dnsapi-report-unavailable-unix-backend.patch
+ wine/patches/0920-dxcore-a-gpu-adapter-has-the-graphics-and-compute-attributes.patch
+ wine/patches/0921-ntdll-ps5-4-gib-for-32-bit-programs.patch
+ wine/patches/0922-win32u-ps5-type-characters-from-the-console-s-keyboard.patch
++wine/patches/0923-ntdll-ps5-hand-a-launcher-s-game-to-the-title.patch
+ 
+ 
+ 
+diff --git a/native/wine64_main.c b/native/wine64_main.c
+index 78e3c51..7044bbe 100644
+--- a/native/wine64_main.c
++++ b/native/wine64_main.c
+@@ -46,6 +46,7 @@
+ #ifdef PW_PC5
+ #include "pc5_console.h"
+ #include "pc5_game.h"
++#include "pc5_library.h"
+ #include "../wine/ps5/pw_pc5_hud.h"
+ #endif
+ 
+@@ -686,9 +687,32 @@ static void restart_title(const PwWineApp *app, uint32_t cycle, const char *reas
+ /* Wine ends the process with exit() when its last program ends: go back to
+  * the launcher, or, for a game a home screen tile started, to the home
+  * screen (the process just ends). */
++static void load_catalog(void);
++
+ static void on_exit_report(void)
+ {
+     PS5LOG_LOG("PW_WINE64 exit sink_calls=%lu", sink_calls);
++#ifdef PW_PC5
++    /* The game's launcher started the game (Wine patch 0923): PC5 writes the game's profile
++     * for that program, and the title starts it, as the launcher would have, back to PC5
++     * or to the home screen after it as before. */
++    if (launch.mode == PW_WINE_LAUNCH_GAME && launch.app && pc5_game_on) {
++        char id[PW_WINE_LAUNCH_ID_MAX], error[PC5_ERROR];
++        snprintf(id, sizeof(id), "%s", launch.app->id);
++        int handed = pc5_handoff_take(library_root, id, error, sizeof(error));
++        if (handed < 0) PS5LOG_LOG("PC5 hand-off refused: %s", error);
++        if (handed > 0) {
++            load_catalog();
++            for (size_t i = 0; i < catalog_count; i++) {
++                if (strcmp(catalog[i].id, id)) continue;
++                PS5LOG_LOG("PC5 hand-off: %s starts the program its launcher started", id);
++                restart_title_exit(&catalog[i], launch.cycle + 1u, "handoff", launch.exit_after);
++                break;
++            }
++            PS5LOG_LOG("PC5 hand-off: %s could not be started again", id);
++        }
++    }
++#endif
+     if (launch.mode == PW_WINE_LAUNCH_GAME && launch.exit_after) {
+         PS5LOG_LOG("PW_WINE64 exit to the home screen: started from a tile");
+         pw_diagnostics_close("tile-exit");
+@@ -718,7 +742,6 @@ static void find_sandbox_app0(void)
+ 
+ /* ---- library ------------------------------------------------------------ */
+ 
+-static void load_catalog(void);
+ 
+ /* Complete the one-shot helper exchange before loading profiles or starting
+  * Wine. A failed or incomplete request closes this process to Home. */
+diff --git a/wine/patches/0923-ntdll-ps5-hand-a-launcher-s-game-to-the-title.patch b/wine/patches/0923-ntdll-ps5-hand-a-launcher-s-game-to-the-title.patch
+new file mode 100644
+index 0000000..34ea475
+--- /dev/null
++++ b/wine/patches/0923-ntdll-ps5-hand-a-launcher-s-game-to-the-title.patch
+@@ -0,0 +1,104 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: prospero-win <prospero-win@invalid>
++Date: Sun, 25 Oct 2026 11:16:42 +0000
++Subject: [PATCH] ntdll: Let the PS5 title start a launcher's game in its place.
++
++A game's launcher starts the game itself, a second process, which a PS5
++title can't have, so the game never starts. With PW_HANDOFF (a file) and
++PW_HANDOFF_DIR (the game's folder as a Windows path) in the environment,
++a Windows program in that folder that is not the one running, and not a
++helper by its name (a crash reporter, an installer, an updater), is
++written to the file instead (its path, command line and working folder)
++and the process ends; the title then starts that program in its place.
++Anything else is refused as before.
++---
++ dlls/ntdll/unix/process.c | 67 ++++++++++++++++++++++++++++++++++++++-
++ 1 file changed, 66 insertions(+), 1 deletion(-)
++
++diff --git a/dlls/ntdll/unix/process.c b/dlls/ntdll/unix/process.c
++--- a/dlls/ntdll/unix/process.c
+++++ b/dlls/ntdll/unix/process.c
++@@ -681,6 +681,69 @@ static NTSTATUS alloc_handle_list( const PS_ATTRIBUTE *handles_attr, obj_handle_
++     return STATUS_SUCCESS;
++ }
++ 
+++#ifdef __PROSPERO__
+++/* A UNICODE_STRING as UTF-8 in out (cut short to fit), "" for none. */
+++static void ps5_utf8( const UNICODE_STRING *str, char *out, DWORD size )
+++{
+++    int len = str && str->Buffer ? ntdll_wcstoumbs( str->Buffer, str->Length / sizeof(WCHAR), out, size - 1, FALSE ) : 0;
+++    out[len > 0 ? len : 0] = 0;
+++    for (char *p = out; *p; p++) if (*p == '\n' || *p == '\r') *p = ' ';
+++}
+++
+++/* A game's launcher starts the game itself, a second process, which a PS5 title can't
+++ * have. With PW_HANDOFF (a file) and PW_HANDOFF_DIR (the game's folder as a Windows path,
+++ * ending in a backslash) in the environment, a Windows program in that folder, other than
+++ * the one running and not a helper by its name (a crash reporter, an installer, an
+++ * updater), is written to the file instead: its path, its command line and its working
+++ * folder, a line each, in UTF-8. This process then ends, and the title starts that
+++ * program in its place (PC5). Returns only when that doesn't apply. */
+++static void ps5_hand_off( const RTL_USER_PROCESS_PARAMETERS *params, const struct pe_image_info *pe_info )
+++{
+++    static const char * const helpers[] =
+++    {
+++        "crash", "report", "unins", "setup", "install", "redist", "update", "patch", "helper",
+++        "service", "cefsub", "webhelper", "anticheat", "battleye", "dxsetup", "dotnet", "dump",
+++    };
+++    const char *file = getenv( "PW_HANDOFF" ), *dir = getenv( "PW_HANDOFF_DIR" ), *name;
+++    char image[1024], current[1024], command[4096], cwd[1024], lower[256], text[6200];
+++    size_t i;
+++    int fd, ok, len;
+++
+++    if (!file || !*file || !dir || !*dir) return;
+++    if (pe_info->subsystem != IMAGE_SUBSYSTEM_WINDOWS_GUI) return;
+++    ps5_utf8( &params->ImagePathName, image, sizeof(image) );
+++    ps5_utf8( &peb->ProcessParameters->ImagePathName, current, sizeof(current) );
+++    if (!image[0] || !strcasecmp( image, current ) || strncasecmp( image, dir, strlen( dir ))) return;
+++    name = strrchr( image, '\\' );
+++    name = name ? name + 1 : image;
+++    for (i = 0; name[i] && i < sizeof(lower) - 1; i++) lower[i] = (name[i] >= 'A' && name[i] <= 'Z') ? name[i] + 32 : name[i];
+++    lower[i] = 0;
+++    for (i = 0; i < ARRAY_SIZE(helpers); i++)
+++    {
+++        if (!strstr( lower, helpers[i] )) continue;
+++        fprintf( stderr, "wine-ps5: %s is a helper: not handed off\n", image );
+++        return;
+++    }
+++    ps5_utf8( &params->CommandLine, command, sizeof(command) );
+++    ps5_utf8( &params->CurrentDirectory.DosPath, cwd, sizeof(cwd) );
+++    if ((fd = open( file, O_WRONLY | O_CREAT | O_TRUNC, 0644 )) == -1)
+++    {
+++        fprintf( stderr, "wine-ps5: hand-off to %s: %s can't be written (%d)\n", image, file, errno );
+++        return;
+++    }
+++    len = snprintf( text, sizeof(text), "%s\n%s\n%s\n", image, command, cwd );
+++    ok = len > 0 && len < (int)sizeof(text) && write( fd, text, len ) == len;
+++    ok = !close( fd ) && ok;
+++    if (!ok)
+++    {
+++        unlink( file );
+++        return;
+++    }
+++    fprintf( stderr, "wine-ps5: hand-off to %s: this program ends and the title starts it\n", image );
+++    NtTerminateProcess( NtCurrentProcess(), 0 );
+++}
+++#endif
+++
++ /**********************************************************************
++  *           NtCreateUserProcess  (NTDLL.@)
++  */
++@@ -782,7 +845,9 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
++      * creation fails cleanly instead of spawning a loader. The image is opened first, as on
++      * Windows, so a missing or unreadable one fails with the status Windows gives
++      * (ERROR_FILE_NOT_FOUND for CreateProcess), which programs check; only an image that is
++-     * there is refused as not supported. */
+++     * there is refused as not supported, unless the title starts it in place of this
+++     * program (a game's launcher starting the game). */
+++    ps5_hand_off( params, &pe_info );
++     TRACE( "process creation is not supported on PS5\n" );
++     status = STATUS_NOT_SUPPORTED;
++     goto done;
++-- 
++2.43.0
++

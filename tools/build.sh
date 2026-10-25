@@ -10,7 +10,7 @@
 #             the pinned archives (llvm-mingw for Zink, VKD3D-Proton, mbedTLS)
 #   title     the PS5 payload SDK, the Lapy helper for PPSA11018, mbedTLS for the console,
 #             the eboot with PC5 in it
-#   radv      RADV, the console's Vulkan driver (PS5_Vulkan, PS5_Mesa)
+#   radv      RADV, the console's Vulkan driver (PS5_Vulkan, PS5_Mesa with patches/radv)
 #   hostwine  Wine for this computer: the PE modules the console runs, and the Wine that
 #             makes PC5's empty Windows template
 #   wineps5   Wine's PS5 side (PRX modules)
@@ -274,7 +274,22 @@ step_title() {
 step_radv() {
     cd "$B/PS5_Vulkan"
     bash tools/setup-native-dependencies.sh
-    MESON=$B/venv/bin/meson PATH="$B/venv/bin:$PATH" bash tools/build-radv.sh release
+    # PC5's patches/radv on the pinned revision, as a commit with fixed names and a fixed
+    # date, made without a checkout: the same patches always give the same revision, which
+    # build-radv.sh (a copy naming it) builds incrementally.
+    local pin rev tree index=$B/radv-pc5.index
+    pin=$(pin tools/build-radv.sh mesa_revision)
+    rm -f "$index"
+    GIT_INDEX_FILE=$index git -C "$B/PS5_Mesa" read-tree "$pin"
+    GIT_INDEX_FILE=$index git -C "$B/PS5_Mesa" apply --cached "$here"/patches/radv/*.patch
+    tree=$(GIT_INDEX_FILE=$index git -C "$B/PS5_Mesa" write-tree)
+    rm -f "$index"
+    rev=$(GIT_AUTHOR_NAME=PC5 GIT_AUTHOR_EMAIL=pc5@invalid GIT_AUTHOR_DATE=2026-10-25T00:00:00Z \
+          GIT_COMMITTER_NAME=PC5 GIT_COMMITTER_EMAIL=pc5@invalid GIT_COMMITTER_DATE=2026-10-25T00:00:00Z \
+          git -C "$B/PS5_Mesa" commit-tree "$tree" -p "$pin" -m "PC5's patches/radv")
+    sed "s/^mesa_revision=.*/mesa_revision=$rev/" tools/build-radv.sh > tools/build-radv-pc5.sh
+    echo "RADV: $pin with patches/radv is $rev"
+    MESON=$B/venv/bin/meson PATH="$B/venv/bin:$PATH" bash tools/build-radv-pc5.sh release
 }
 
 step_hostwine() {
@@ -440,7 +455,8 @@ step_bundle() {
     part ps5-framegen "$B/ps5-framegen" "$(pin "$PW/tools/link_radv_prx.sh" FRAMEGEN_COMMIT)" \
         "$(value "$PW/tools/link_radv_prx.sh" FRAMEGEN_URL) (its interpolator, in libvulkan.prx for Frame generation)"
     part PS5_Vulkan "$B/PS5_Vulkan" "$VULKAN_COMMIT" "$VULKAN_URL"
-    part PS5_Mesa-radv "$B/PS5_Mesa" "$(pin "$B/PS5_Vulkan/tools/build-radv.sh" mesa_revision)" "$MESA_URL"
+    part PS5_Mesa-radv "$B/PS5_Mesa" "$(pin "$B/PS5_Vulkan/tools/build-radv.sh" mesa_revision)" \
+        "$MESA_URL (RADV, built with PC5's patches/radv applied)"
     part PS5_Mesa-zink "$B/mesa-zink-source" "$(pin "$zink" MESA_COMMIT)" "$MESA_URL"
     part PS5_PayloadSDK "$B/PS5_PayloadSDK" "$(pin "$B/PS5_Vulkan/tools/setup-native-dependencies.sh" sdk_revision)" "$SDK_FORK_URL"
     part PS5-Lapy-JB-Daemon "$B/lapy" "$LAPY_COMMIT" "$LAPY_URL"

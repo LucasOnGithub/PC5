@@ -123,5 +123,29 @@ With ShadowMountPlus and elfldr running.
 | 54 | A Direct3D 12 game | it starts as before or better (VKD3D-Proton 3.0.1) | `PC5 prefix DXVK updated` once (a game installed before 1.5.0) |
 | 55 | A game that carries its own `d3dcompiler_47.dll` or Visual C++ runtime beside its .exe | it starts as before | |
 
+## Typing (1.6.0)
+
+| # | Do | Expect | Expect in the log |
+| --- | --- | --- | --- |
+| 56 | In a game with a text box (a name, a chat line), put the cursor in it, click the touchpad with two fingers, type "Né 1", choose Done | the PS5's keyboard opens over the game, and "Né 1" appears in the box | `PC5 keyboard module status=0 handle=… init=1 status=1 result=1 term=1 common=…`, `PC5 keyboard open rc=0`, `PC5 keyboard text: 4 characters to type`, `PC5 keyboard typed 4 characters` |
+| 57 | Open the keyboard again and cancel it | it closes, nothing is typed, the game carries on | `PC5 keyboard closed: cancelled` |
+| 58 | Click the touchpad with one finger (DualSense or Xbox controller mode) | the game gets the click as before | no `PC5 keyboard` line |
+
+## Aspect ratio (1.6.0)
+
+| # | Do | Expect | Expect in the log |
+| --- | --- | --- | --- |
+| 59 | A 4:3 game drawn with Direct3D (set to a 4:3 resolution such as 1024x768 in its options), △ › Aspect ratio › Stretch, start it | the picture fills the screen, wider than before | `PC5 game … aspect_ratio=stretch`; `wsi/videoout: a 1024x768 swapchain presents stretched to 1920x1080 at (0, 0)` |
+| 60 | The same game with Aspect ratio › Keep | bars at the sides, as before | `wsi/videoout: … presents scaled to 1440x1080 at (240, 0)` |
+| 61 | A DirectDraw game with a 4:3 picture, Stretch | the picture fills the screen | `PW_WINE64 profile … scaling=2` |
+
+## Launchers (1.6.0)
+
+| # | Do | Expect | Expect in the log |
+| --- | --- | --- | --- |
+| 62 | A game whose own launcher (a program in its folder) starts the game: set Change program to the launcher, start it, press its Play | the launcher closes and the game starts | `wine-ps5: hand-off to C:\Games\…: this program ends and the title starts it`, `PC5 hand-off: … starts the program its launcher started`, then the game's own session |
+| 63 | Close the game, start it again from PC5 | the launcher comes up again | `PC5 play id=…` with the launcher's profile |
+| 64 | A game whose crash reporter or updater starts (a name with crash, report, update…) | it isn't started in the game's place | `wine-ps5: … is a helper: not handed off` |
+
 A non-zero `rc=` on the light bar or triggers lines means the console refused that call; send
 that log.

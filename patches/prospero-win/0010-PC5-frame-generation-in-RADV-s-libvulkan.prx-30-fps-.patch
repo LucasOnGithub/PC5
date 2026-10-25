@@ -12,9 +12,6 @@ frames is presented before each one. It engages after 8 frames on time and
 shows the game's frames as they come when it falls behind.
 
 Without a checkout every entry point passes through, as before.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
 ---
  PUBLICATION_ALLOWLIST.txt   |   5 +
  THIRD_PARTY.md              |  12 +

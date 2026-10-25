@@ -4,8 +4,6 @@ Date: Sun, 25 Oct 2026 09:21:11 +0000
 Subject: [PATCH] PC5: a 32-bit program gets 4 GiB of address space unless
  PW_LARGE_ADDRESS_AWARE=0 (Wine patch 0921)
 
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
 ---
  PUBLICATION_ALLOWLIST.txt                     |  1 +
  ...-ntdll-ps5-4-gib-for-32-bit-programs.patch | 60 +++++++++++++++++++

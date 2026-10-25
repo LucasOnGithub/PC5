@@ -9,9 +9,6 @@ each movie frame source. The log now says how many textures the
 process list holds, and how much memory they take, each time the list
 reaches a new multiple of 16 and every 256th texture added, with how
 many were added and removed: a list that only grows is a leak.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
 ---
  src/d3d11/d3d11_local_share.cpp | 28 ++++++++++++++++++++++++++++
  1 file changed, 28 insertions(+)

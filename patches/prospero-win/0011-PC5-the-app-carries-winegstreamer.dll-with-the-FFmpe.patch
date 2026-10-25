@@ -7,9 +7,6 @@ package_release.sh left winegstreamer.dll out of every package, from when
 it needed the PC's GStreamer. With winegstreamer.prx (the FFmpeg build)
 games load the DLL, so it is packaged for both architectures, and a host
 Wine without it is refused. Without the FFmpeg build it still stays out.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
 ---
  tests/test_package_release.py | 30 +++++++++++++++++++++++++++++-
  tools/package_release.sh      | 11 +++++++++--

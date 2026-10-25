@@ -198,6 +198,12 @@ static const char *desktop_size(const Pc5Info *info, const Pc5Controls *controls
 int pc5_profile_text(const char *id, const Pc5Info *info, const char *arguments, const Pc5Controls *controls,
                      const char *own_dlls, char *out, size_t size)
 {
+    return pc5_profile_text_at(id, info, arguments, controls, own_dlls, NULL, out, size);
+}
+
+int pc5_profile_text_at(const char *id, const Pc5Info *info, const char *arguments, const Pc5Controls *controls,
+                        const char *own_dlls, const char *working_directory, char *out, size_t size)
+{
     char exe[PC5_PATH + 32], cwd[PC5_PATH + 32], options[600] = "", input[1600], dlls[260];
     Pc5Controls defaults;
     const char *graphics = info->api == PC5_API_OPENGL ? "opengl" : info->api <= PC5_API_DDRAW ? "gdi" : "dxvk";
@@ -210,8 +216,9 @@ int pc5_profile_text(const char *id, const Pc5Info *info, const char *arguments,
                                                        : "d3d8,d3d9,d3d10core,d3d11,dxgi=n;d3d12,d3d12core=b";
 
     windows_path(info->folder, info->exe, 1, exe, sizeof(exe));
-    windows_path(info->folder, info->exe, 0, cwd, sizeof(cwd));
-    if (strlen(exe) >= 260) return -1;
+    if (working_directory) pc5_copy(cwd, sizeof(cwd), working_directory);
+    else windows_path(info->folder, info->exe, 0, cwd, sizeof(cwd));
+    if (strlen(exe) >= 260 || strlen(cwd) >= 260) return -1;
     if (arguments && arguments[0]) snprintf(options, sizeof(options), "arguments = %s\n", arguments);
     if (!controls) {
         pc5_controls_default(&defaults);
@@ -245,11 +252,13 @@ int pc5_profile_text(const char *id, const Pc5Info *info, const char *arguments,
         "\n"
         "[display]\n"
         "desktop = %s\n"
+        "scaling = %s\n"
         "show_fps = false\n"
         "\n"
         "%s",
         info->title, info->folder, id, info->title, exe, cwd, options, dlls, id,
-        info->bits == 64 ? "pe64" : "pe32", graphics, desktop_size(info, controls), input);
+        info->bits == 64 ? "pe64" : "pe32", graphics, desktop_size(info, controls),
+        controls->stretch ? "stretch" : "fit", input);
 }
 
 /* The folder the game's program is in, on the console. */
@@ -391,7 +400,134 @@ int pc5_profile_refresh(const char *root, const char *id, char *error, size_t si
     pc5_buf_free(&old);
     if (status) snprintf(error, size, "PC5 can't write the game's profile: %s.", strerror(errno));
     else index_update(root, file, 1);
+    /* A start of the game's own program: any hand-offs before it are done with. */
+    if (!pc5_format(path, sizeof(path), "%s/prefixes/%s/pc5/handoff-count.txt", root, id)) unlink(path);
     return status;
+}
+
+/* ---- a launcher's hand-off ------------------------------------------------------------ */
+
+enum { HANDOFFS_IN_A_ROW = 3 };
+
+/* 1 when s starts with prefix, letters of either case alike (ASCII). */
+static int starts_with_case(const char *s, const char *prefix)
+{
+    for (; *prefix; s++, prefix++) {
+        char a = *s, b = *prefix;
+        if (a >= 'A' && a <= 'Z') a = (char)(a + 32);
+        if (b >= 'A' && b <= 'Z') b = (char)(b + 32);
+        if (!a || a != b) return 0;
+    }
+    return 1;
+}
+
+int pc5_handoff_env(const char *root, const char *id, char *file, size_t file_size, char *dir, size_t dir_size)
+{
+    Pc5Info info;
+    if (pc5_info_read(root, id, &info) ||
+        pc5_format(file, file_size, "%s/prefixes/%s/pc5/handoff.txt", root, id) ||
+        pc5_format(dir, dir_size, "C:\\Games\\%s\\", info.folder))
+        return -1;
+    for (char *p = dir; *p; p++) if (*p == '/') *p = '\\';
+    return 0;
+}
+
+int pc5_handoff_take(const char *root, const char *id, char *error, size_t size)
+{
+    char file[PC5_PATH], dir[PC5_PATH], path[PC5_PATH], relative[PC5_PATH], cwd[PC5_PATH], arguments[512],
+         folder[PC5_PATH], own[256], count_file[PC5_PATH], note[16];
+    static char text[4096];
+    const char *line[3] = { "", "", "" };
+    Pc5Buf handed = { 0 }, count_text = { 0 };
+    Pc5Info info;
+    Pc5Controls controls;
+    int count = 0;
+
+    error[0] = 0;
+    if (pc5_handoff_env(root, id, file, sizeof(file), dir, sizeof(dir))) {
+        snprintf(error, size, "PC5's notes on this game are missing.");
+        return -1;
+    }
+    if (pc5_read_file(file, &handed, 16384) || pc5_buf_terminate(&handed)) {
+        pc5_buf_free(&handed);
+        return 0;   /* none */
+    }
+    unlink(file);   /* taken, whatever comes of it */
+    char *at = (char *)handed.data;
+    for (int i = 0; i < 3 && at; i++) {
+        char *end = strchr(at, '\n');
+        if (end) *end++ = 0;
+        line[i] = at;
+        at = end;
+    }
+    pc5_info_read(root, id, &info);
+    /* Its program: in the game's folder, there, a Windows program. */
+    const char *inside = line[0] + strlen(dir), *dot = strrchr(line[0], '.');
+    int ok = starts_with_case(line[0], dir) && *inside && !strstr(inside, "..") && dot && !pc5_casecmp(dot, ".exe") &&
+             !pc5_format(relative, sizeof(relative), "%s", inside);
+    for (char *p = relative; ok && *p; p++) if (*p == '\\') *p = '/';
+    ok = ok && !pc5_format(path, sizeof(path), "%s/prefixes/%s/drive_c/Games/%s/%s", root, id, info.folder, relative) &&
+         pc5_is_file(path);
+    if (!ok) {
+        snprintf(error, size, "The program its launcher started isn't one of the game's: %.200s", line[0]);
+        pc5_buf_free(&handed);
+        return -1;
+    }
+    /* Its arguments: the command line after the program, quoted or not. */
+    const char *args = line[1];
+    if (*args == '"') {
+        const char *close = strchr(args + 1, '"');
+        args = close ? close + 1 : args + strlen(args);
+    } else {
+        while (*args && *args != ' ' && *args != '\t') args++;
+    }
+    while (*args == ' ' || *args == '\t') args++;
+    if (pc5_format(arguments, sizeof(arguments), "%s", args)) {
+        snprintf(error, size, "The arguments its launcher gave are too long.");
+        pc5_buf_free(&handed);
+        return -1;
+    }
+    for (size_t n = strlen(arguments); n && (arguments[n - 1] == ' ' || arguments[n - 1] == '\t'); n--) arguments[n - 1] = 0;
+    /* Its working folder, when it is in the game's folder; the program's own otherwise. */
+    const char *work = NULL;
+    if (starts_with_case(line[2], dir) || (strlen(line[2]) + 1 == strlen(dir) && starts_with_case(dir, line[2]))) {
+        if (!pc5_format(cwd, sizeof(cwd), "%s", line[2]) && !strstr(cwd, "..")) {
+            size_t n = strlen(cwd);
+            if (n > 3 && cwd[n - 1] == '\\') cwd[n - 1] = 0;
+            work = cwd;
+        }
+    }
+    pc5_buf_free(&handed);
+    /* Not a fourth in a row: a launcher and its game that keep starting each other. */
+    if (!pc5_format(count_file, sizeof(count_file), "%s/prefixes/%s/pc5/handoff-count.txt", root, id) &&
+        !pc5_read_file(count_file, &count_text, 64) && !pc5_buf_terminate(&count_text))
+        count = atoi((char *)count_text.data);
+    pc5_buf_free(&count_text);
+    if (count >= HANDOFFS_IN_A_ROW) {
+        unlink(count_file);
+        snprintf(error, size, "Its programs kept starting each other: %d hand-offs in a row.", count);
+        return -1;
+    }
+    snprintf(note, sizeof(note), "%d\n", count + 1);
+    pc5_write_file(count_file, note, strlen(note));
+    /* The profile for it, for this start. */
+    Pc5Info program = info;
+    pc5_copy(program.exe, sizeof(program.exe), relative);
+    pc5_controls_load(root, id, &controls);
+    program_folder(root, id, &program, folder, sizeof(folder));
+    pc5_own_dlls(folder, own, sizeof(own));
+    if (pc5_profile_text_at(id, &program, arguments, &controls, own, work, text, sizeof(text)) ||
+        pc5_format(path, sizeof(path), "%s/profiles/%s.profile", root, id)) {
+        snprintf(error, size, "The program's path is too long for Windows.");
+        return -1;
+    }
+    if (pc5_write_file(path, text, strlen(text))) {
+        snprintf(error, size, "PC5 can't write the game's profile: %s.", strerror(errno));
+        return -1;
+    }
+    snprintf(path, sizeof(path), "%s.profile", id);
+    index_update(root, path, 1);
+    return 1;
 }
 
 /* ---- the library ------------------------------------------------------------------- */

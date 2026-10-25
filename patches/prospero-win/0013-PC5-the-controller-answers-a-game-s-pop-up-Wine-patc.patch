@@ -9,9 +9,6 @@ Yes/No question) could not be answered. Cross and the D-pad now also go
 to Wine as dialog keys, Enter and the arrows: Wine's PS5 driver sends
 them only while a dialog box is in front, drops them otherwise, and
 always sends a key's release once it sent its press.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
 ---
  PUBLICATION_ALLOWLIST.txt                     |  1 +
  native/pw_wine_display.c                      | 17 ++++
