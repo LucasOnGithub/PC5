@@ -5,7 +5,7 @@
 A launcher for your own PC games on a PS5 that runs homebrew. PC5 shows your games as a row
 of covers, installs games from a USB drive in one copy each, and uninstalls them with their
 saves. It runs the games with [prospero-win](https://github.com/mpereiraesaa/prospero-win)
-(Wine on the PS5). The app is `PPSA11018`, its tile is called **PC5**. This is version 1.3.0.
+(Wine on the PS5). The app is `PPSA11018`, its tile is called **PC5**. This is version 1.3.1.
 
 No game is part of PC5, and PC5 downloads none: you install the games you own.
 
@@ -258,8 +258,9 @@ version as a GitHub release with that tag, with `PPSA11018.zip` and
   videos and sound on FFmpeg (Wine's winegstreamer decoders on FFmpeg in place of
   GStreamer, and winedmo); Frame generation in RADV's `libvulkan.prx`; a game started from
   a home screen tile, and back to the home screen after it; the controller answering a
-  game's Windows pop-up (Wine's PS5 driver sends ✕ and the D-pad only to a dialog box); and
-  a crash report in the log, as the console runs no debugger.
+  game's Windows pop-up (Wine's PS5 driver sends ✕ and the D-pad only to a dialog box);
+  a crash report in the log, as the console runs no debugger; and the drive letters
+  without a mount manager (Wine's GetLogicalDrives), so a game sees C:.
 - `patches/dxvk/`: PC5's patch to DXVK 2.6.2-prospero2: textures shared between a game's
   Direct3D 9 and Direct3D 11 within the game, where memory can't be shared through handles.
 - `tools/`: the build, the Windows template (`make-prefix.py`), the font atlas

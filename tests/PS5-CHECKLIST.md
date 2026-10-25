@@ -91,5 +91,11 @@ With ShadowMountPlus and elfldr running.
 | --- | --- | --- | --- |
 | 38 | A game that crashes at start (its `issue-…` log has `Unhandled page fault`) | PC5 says it crashed, as before | after `Unhandled …`: `wine: crash report: eax=…` (or `rax=…`), `wine: crash report: at L"…"+0x…` and `wine: crash report: stack+0x… L"<game>.exe"+0x…` lines |
 
+## Drive letters
+
+| # | Do | Expect | Expect in the log |
+| --- | --- | --- | --- |
+| 39 | A game that looks up its drive at start (one that crashed with `write access to 0000002C` before 1.3.1) | it gets past the start | no `Unhandled page fault` at that point |
+
 A non-zero `rc=` on the light bar or triggers lines means the console refused that call; send
 that log.

@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bornaradusin <bornaradusin@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 22:44:17 +0100
+Subject: [PATCH] PC5: drive letters without a mount manager (Wine patch 0913)
+
+GetLogicalDrives took its letters from the mount manager, which runs in
+a service the console never starts, so games saw no drives at all. A
+game that looks up the drive it runs from found none and crashed. When
+no drive is named, the drives are now the letters whose root folder
+exists: the prefix's C: and Z:.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01W9bbTPMqftZ2Yv6sJzUsWv
+---
+ PUBLICATION_ALLOWLIST.txt                     |  1 +
+ ...lbase-drives-without-a-mount-manager.patch | 63 +++++++++++++++++++
+ 2 files changed, 64 insertions(+)
+ create mode 100644 wine/patches/0913-kernelbase-drives-without-a-mount-manager.patch
+
+diff --git a/PUBLICATION_ALLOWLIST.txt b/PUBLICATION_ALLOWLIST.txt
+index dc14d58..a899e64 100644
+--- a/PUBLICATION_ALLOWLIST.txt
++++ b/PUBLICATION_ALLOWLIST.txt
+@@ -554,6 +554,7 @@ docs/wine-worker-desktop.md
+ wine/patches/0910-win32u-ps5-worker-desktop-cache.patch
+ wine/patches/0911-win32u-ps5-dialog-keys.patch
+ wine/patches/0912-kernelbase-crash-report-without-a-debugger.patch
++wine/patches/0913-kernelbase-drives-without-a-mount-manager.patch
+ 
+ 
+ 
+diff --git a/wine/patches/0913-kernelbase-drives-without-a-mount-manager.patch b/wine/patches/0913-kernelbase-drives-without-a-mount-manager.patch
+new file mode 100644
+index 0000000..ad64b89
+--- /dev/null
++++ b/wine/patches/0913-kernelbase-drives-without-a-mount-manager.patch
+@@ -0,0 +1,63 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: prospero-win <prospero-win@invalid>
++Date: Sat, 24 Oct 2026 22:45:00 +0100
++Subject: [PATCH] kernelbase: Find the drives without a mount manager.
++
++GetLogicalDrives lists the drive letters the mount manager named in
++\DosDevices. The mount manager runs in a service (winedevice.exe), and
++a process on the PS5 starts no other processes, so on the console the
++list was empty: a game that looks up the drive it runs from among them
++found none, and one crashed on the empty result. When no drive is
++named, take the letters whose root folder exists, which on the console
++are the prefix's C: and Z:. With a mount manager running nothing
++changes.
++---
++ dlls/kernelbase/volume.c | 23 +++++++++++++++++++++++
++ 1 file changed, 23 insertions(+)
++
++diff --git a/dlls/kernelbase/volume.c b/dlls/kernelbase/volume.c
++--- a/dlls/kernelbase/volume.c
+++++ b/dlls/kernelbase/volume.c
++@@ -489,6 +489,31 @@
++ }
++ 
++ 
+++/* The drives whose root folder exists, asked for one letter at a time:
+++ * for when no mount manager has named any drive (it runs in a service,
+++ * and a process on the PS5 starts no others), so that a game still sees
+++ * C: and the prefix's other drives. */
+++static DWORD drives_with_a_root(void)
+++{
+++    WCHAR root[] = L"\\??\\A:\\";
+++    UNICODE_STRING nt_name;
+++    OBJECT_ATTRIBUTES attr;
+++    FILE_BASIC_INFORMATION info;
+++    DWORD bitmask = 0;
+++    int drive;
+++
+++    RtlInitUnicodeString( &nt_name, root );
+++    InitializeObjectAttributes( &attr, &nt_name, OBJ_CASE_INSENSITIVE, 0, NULL );
+++    for (drive = 0; drive < 26; drive++)
+++    {
+++        root[4] = 'A' + drive;
+++        if (!NtQueryAttributesFile( &attr, &info ) && (info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+++            bitmask |= 1 << drive;
+++    }
+++    return bitmask;
+++}
+++
+++
++ /***********************************************************************
++  *           GetLogicalDrives   (kernelbase.@)
++  */
++@@ -516,6 +541,7 @@
++         NtClose( handle );
++     }
++ 
+++    if (!bitmask) bitmask = drives_with_a_root();
++     return bitmask;
++ }
++ 
++-- 
++2.43.0
++
