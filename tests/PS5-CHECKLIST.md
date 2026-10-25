@@ -167,5 +167,12 @@ With ShadowMountPlus and elfldr running.
 | 73 | Install a game whose program's name holds a helper's word (Crashlands 2's `Crashlands2.exe`) | it installs, with that program chosen | `PC5 install … exe=Crashlands2.exe` |
 | 74 | Start a game installed with 1.6.0 or older | it starts as before | `PC5 prefix system files added …` the first time, nothing the next time |
 
+## Maths under Direct3D 9 (1.6.3)
+
+| # | Do | Expect | Expect in the log |
+| --- | --- | --- | --- |
+| 75 | A 32-bit Direct3D 9 game that crashed after some minutes in `MSVCR90.dll` (Blur): play it for 15 minutes or more | it doesn't crash | no `crash report: at L"MSVCR90.dll"` |
+| 76 | Any 32-bit Direct3D 9 game that ran before | it runs as before: picture, sound, menus | |
+
 A non-zero `rc=` on the light bar or triggers lines means the console refused that call; send
 that log.

@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bornaradusin <bornaradusin@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 19:30:00 +0000
+Subject: [PATCH] PC5: sin, cos and the rest stay precise under Direct3D 9
+ (Wine patch 0925)
+
+Direct3D 9 sets the x87 to 24-bit precision, and Wine's musl maths for
+32-bit programs ran on the x87: sin(1e8) gave 0.0000004, and a large
+argument overwrote the caller's stack, so a game could crash in sin()
+after some minutes of play. Wine patch 0925 builds that maths for SSE2.
+---
+ PUBLICATION_ALLOWLIST.txt                     |  1 +
+ ...2-on-i386-whatever-the-x87-precision.patch | 38 +++++++++++++++++++
+ 2 files changed, 39 insertions(+)
+ create mode 100644 wine/patches/0925-musl-compute-in-sse2-on-i386-whatever-the-x87-precision.patch
+
+diff --git a/PUBLICATION_ALLOWLIST.txt b/PUBLICATION_ALLOWLIST.txt
+index 88e56b8..7152615 100644
+--- a/PUBLICATION_ALLOWLIST.txt
++++ b/PUBLICATION_ALLOWLIST.txt
+@@ -566,6 +566,7 @@ wine/patches/0921-ntdll-ps5-4-gib-for-32-bit-programs.patch
+ wine/patches/0922-win32u-ps5-type-characters-from-the-console-s-keyboard.patch
+ wine/patches/0923-ntdll-ps5-hand-a-launcher-s-game-to-the-title.patch
+ wine/patches/0924-kernelbase-crash-report-before-the-program-s-own-handler.patch
++wine/patches/0925-musl-compute-in-sse2-on-i386-whatever-the-x87-precision.patch
+ 
+ 
+ 
+diff --git a/wine/patches/0925-musl-compute-in-sse2-on-i386-whatever-the-x87-precision.patch b/wine/patches/0925-musl-compute-in-sse2-on-i386-whatever-the-x87-precision.patch
+new file mode 100644
+index 0000000..906d1a8
+--- /dev/null
++++ b/wine/patches/0925-musl-compute-in-sse2-on-i386-whatever-the-x87-precision.patch
+@@ -0,0 +1,38 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: prospero-win <prospero-win@invalid>
++Date: Sun, 25 Oct 2026 19:30:00 +0000
++Subject: [PATCH] musl: Compute in SSE2 on i386, whatever the x87's precision.
++
++A 32-bit program can lower the x87's precision: Direct3D 9 sets it to
++24 bits when it creates a device, unless the program asks it to preserve
++it, and DXVK does the same. The musl functions msvcrt uses were built for
++the x87, so sin, cos, tan and the rest lost most of their precision with
++it: sin(1e8) gave 0.0000004, not 0.93. A large argument also sent
++__rem_pio2_large() past its arrays, overwriting the caller's stack, and
++the program crashed in sin(). Build them for SSE2, which the x87's
++precision doesn't touch.
++---
++ libs/musl/src/internal/libm.h |    9 +++++++++
++ 1 file changed, 9 insertions(+)
++
++diff --git a/libs/musl/src/internal/libm.h b/libs/musl/src/internal/libm.h
++--- a/libs/musl/src/internal/libm.h
+++++ b/libs/musl/src/internal/libm.h
++@@ -1,6 +1,15 @@
++ #ifndef _LIBM_H
++ #define _LIBM_H
++ 
+++#if defined(__i386__) && defined(__GNUC__) && !defined(__clang__)
+++/* Double arithmetic in SSE2, not on the x87: a program can lower the x87's
+++ * precision (Direct3D 9 sets 24 bits unless the device preserves it), and
+++ * these functions need full double precision. With 24 bits, sin(1e8) gave
+++ * 0.0000004, and a large argument sent __rem_pio2_large() past its arrays,
+++ * overwriting the caller's stack. */
+++#pragma GCC target("sse2,fpmath=sse")
+++#endif
+++
++ #include <stdint.h>
++ #include <float.h>
++ #include <math.h>
++-- 
++2.43.0
