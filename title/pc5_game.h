@@ -162,6 +162,10 @@ void pc5_game_loading_done(Pc5GameSession *game);
 /* The game's rumble (XInput's 0-65535 a motor): what the motors get, at
  * Vibration's strength, and the triggers when they follow it. */
 void pc5_game_rumble(Pc5GameSession *game, int pad, uint32_t left, uint32_t right, uint8_t *large, uint8_t *small);
+/* Players 2 to 4's rumble: their motors at Vibration's strength. The triggers
+ * and the light bar stay player 1's. */
+void pc5_game_player_rumble(const Pc5GameSession *game, uint32_t left, uint32_t right, uint8_t *large,
+                            uint8_t *small);
 /* DualSense mode, whenever the game's output changes: the motors at
  * Vibration's strength in large and small, which the triggers follow while
  * the game has none of its own; the game's light bar and trigger effects

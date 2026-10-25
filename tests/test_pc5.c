@@ -2008,6 +2008,13 @@ static void test_game(const char *fonts_path)
     game.settings.vibration = 50;
     pc5_game_rumble(&game, 7, 65535, 40000, &large, &small);
     CHECK(large == 127 && small == 78, "vibration at 50 %%: %d %d", large, small);
+    {
+        /* Players 2 to 4: the same strength, and the triggers stay player 1's. */
+        int triggers = pad_seen.triggers;
+        pc5_game_player_rumble(&game, 65535, 40000, &large, &small);
+        CHECK(large == 127 && small == 78 && pad_seen.triggers == triggers, "player 2's motors at 50 %%: %d %d",
+              large, small);
+    }
     game.settings.vibration = 0;
     pc5_game_rumble(&game, 7, 40000, 40000, &large, &small);
     CHECK(!large && !small, "vibration off");

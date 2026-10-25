@@ -1,4 +1,4 @@
-PC5 is a launcher for your own Windows PC games on a PS5 that runs homebrew. It installs games from a USB drive, shows them as a row of covers, and runs them with [prospero-win](https://github.com/mpereiraesaa/prospero-win) (Wine on the PS5). The app's title ID is `PPSA11018` and its tile on the home screen is called **PC5**. This wiki describes PC5 **1.6.3**.
+PC5 is a launcher for your own Windows PC games on a PS5 that runs homebrew. It installs games from a USB drive, shows them as a row of covers, and runs them with [prospero-win](https://github.com/mpereiraesaa/prospero-win) (Wine on the PS5). The app's title ID is `PPSA11018` and its tile on the home screen is called **PC5**. This wiki describes PC5 **1.6.4**.
 
 ![The PC5 library](images/library.png)
 *The library: your games as a row of covers, with the chosen one in the middle.*
@@ -12,6 +12,7 @@ PC5 contains no games and downloads none. You install the games you own.
 - **Runs the games** with Wine, DXVK (Direct3D 8 to 11), VKD3D-Proton (Direct3D 12), Mesa (RADV for Vulkan, Zink for OpenGL) and Wine Mono (.NET Framework).
 - **Lets you set each game up on its own:** its controller (Xbox controller, DualSense, or keyboard and mouse with your own button mapping), its resolution (1080p, 1440p or 4K) and aspect ratio, frame generation from 30 to 60 fps, launch options, and a tile of its own on the PS5's home screen.
 - **Has settings for every game:** an overlay (FPS, frame time, CPU, temperatures, memory), vibration strength, the light bar and the adaptive triggers.
+- **Lets up to four players play together**, each signed in on the console with their own controller.
 - **Lets you type into games** with the PS5's on-screen keyboard: click the touchpad with two fingers.
 - **Starts a game its launcher starts:** when a game's own launcher starts the game, PC5 starts it in the launcher's place.
 - **Keeps the log** of each game's newest session as one zip, with the game's own logs and crash files, tells you when a game crashed, and opens GitHub's issue form for it with a QR code.

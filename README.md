@@ -5,7 +5,7 @@
 A launcher for your own PC games on a PS5 that runs homebrew. PC5 shows your games as a row
 of covers, installs games from a USB drive in one copy each, and uninstalls them with their
 saves. It runs the games with [prospero-win](https://github.com/mpereiraesaa/prospero-win)
-(Wine on the PS5). The app is `PPSA11018`, its tile is called **PC5**. This is version 1.6.3.
+(Wine on the PS5). The app is `PPSA11018`, its tile is called **PC5**. This is version 1.6.4.
 
 No game is part of PC5, and PC5 downloads none: you install the games you own.
 
@@ -28,7 +28,8 @@ No game is part of PC5, and PC5 downloads none: you install the games you own.
    **✕** to play. Hold the **touchpad** and **Options** for two seconds to leave a game.
 
 Each game has a menu (**△**) for its controller mode, frame generation, resolution, aspect
-ratio, memory, program, home screen tile and uninstalling.
+ratio, memory, program, home screen tile and uninstalling. Up to four players can play a game
+together: each turns on their own controller and signs in with it on the console.
 
 ## The wiki
 
@@ -39,7 +40,7 @@ Everything else is in the [wiki](https://github.com/bornaradusin/PC5/wiki):
 | [Installing and updating](https://github.com/bornaradusin/PC5/wiki/Installing-and-updating) | putting PC5 on the console, and updating it |
 | [Installing games](https://github.com/bornaradusin/PC5/wiki/Installing-games) | USB drives, several games in a row, choosing the right program, launchers |
 | [Playing games](https://github.com/bornaradusin/PC5/wiki/Playing-games) | the game's menu: frame generation, resolution, aspect ratio, memory, .NET |
-| [Controllers](https://github.com/bornaradusin/PC5/wiki/Controllers) | Xbox controller, DualSense, keyboard & mouse, button mapping, typing |
+| [Controllers](https://github.com/bornaradusin/PC5/wiki/Controllers) | Xbox controller, DualSense, keyboard & mouse, button mapping, more than one player, typing |
 | [Settings](https://github.com/bornaradusin/PC5/wiki/Settings) | the overlay, vibration, light bar, adaptive triggers, updates |
 | [Launch options](https://github.com/bornaradusin/PC5/wiki/Launch-options) | a game's command line (`launch.txt`) |
 | [Home screen tiles](https://github.com/bornaradusin/PC5/wiki/Home-screen-tiles) | a game on the PS5's home screen |
@@ -86,7 +87,7 @@ itself in Docker (`tools/Dockerfile`). A first build takes a few hours, most of 
 `tests/test.sh` runs the host checks (after `tools/build.sh sources`), `tests/test.sh --shots`
 also draws every screen, and `tests/PS5-CHECKLIST.md` is what to try on a console.
 
-**Releasing**: the update check reads the newest release's tag (`v1.6.3`). Raise `PC5_VERSION`
+**Releasing**: the update check reads the newest release's tag (`v1.6.4`). Raise `PC5_VERSION`
 in `title/pc5.h` and `contentVersion` in `sce_sys/param.json`, and attach `PPSA11018.zip`,
 `PPSA11018-sources.tar.xz` and `wine-mono-11.3.0-src.tar.xz` to the release.
 

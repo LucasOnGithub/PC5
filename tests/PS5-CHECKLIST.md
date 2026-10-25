@@ -174,5 +174,16 @@ With ShadowMountPlus and elfldr running.
 | 75 | A 32-bit Direct3D 9 game that crashed after some minutes in `MSVCR90.dll` (Blur): play it for 15 minutes or more | it doesn't crash | no `crash report: at L"MSVCR90.dll"` |
 | 76 | Any 32-bit Direct3D 9 game that ran before | it runs as before: picture, sound, menus | |
 
+## More than one player (1.6.4)
+
+| # | Do | Expect | Expect in the log |
+| --- | --- | --- | --- |
+| 77 | A game with local multiplayer, set to Xbox controller: start it, then turn on a second controller and sign in with it as another user | the game finds a second controller within a second; both control their own player | `PW_WINE64 display … players=up-to-4`, `PW_WINE64 players signed in: …`, `PW_WINE64 player 2 joined: user … handle=…` |
+| 78 | The same, the game rumbling for player 2 | only player 2's controller rumbles, at Settings › In games › Vibration | `PW_WINE64 player 2 rumble left=… status=ok rc=0` |
+| 79 | Sign player 2 out while the game runs, then in again | the game loses the second controller, then finds it again | `PW_WINE64 player 2 left: user … signed out`, then `joined` again |
+| 80 | The same game set to DualSense, with two controllers | player 1 is the DualSense (PlayStation buttons), player 2 an Xbox controller | `players=up-to-4`, `player 2 joined` |
+| 81 | A game set to Keyboard & mouse, with two controllers signed in | only player 1 controls it | `players=1` |
+| 82 | With two players in a game, hold the touchpad and Options on player 2's controller, then on player 1's | player 2's does nothing; player 1's leaves the game | `close requested by=combo` once |
+
 A non-zero `rc=` on the light bar or triggers lines means the console refused that call; send
 that log.

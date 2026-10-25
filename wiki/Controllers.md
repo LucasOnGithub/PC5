@@ -1,4 +1,4 @@
-PC5 lets each game see your controller in one of three ways: as an Xbox controller, as a DualSense plugged into a PC, or as a keyboard and mouse with a button mapping you choose. The choice is made in the game's menu and kept for that game. This page explains the three modes, the button mapping, leaving a game, and answering a game's Windows pop-ups.
+PC5 lets each game see your controller in one of three ways: as an Xbox controller, as a DualSense plugged into a PC, or as a keyboard and mouse with a button mapping you choose. The choice is made in the game's menu and kept for that game. This page explains the three modes, the button mapping, playing with more than one player, leaving a game, and answering a game's Windows pop-ups.
 
 ## Choosing a controller mode
 
@@ -88,6 +88,20 @@ With **DualSense**, the game finds a DualSense as if it were plugged into a PC b
 - the touchpad and the motion sensors;
 - their own rumble, at the strength set in **Settings › In games › Vibration**;
 - their own light bar colour and adaptive trigger effects, from the moment the game sets them. Until then, PC5's **Light bar** and **Adaptive triggers** settings apply.
+
+## More than one player
+
+Up to four players can play a game with local multiplayer (split screen, couch co-op), each with their own controller, in **Xbox controller** and **DualSense** mode. On the PS5 each controller belongs to a signed-in user, so each player signs in:
+
+1. Turn on another controller and press its **PS** button.
+2. Sign in with it as another user on the console, or as a guest.
+3. Within a second the game finds that player's controller, while it runs. Players join in the order they sign in, and a player who signs out leaves: the next one to sign in takes their place.
+
+- With **Xbox controller**, the game finds up to four Xbox controllers, each with its own rumble.
+- With **DualSense**, player 1 is the DualSense, and players 2 to 4 are Xbox controllers.
+- **Keyboard & mouse** is for one player.
+- Player 1 is whoever started PC5. Only player 1's controller leaves the game, opens the on-screen keyboard and gets PC5's light bar and adaptive triggers. Everyone's rumble follows **Settings › In games › Vibration**.
+- Which controller is which player, and whether a game has local multiplayer at all, is up to the game. Some games ask each player to press a button first.
 
 ## Rumble, light bar and adaptive triggers
 

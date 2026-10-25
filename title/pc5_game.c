@@ -540,6 +540,13 @@ static void set_triggers(Pc5GameSession *game, int pad, const Pc5Trigger *both, 
     set_trigger_pair(game, pad, both, both, why);
 }
 
+void pc5_game_player_rumble(const Pc5GameSession *game, uint32_t left, uint32_t right, uint8_t *large,
+                            uint8_t *small)
+{
+    *large = (uint8_t)((left >> 8) * (uint32_t)game->settings.vibration / 100);
+    *small = (uint8_t)((right >> 8) * (uint32_t)game->settings.vibration / 100);
+}
+
 void pc5_game_rumble(Pc5GameSession *game, int pad, uint32_t left, uint32_t right, uint8_t *large, uint8_t *small)
 {
     /* The motors at Vibration's strength (0 % is off). */

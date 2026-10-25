@@ -48,6 +48,9 @@ Hold the **touchpad** and **Options** together for two seconds. See [Leaving a g
 **Can I use a keyboard and mouse?**
 Yes. A USB keyboard and mouse work in every controller mode. For games without controller support, set the game's controller to **Keyboard & mouse** and map the buttons to keys. See [Controllers](Controllers).
 
+**Can more than one player play?**
+Yes, up to four, in a game with local multiplayer: each player turns on their own controller and signs in with it on the console, as another user or a guest. See [More than one player](Controllers#more-than-one-player).
+
 **Can I make a game run at 60 fps?**
 For a game that keeps 30 fps, turn on **△ › Frame generation**. It shows the game at 60 fps with frames made in between. See [Frame generation](Playing-games#frame-generation).
 
