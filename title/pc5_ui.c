@@ -22,7 +22,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <time.h>
 #include <unistd.h>
 
 enum { W = 1920, H = 1080, COVER_W = 400, COVER_H = 600, FLOOR_Y = 712, MARGIN = 72 };
@@ -3090,13 +3089,17 @@ static void game_row(Pc5Ui *ui, Pc5Canvas *c, int i, float x, float y, float w, 
         static const char *const months[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
                                                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
         char about[160];
-        time_t when = (time_t)saves->kept;
-        struct tm day;
         snprintf(title, sizeof(title), "Saves of %s", saves->title);
-        if (saves->kept > 0 && gmtime_r(&when, &day))
-            snprintf(about, sizeof(about), "Kept %d %s %d; installing it again puts them back", day.tm_mday,
-                     months[day.tm_mon % 12], day.tm_year + 1900);
-        else
+        if (saves->kept > 0) {
+            /* The day (UTC) from the days since 1970 (Howard Hinnant's civil_from_days; the
+             * console's C library has no gmtime_r). */
+            int64_t z = saves->kept / 86400 + 719468, era = z / 146097, doe = z - era * 146097;
+            int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365, doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+            int64_t mp = (5 * doy + 2) / 153, d = doy - (153 * mp + 2) / 5 + 1, m = mp < 10 ? mp + 3 : mp - 9;
+            int64_t y = yoe + era * 400 + (m <= 2);
+            snprintf(about, sizeof(about), "Kept %d %s %d; installing it again puts them back", (int)d,
+                     months[(m - 1) % 12], (int)y);
+        } else
             snprintf(about, sizeof(about), "Kept when it was uninstalled; installing it again puts them back");
         pc5_text(c, &ui->fonts, PC5_FACE_LABEL, (int)x + 84, (int)y + 44, C_TEXT, title, (int)w - 84, 0);
         pc5_text(c, &ui->fonts, PC5_FACE_SMALL, (int)x + 84, (int)y + 78, C_DIM, about, (int)w - 84, 0);
