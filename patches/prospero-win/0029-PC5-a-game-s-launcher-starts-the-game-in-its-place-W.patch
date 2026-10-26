@@ -15,8 +15,8 @@ hand-offs in a row are the most.
 ---
  PUBLICATION_ALLOWLIST.txt                     |   1 +
  native/wine64_main.c                          |  25 ++++-
- ...-hand-a-launcher-s-game-to-the-title.patch | 104 ++++++++++++++++++
- 3 files changed, 129 insertions(+), 1 deletion(-)
+ ...-hand-a-launcher-s-game-to-the-title.patch | 110 ++++++++++++++++++
+ 3 files changed, 135 insertions(+), 1 deletion(-)
  create mode 100644 wine/patches/0923-ntdll-ps5-hand-a-launcher-s-game-to-the-title.patch
 
 diff --git a/PUBLICATION_ALLOWLIST.txt b/PUBLICATION_ALLOWLIST.txt
@@ -89,7 +89,7 @@ new file mode 100644
 index 0000000..34ea475
 --- /dev/null
 +++ b/wine/patches/0923-ntdll-ps5-hand-a-launcher-s-game-to-the-title.patch
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,110 @@
 +From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 +From: prospero-win <prospero-win@invalid>
 +Date: Sun, 25 Oct 2026 11:16:42 +0000
@@ -104,13 +104,13 @@ index 0000000..34ea475
 +and the process ends; the title then starts that program in its place.
 +Anything else is refused as before.
 +---
-+ dlls/ntdll/unix/process.c | 67 ++++++++++++++++++++++++++++++++++++++-
-+ 1 file changed, 66 insertions(+), 1 deletion(-)
++ dlls/ntdll/unix/process.c | 73 ++++++++++++++++++++++++++++++++++++++-
++ 1 file changed, 72 insertions(+), 1 deletion(-)
 +
 +diff --git a/dlls/ntdll/unix/process.c b/dlls/ntdll/unix/process.c
 +--- a/dlls/ntdll/unix/process.c
 ++++ b/dlls/ntdll/unix/process.c
-+@@ -681,6 +681,69 @@ static NTSTATUS alloc_handle_list( const PS_ATTRIBUTE *handles_attr, obj_handle_
++@@ -681,6 +681,75 @@ static NTSTATUS alloc_handle_list( const PS_ATTRIBUTE *handles_attr, obj_handle_
 +     return STATUS_SUCCESS;
 + }
 + 
@@ -137,16 +137,22 @@ index 0000000..34ea475
 ++        "crash", "report", "unins", "setup", "install", "redist", "update", "patch", "helper",
 ++        "service", "cefsub", "webhelper", "anticheat", "battleye", "dxsetup", "dotnet", "dump",
 ++    };
-++    const char *file = getenv( "PW_HANDOFF" ), *dir = getenv( "PW_HANDOFF_DIR" ), *name;
+++    const char *file = getenv( "PW_HANDOFF" ), *dir = getenv( "PW_HANDOFF_DIR" ), *local = getenv( "PW_HANDOFF_LOCALAPPDATA" ), *name;
 ++    char image[1024], current[1024], command[4096], cwd[1024], lower[256], text[6200];
 ++    size_t i;
 ++    int fd, ok, len;
 ++
-++    if (!file || !*file || !dir || !*dir) return;
-++    if (pe_info->subsystem != IMAGE_SUBSYSTEM_WINDOWS_GUI) return;
+++    if (!file || !*file || !dir || !*dir || !local || !*local) return;
 ++    ps5_utf8( &params->ImagePathName, image, sizeof(image) );
 ++    ps5_utf8( &peb->ProcessParameters->ImagePathName, current, sizeof(current) );
-++    if (!image[0] || !strcasecmp( image, current ) || strncasecmp( image, dir, strlen( dir ))) return;
+++    /* Also allow a console bootstrapper inside this prefix's Local AppData. */
+++    if (pe_info->subsystem != IMAGE_SUBSYSTEM_WINDOWS_GUI &&
+++        (pe_info->subsystem != IMAGE_SUBSYSTEM_WINDOWS_CUI || strncasecmp( image, local, strlen( local ) ))) return;
+++    if (!image[0] || !strcasecmp( image, current ) ||
+++        (strncasecmp( image, dir, strlen( dir )) && strncasecmp( image, local, strlen( local )))) return;
+++    const char *inside = !strncasecmp( image, dir, strlen( dir )) ? image + strlen( dir ) : image + strlen( local );
+++    if (!*inside || strchr( inside, ':' ) || strchr( inside, '/' ) ||
+++        strstr( inside, ".." ) || strstr( inside, "\\\\" )) return;
 ++    name = strrchr( image, '\\' );
 ++    name = name ? name + 1 : image;
 ++    for (i = 0; name[i] && i < sizeof(lower) - 1; i++) lower[i] = (name[i] >= 'A' && name[i] <= 'Z') ? name[i] + 32 : name[i];
@@ -180,7 +186,7 @@ index 0000000..34ea475
 + /**********************************************************************
 +  *           NtCreateUserProcess  (NTDLL.@)
 +  */
-+@@ -782,7 +845,9 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
++@@ -782,7 +851,9 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
 +      * creation fails cleanly instead of spawning a loader. The image is opened first, as on
 +      * Windows, so a missing or unreadable one fails with the status Windows gives
 +      * (ERROR_FILE_NOT_FOUND for CreateProcess), which programs check; only an image that is
