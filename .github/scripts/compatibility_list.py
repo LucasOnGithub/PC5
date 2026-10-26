@@ -11,7 +11,8 @@ body GitHub writes as "### <label>" headings, each followed by its answer.
 
 A report that a game doesn't run lists only on the maintainer's word: it names an issue in this
 repository (with the game's log), and the game shows as being looked at while that issue is
-open, and as not running once the maintainer closes it as not planned or labels it wontfix. A
+open, and as not running once the maintainer labels it wontfix (closing an issue as not planned
+for a missing log confirms nothing). A
 report without such an issue gets one comment saying so and is closed; edited to name one, it
 opens again. The maintainer's own reports list as posted.
 """
@@ -127,8 +128,8 @@ def main() -> int:
                     print(f"compatibility list: #{discussion['number']} names issue #{issue['number']}: opened again")
                 if issue["state"] == "OPEN":
                     shown = LOOKED_AT
-                elif not (issue["stateReason"] == "NOT_PLANNED" or "wontfix" in issue["labels"]):
-                    continue   # fixed: not a game that doesn't run any more
+                elif "wontfix" not in issue["labels"]:
+                    continue   # fixed, or closed without a verdict (a missing log): not listed
             elif result in NOT_RUNNING:
                 issue = linked_issue(owner, name, fields.get("Issue", "")) or None
             reports.append({
@@ -167,7 +168,7 @@ def main() -> int:
     lines += ["", "A game that crashes or doesn't start: open an "
               f"[issue](https://github.com/{owner}/{name}/issues/new/choose) with its log first, then report it here "
               "with the issue's number. It shows as being looked at while the issue is open, and as not running "
-              "once the issue is closed as not planned."]
+              "once the issue is marked wontfix."]
 
     page = "\n".join([
         "Which games run in PC5, as players found: every report of the [Game compatibility]"
