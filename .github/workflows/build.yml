@@ -42,20 +42,28 @@ jobs:
 
       - name: 1/12 Packages
         timeout-minutes: 15
-        # Only Ubuntu's own sources (the machine's others, Microsoft's and the like, can stall a
-        # download), short timeouts with retries, and without man-db's index, which is rebuilt
-        # after every package.
+        # Only Ubuntu's own sources, without man-db's index (rebuilt after every package). A
+        # download that stalls, as GitHub's machines' sometimes do, is stopped after two
+        # minutes and tried again, up to three times.
         run: |
           mkdir -p .build/logs
           bash tools/ci-step.sh 1
-          {
-            sudo rm -f /var/lib/man-db/auto-update
-            sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete
-            apt="-o Acquire::Retries=5 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
-            sudo apt-get update -q $apt
-            sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends $apt \
-              -o Dpkg::Use-Pty=0 -o DPkg::Lock::Timeout=300 $(cat tools/packages.txt)
-          } > .build/logs/packages.log 2>&1 || { tail -40 .build/logs/packages.log; exit 1; }
+          sudo rm -f /var/lib/man-db/auto-update
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete
+          apt="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Dpkg::Use-Pty=0"
+          try() { # what, command...
+            local what=$1; shift
+            for attempt in 1 2 3; do
+              echo "$what (try $attempt)"
+              if sudo env DEBIAN_FRONTEND=noninteractive timeout 120 "$@" >> .build/logs/packages.log 2>&1; then return 0; fi
+              echo "  stopped or failed; trying again"
+              sudo killall -q apt-get dpkg 2>/dev/null; sleep 5
+            done
+            tail -30 .build/logs/packages.log; return 1
+          }
+          try "Package lists" apt-get update -q $apt
+          try "Installing $(wc -w < tools/packages.txt) packages" \
+            apt-get install -y -q --no-install-recommends $apt -o DPkg::Lock::Timeout=60 $(cat tools/packages.txt)
           echo "✓ Packages done"
 
       - name: 2/12 Sources
