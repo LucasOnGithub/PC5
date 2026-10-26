@@ -380,7 +380,7 @@ int pc5_folder_inspect(const char *path, const char *name, Pc5Folder *folder)
             const char *slash = strrchr(batches[i], '/'), *file = slash ? slash + 1 : batches[i];
             int k = 0;
             if (pc5_batch_read(path, batches[i], batch)) continue;
-            while (k < programs && strcmp(walk.all[k].path, batch->exe)) k++;
+            while (k < programs && pc5_casecmp(walk.all[k].path, batch->exe)) k++;
             if (k == programs || walk.all[k].pe.dll) continue;
             Pc5Exe *exe = &walk.all[walk.all_count++];
             *exe = walk.all[k];
@@ -578,6 +578,10 @@ static void batch_expand(const Batch *b, const char *in, char *out, size_t size)
                 while (*q && strchr("dpnxfsDPNXFS", *q)) q++;
                 count = (size_t)(q - parts);
             }
+            if (*q == '*' || (*q >= '1' && *q <= '9')) {   /* the batch file's arguments: none */
+                p = q + 1;
+                continue;
+            }
             if (*q != '0' || count >= sizeof(name)) {
                 out[n++] = *p++;
                 continue;
@@ -590,8 +594,13 @@ static void batch_expand(const Batch *b, const char *in, char *out, size_t size)
         } else {
             const char *close = strchr(p + 1, '%');
             size_t len = close ? (size_t)(close - p - 1) : 0;
-            if (!len || len >= sizeof(name) || memchr(p + 1, ':', len) || memchr(p + 1, ' ', len)) {
-                out[n++] = *p++;   /* a lone %, or an edit (%x:~0,3%): as it is */
+            if (len && memchr(p + 1, ':', len)) {   /* an edit (%x:~0,3%): kept whole, as it is */
+                for (const char *c = p; c <= close && n + 1 < size; c++) out[n++] = *c;
+                p = close + 1;
+                continue;
+            }
+            if (!len || len >= sizeof(name) || memchr(p + 1, ' ', len)) {
+                out[n++] = *p++;   /* a lone % */
                 continue;
             }
             memcpy(name, p + 1, len);
@@ -659,20 +668,24 @@ static int batch_resolve(const Batch *b, const char *base, const char *path, int
             n = strlen(found);
             continue;
         }
-        if (pc5_format(disk, sizeof(disk), "%s%s%s/%s", b->top, found[0] ? "/" : "", found, name)) return -1;
-        if (!pc5_exists(disk)) {
+        /* The name as the folder stores it: exFAT finds any case of it, so asking whether
+         * the batch file's spelling exists isn't enough. The same name first, then any case. */
+        {
             DIR *dir;
             struct dirent *entry;
-            int match = 0;
-            disk[strlen(disk) - strlen(name) - 1] = 0;
+            char stored[PC5_PATH] = "";
+            if (pc5_format(disk, sizeof(disk), "%s%s%s", b->top, found[0] ? "/" : "", found)) return -1;
             if (!(dir = opendir(disk))) return -1;
-            while ((entry = readdir(dir)))
-                if (!pc5_casecmp(entry->d_name, name)) {
-                    match = !pc5_format(name, strlen(name) + 1, "%s", entry->d_name);
+            while ((entry = readdir(dir))) {
+                if (!strcmp(entry->d_name, name)) {
+                    pc5_copy(stored, sizeof(stored), entry->d_name);
                     break;
                 }
+                if (!stored[0] && !pc5_casecmp(entry->d_name, name)) pc5_copy(stored, sizeof(stored), entry->d_name);
+            }
             closedir(dir);
-            if (!match) return -1;
+            if (!stored[0] || strlen(stored) != strlen(name)) return -1;
+            memcpy(name, stored, strlen(stored));
         }
         if (pc5_format(found + n, sizeof(found) - n, "%s%s", n ? "/" : "", name)) return -1;
         n = strlen(found);
@@ -712,8 +725,11 @@ static void batch_arguments(const char *in, char *out, size_t size)
         }
         if (n + (n ? 1 : 0) + len + 1 > size) break;
         if (n) out[n++] = ' ';
-        memcpy(out + n, start, len);
-        n += len;
+        for (size_t i = 0; i < len; i++) {
+            unsigned char c = (unsigned char)start[i];
+            if (c == '\t') out[n++] = ' ';
+            else if (c >= 0x20 && c != 0x7f) out[n++] = (char)c;   /* a profile line takes no others */
+        }
         out[n] = 0;
     }
 }
@@ -808,14 +824,19 @@ static void batch_start(Batch *b, const char *arg)
 {
     char word[PC5_PATH], cwd[PC5_PATH], dir[PC5_PATH];
 
+    int titled = 0;
+
     pc5_copy(cwd, sizeof(cwd), b->cwd);
-    while (*arg == ' ' || *arg == '\t') arg++;
-    if (*arg == '"') arg = batch_token(arg, word, sizeof(word));   /* the window's title */
     for (;;) {
         while (*arg == ' ' || *arg == '\t') arg++;
+        if (*arg == '"' && !titled) {   /* the window's title: the first quoted word, before or after switches */
+            arg = batch_token(arg, word, sizeof(word));
+            titled = 1;
+            continue;
+        }
         if (*arg != '/') break;
         arg = batch_token(arg, word, sizeof(word));
-        if (pc5_lower((unsigned char)word[1]) == 'd' && (!word[2] || word[2] == ':' || !strchr("ae", pc5_lower((unsigned char)word[2])))) {
+        if (pc5_lower((unsigned char)word[1]) == 'd') {
             const char *folder = word + 2;
             if (!*folder) {
                 arg = batch_token(arg, word, sizeof(word));
@@ -884,6 +905,22 @@ static void batch_line(Batch *b, const char *line)
     }
 }
 
+/* 1 when line ends in a ^ that carries it on to the next line. */
+static int batch_continues(const char *line)
+{
+    int quoted = 0, carries = 0;
+
+    for (const char *p = line; *p; p++) {
+        carries = 0;
+        if (*p == '"') quoted = !quoted;
+        else if (*p == '^' && !quoted) {
+            if (!p[1]) carries = 1;
+            else p++;
+        }
+    }
+    return carries;
+}
+
 int pc5_batch_read(const char *top, const char *batch, Pc5Batch *out)
 {
     char path[PC5_PATH];
@@ -906,16 +943,25 @@ int pc5_batch_read(const char *top, const char *batch, Pc5Batch *out)
     pc5_copy(b->cwd, sizeof(b->cwd), batch);
     slash = strrchr(b->cwd, '/');
     if (slash) b->cwd[slash - b->cwd] = 0; else b->cwd[0] = 0;
-    char *at = (char *)text.data;
+    char *at = (char *)text.data, *end = memchr(text.data, 0x1a, text.len);
+    if (end) *end = 0;                                /* Ctrl-Z: the end of the file, as DOS wrote it */
     if (!strncmp(at, "\xef\xbb\xbf", 3)) at += 3;   /* a UTF-8 mark */
+    b->line[0] = 0;
     for (char *next; at; at = next) {
+        size_t have = strlen(b->line), len;
         next = strchr(at, '\n');
         if (next) *next++ = 0;
-        size_t len = strlen(at);
-        if (len && at[len - 1] == '\r') at[len - 1] = 0;
-        pc5_copy(b->line, sizeof(b->line), at);
+        len = strlen(at);
+        if (len && at[len - 1] == '\r') at[--len] = 0;
+        pc5_copy(b->line + have, sizeof(b->line) - have, at);
+        /* A ^ at the end, outside quotes and not itself escaped, carries the line on. */
+        if (next && batch_continues(b->line)) {
+            b->line[strlen(b->line) - 1] = 0;
+            continue;
+        }
         batch_expand(b, b->line, b->expanded, sizeof(b->expanded));
         batch_line(b, b->expanded);
+        b->line[0] = 0;
     }
     if (b->have_game) *out = b->game;
     else if (b->have_first) *out = b->first;

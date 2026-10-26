@@ -188,7 +188,7 @@ int pc5_own_dlls(const char *folder, char *out, size_t size)
 }
 
 /* The desktop of a game drawn through Vulkan (Direct3D, Vulkan, OpenGL), as its
- * Resolution says; others draw on the CPU at 1080p. */
+ * Resolution says; DirectDraw games and plain Windows drawing stay at 1080p. */
 static const char *desktop_size(const Pc5Info *info, const Pc5Controls *controls)
 {
     if (info->api <= PC5_API_DDRAW || !controls) return "1920x1080";

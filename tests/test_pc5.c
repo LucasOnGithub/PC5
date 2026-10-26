@@ -455,6 +455,9 @@ static void test_sources(void)
                          ")\r\nexit\r\n");
         path(file, sizeof(file), "%s/stubs/Witch Tale/Windowed.bat", work);
         write_text(file, "@cd /d \"%~dp0Binaries\\Win64\" && WitchTale -windowed ^& pause\n");
+        path(file, sizeof(file), "%s/stubs/Witch Tale/Safe Mode.bat", work);
+        write_text(file, "start /min \"\" \"Binaries\\Win64\\WitchTale.exe\" %~1 %x:~0,3% -a ^\r\n-b\t\"x\ty\"\r\n\x1a"
+                         "start other.exe\r\n");
         path(file, sizeof(file), "%s/stubs/Witch Tale/Setup.bat", work);
         write_text(file, "Binaries\\Win64\\WitchTale.exe -install\n");
         path(file, sizeof(file), "%s/stubs/Witch Tale/Readme.bat", work);
@@ -481,6 +484,10 @@ static void test_sources(void)
               !strcmp(batch.cwd, "Binaries/Win64") && !strcmp(batch.arguments, "-windowed & pause"),
               "Windowed.bat: %s | %s | %s", batch.exe, batch.cwd, batch.arguments);
         CHECK(pc5_batch_read(dir, "Readme.bat", &batch) == -1, "nothing of the game's started: nothing");
+        CHECK(!pc5_batch_read(dir, "Safe Mode.bat", &batch) && !strcmp(batch.exe, "Binaries/Win64/WitchTale.exe") &&
+              !strcmp(batch.arguments, "%x:~0,3% -a -b \"x y\""),
+              "start's title after its switches, ^ carrying a line on, no tabs, Ctrl-Z the end: %s | %s", batch.exe,
+              batch.arguments);
     }
 }
 
