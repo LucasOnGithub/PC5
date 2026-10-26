@@ -60,7 +60,13 @@ int pc5_background_needed(const char *root, const Pc5BackgroundGame *game)
     if (pc5_background_path(root, game->prefix, saved, sizeof(saved)) ||
         note_path(root, game->prefix, "background-none.txt", none, sizeof(none)))
         return 0;
-    if (!pc5_background_own(root, game, own, sizeof(own))) return newer(own, saved);
+    /* The player's own picture, when it is newer than the background kept, or not older than
+     * the note that the game has none (None chosen in Appearance after it, or none found). */
+    if (!pc5_background_own(root, game, own, sizeof(own))) {
+        struct stat picture, note;
+        if (pc5_exists(saved)) return newer(own, saved);
+        return stat(none, &note) || (!stat(own, &picture) && picture.st_mtime >= note.st_mtime);
+    }
     return !pc5_exists(saved) && !pc5_exists(none);
 }
 

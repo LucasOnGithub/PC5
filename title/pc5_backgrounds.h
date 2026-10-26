@@ -52,7 +52,7 @@ int pc5_background_path(const char *root, const char *prefix, char *out, size_t 
 /* The player's own background for the game, newest first as described above. 0, or -1. */
 int pc5_background_own(const char *root, const Pc5BackgroundGame *game, char *out, size_t size);
 /* 1 when the game needs looking at: no background yet (and none found before), or
- * the player's own picture is newer than the one kept. */
+ * the player's own picture is newer than the one kept (or than the note that it has none). */
 int pc5_background_needed(const char *root, const Pc5BackgroundGame *game);
 
 /* Starts the worker on games (taken over). -1 when a thread can't be started (the

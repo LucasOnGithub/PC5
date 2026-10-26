@@ -2223,6 +2223,22 @@ static void test_backgrounds(void)
     pc5_image_free(&background);
     path(file, sizeof(file), "%s/prefixes/game2/pc5/background-none.txt", base);
     CHECK(!pc5_exists(file), "its none note gone");
+    /* None chosen in Appearance after the player's picture: it stays none. (The games went with
+     * the worker: game2 again.) */
+    {
+        char saved[PC5_PATH];
+        struct timespec old[2] = { { 1700000000, 0 }, { 1700000000, 0 } };
+        Pc5BackgroundGame again = { 0 };
+        pc5_copy(again.id, sizeof(again.id), "game2");
+        pc5_copy(again.prefix, sizeof(again.prefix), "game2");
+        path(saved, sizeof(saved), "%s/prefixes/game2/pc5/background.bin", base);
+        unlink(saved);
+        write_text(file, "none\n");
+        CHECK(!utimensat(AT_FDCWD, own, old, 0) && !pc5_background_needed(base, &again), "None chosen: kept");
+        write_png(own, 32, 18, 0xff3344ffu);   /* a newer picture of the player's: used again */
+        CHECK(pc5_background_needed(base, &again), "a newer picture: looked at");
+        unlink(own);
+    }
     /* A game whose Windows went (uninstalled while the worker looked): nothing made for it. */
     {
         Pc5BackgroundGame *gone = pc5_alloc(sizeof(*gone));   /* games went with the worker */

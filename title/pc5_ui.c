@@ -1096,6 +1096,7 @@ static void pick_searched(Pc5Ui *ui)
     }
     ui->pick_count = ui->pick_now + pick->count + 1;
     ui->pick_at = ui->pick_query[0] && pick->count ? ui->pick_now : 0;
+    ui->pick_step = 1;   /* one that can't be had: the next one found, not the one before */
     ui->pick_fetching = 1;
     say(ui, "PC5 picture choices=%d answered=%d query=%s", pick->count, pick->answered, ui->pick_query[0] ? ui->pick_query : "-");
     go(ui, S_PICTURE);
@@ -1178,8 +1179,9 @@ static void pick_use(Pc5Ui *ui, const Pc5Game *game)
         pc5_backgrounds_end(&ui->backgrounds, 1);
         ui->backgrounds_for = -1;
         if (entry >= ui->pick->count) {
-            unlink(path);
+            /* the note first: the background goes only once nothing is looked for again */
             failed = pc5_format(note, sizeof(note), "%s/background-none.txt", dir) || pc5_write_file(note, "none\n", 5);
+            if (!failed && pc5_exists(path) && unlink(path)) failed = 1;
         } else {
             failed = !ui->pick_image.px || pc5_cover_save(path, &ui->pick_image, 0);
             if (!failed && !pc5_format(note, sizeof(note), "%s/background-none.txt", dir)) unlink(note);
@@ -1191,7 +1193,10 @@ static void pick_use(Pc5Ui *ui, const Pc5Game *game)
         game->id, entry, ui->pick->count, failed);
     if (failed) {
         message(ui, 0, ui->pick_kind == PICK_COVER ? "The cover wasn't changed" : "The background wasn't changed",
-                "PC5 can't write to the game's folder in /data/prospero-win/prefixes.", S_PICTURE);
+                entry < ui->pick->count || ui->pick_kind == PICK_BACKGROUND || ui->pick_image.px
+                    ? "PC5 can't write to the game's folder in /data/prospero-win/prefixes."
+                    : "PC5 couldn't make the card from the game's icon and name.",
+                S_PICTURE);
         return;
     }
     picture_leave(ui);
@@ -2684,6 +2689,8 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
                     snprintf(body, sizeof(body), "%s Nothing was changed.", ui->remove.error);
                     say(ui, "PC5 problem uninstall %s: %s", game->title, ui->remove.error);
                     pc5_remove_end(&ui->remove);
+                    ui->backgrounds_for = -1;   /* the worker, stopped for this, looks again */
+                    if (ui->uninstall_back == S_GAME_MENU) game_menu_at(ui, GR_UNINSTALL);
                     message(ui, 0, title, body, ui->uninstall_back);
                     break;
                 }
