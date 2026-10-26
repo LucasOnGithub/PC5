@@ -1,15 +1,17 @@
 # Builds PC5 from source on GitHub's machines (tools/build.sh, every step) and, when asked,
 # makes a draft release with its three archives for the maintainer to check and publish.
 # Run it from the Actions tab: Build › Run workflow.
-name: Build
+name: build
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       draft_release:
         description: "Make a draft release v<PC5_VERSION> with the archives (otherwise they are kept as the run's artifacts)"
         type: boolean
-        default: true
+        default: false
 
 permissions:
   contents: write
@@ -59,6 +61,9 @@ jobs:
 
       - name: Sources
         run: bash tools/build.sh sources
+
+      - name: Tests
+        run: bash tests/test.sh
 
       - name: Cache keys
         id: keys
