@@ -14,7 +14,8 @@ repository (with the game's log), and the game shows as being looked at while th
 open, and as not running once the maintainer labels it wontfix (closing an issue as not planned
 for a missing log confirms nothing). A
 report without such an issue gets one comment saying so and is closed; edited to name one, it
-opens again. The maintainer's own reports list as posted.
+opens again. The maintainer's own reports list as posted. Each report in the list gets one
+comment saying so, once the page with it is published.
 """
 import json
 import os
@@ -38,6 +39,7 @@ LOOKED_AT = "🔍 Being looked at"   # a report whose issue is still open
 SHOWN = ["Works perfectly", "Playable with issues", LOOKED_AT, "Starts but not playable", "Doesn't start"]
 MARK = "<!-- pc5-compatibility: needs an issue -->"   # the Action's comment, so it is made once
 UNKNOWN = {}   # an issue that couldn't be looked up: the report waits for the next run
+LISTED = "<!-- pc5-compatibility: listed -->"   # the Action's comment once a report is in the list
 
 
 def graphql(query: str, fatal: bool = True, **variables):
@@ -146,7 +148,9 @@ def main() -> int:
                     continue   # fixed, or closed without a verdict (a missing log): not listed
             elif result in NOT_RUNNING:
                 issue = linked_issue(owner, name, fields.get("Issue", "")) or None
+            told = any(LISTED in (c["body"] or "") for c in discussion["comments"]["nodes"])
             reports.append({
+                "id": discussion["id"], "told": told, "locked": discussion["locked"],
                 "game": game, "result": result, "shown": shown, "issue": issue, "pc5": fields.get("PC5 version", ""),
                 "edition": fields.get("Store and version", ""), "controller": fields.get("Controller mode", ""),
                 "settings": fields.get("Settings that helped", ""), "notes": fields.get("Notes", ""),
@@ -191,6 +195,10 @@ def main() -> int:
         "",
     ] + lines) + "\n"
     publish(owner, name, page)
+    told = sum(tell_listed(r, owner, name) for r in reports
+               if not r["told"] and not r["locked"] and r["author"].casefold() != owner.casefold())
+    if told:
+        print(f"::notice::compatibility list: told {told} report{'s' * (told != 1)} they are in the list")
 
     pointer = "\n".join([
         f"## ➕ [Add a game: tell how it runs]({add})",
@@ -234,6 +242,27 @@ def linked_issue(owner: str, name: str, text: str):
         return None
     return {"number": node["number"], "url": node["url"], "state": node["state"], "stateReason": node["stateReason"],
             "labels": [label["name"].casefold() for label in node["labels"]["nodes"]]}
+
+
+def tell_listed(report: dict, owner: str, name: str) -> int:
+    """One comment on a report now in the list, with how it shows there: 1 when made."""
+    how = label(report["shown"])
+    if report["shown"] == LOOKED_AT:
+        how = f"{how}, while [#{report['issue']['number']}]({report['issue']['url']}) is open"
+    elif report["issue"]:
+        how = f"{how} ([#{report['issue']['number']}]({report['issue']['url']}))"
+    body = "\n".join([
+        LISTED,
+        f"Thanks for the report! **{report['game']}** is now in the [game compatibility list]"
+        f"(https://github.com/{owner}/{name}/wiki/Game-compatibility) as **{how}**.",
+        "",
+        "If it runs differently with a newer PC5 or other settings, post a new report, so the list stays up to date.",
+    ])
+    if graphql("""mutation($id: ID!, $body: String!) { addDiscussionComment(input: {discussionId: $id, body: $body}) {
+            comment { id } } }""", fatal=False, id=report["id"], body=body) is None:
+        return 0
+    print(f"compatibility list: #{report['number']} told it is in the list")
+    return 1
 
 
 def needs_issue(discussion: dict, owner: str, name: str, asked: bool) -> None:
