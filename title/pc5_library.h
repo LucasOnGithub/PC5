@@ -20,6 +20,10 @@
 #include "pc5_pe.h"
 #include "pc5_source.h"
 
+/* Every PC5 Wine prefix is created with the user prospero. The Windows
+ * hand-off is restricted to this prefix, including its Local AppData. */
+#define PC5_HANDOFF_LOCALAPPDATA "C:\\users\\prospero\\AppData\\Local\\"
+
 /* PC5's notes on a game it installed (prefixes/<id>/pc5/info.txt). */
 typedef struct Pc5Info {
     char title[PC5_NAME];
@@ -73,16 +77,9 @@ int pc5_own_dlls(const char *folder, char *out, size_t size);
 /* Writes the game's profile again, with the launch options in launch.txt
  * beside its program (so options can be changed without reinstalling). */
 int pc5_profile_refresh(const char *root, const char *id, char *error, size_t size);
-/* A game's launcher starting the game, a second program, which a PS5 title can't have:
- * Wine writes that program to a file instead (its path, command line and working folder,
- * a line each) and ends (Wine patch 0923). pc5_handoff_env: the file
- * (root/prefixes/<id>/pc5/handoff.txt) and the game's folder as Windows names it
- * (C:\Games\<folder>\), which Wine gets as PW_HANDOFF and PW_HANDOFF_DIR; 0, or -1 when
- * they don't fit. pc5_handoff_take: that file, taken: the profile written for that program,
- * its arguments and its working folder, for the game's next start (an ordinary start
- * writes it for the game's own program again). 1 when it was written, 0 when there was
- * none, -1 when it was refused (why in error): a program outside the game's folder or not
- * there, or a fourth hand-off in a row. */
+/* A launcher's EXE hand-off may target the game's folder or Local AppData
+ * in the same Wine prefix, with at most three consecutive replacements.
+ * PC5 validates the Windows path and executable, then restarts the title. */
 int pc5_handoff_env(const char *root, const char *id, char *file, size_t file_size, char *dir, size_t dir_size);
 int pc5_handoff_take(const char *root, const char *id, char *error, size_t size);
 /* The program a PC5 game starts, on the console: its program, or the one its batch file
