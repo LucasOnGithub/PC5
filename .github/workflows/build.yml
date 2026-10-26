@@ -41,9 +41,17 @@ jobs:
           df -h / /mnt; free -g
 
       - name: Packages
+        timeout-minutes: 25
+        # man-db's index, rebuilt after every package, is what makes this slow on these machines.
         run: |
-          sudo apt-get update -q
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends $(cat tools/packages.txt)
+          mkdir -p .build/logs
+          {
+            sudo rm -f /var/lib/man-db/auto-update
+            sudo apt-get update -q
+            sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+              -o Dpkg::Use-Pty=0 -o DPkg::Lock::Timeout=300 $(cat tools/packages.txt)
+          } 2>&1 | tee .build/logs/packages.log
+          exit "${PIPESTATUS[0]}"
 
       - name: Sources
         run: bash tools/build.sh sources
@@ -159,6 +167,16 @@ jobs:
             /mnt/pc5/release/wine-mono-*-src.tar.xz
           compression-level: 0
           retention-days: 7
+
+      - name: Why it failed
+        if: failure()
+        # The end of the newest step log as an annotation, which the run's page and the API show.
+        run: |
+          log=$(ls -t /mnt/pc5/build/logs/*.log 2>/dev/null | head -1)
+          [ -n "$log" ] || exit 0
+          tail -40 "$log" | cut -c1-300 > "$RUNNER_TEMP/tail.txt"
+          body=$(sed -e 's/%/%25/g' "$RUNNER_TEMP/tail.txt" | sed -e ':a;N;$!ba;s/\n/%0A/g')
+          echo "::error title=$(basename "$log")::$body"
 
       - name: The logs
         if: always()
