@@ -163,14 +163,12 @@ def main() -> int:
         after = discussions["pageInfo"]["endCursor"]
 
     reports.sort(key=lambda r: (r["game"].casefold(), SHOWN.index(r["shown"]), r["date"]))
-    games = {r["game"].casefold() for r in reports}
     counts = {shown: sum(1 for r in reports if r["shown"] == shown) for shown in SHOWN}
     add = f"https://github.com/{owner}/{name}/discussions/new?category=game-compatibility"
     lines = [
         f"**[➕ Add a game]({add})**: the report form, which asks what this list needs.",
         "",
-        f"**{len(games)} game{'s' * (len(games) != 1)}, {len(reports)} report{'s' * (len(reports) != 1)}:** "
-        + ", ".join(f"{label(shown)} {counts[shown]}" for shown in SHOWN) + ".",
+        ", ".join(f"{label(shown)} {counts[shown]}" for shown in SHOWN) + ".",
         "",
         "| Game | How it runs | PC5 | Store and version | Controller | Settings that helped | Notes | Report |",
         "| --- | --- | --- | --- | --- | --- | --- | --- |",
