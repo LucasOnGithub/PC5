@@ -1,0 +1,194 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Sat, 17 Oct 2026 09:40:48 +0200
+Subject: [PATCH] PC5: FAudio's resampler stays inside its output buffer (Wine
+ patch 0972)
+
+prospero-win 0b0f0e3 (#699), after the v0.2.0 PC5 builds on, rebased onto
+PC5's patches. A game crashing in XAudio2's mixer, reading through a
+pointer made of audio samples, fits the heap overflow below.
+
+- Wine patch 0972 backports upstream FAudio a3b49d6 and 2ead980 (2026-09-26), which came after the FAudio 26.09 that Wine
+carries. A voice that played at the output rate never advanced its resample offset, so once it started resampling, the
+interpolation taps ran past the samples to resample and the SSE2 resampler wrote far beyond its buffer.
+- That heap overflow made a game crash in XAudio2's mixer a few seconds to minutes into play, or fault
+inside the heap. It now plays on.
+- FAudio is a static library, so every `xaudio2_*` and `xactengine*` module is now cross-built (`PE_MODULES`). The staging
+test reads every `PE_MODULES` line and checks that XAudio2 and XACT are built for both architectures.
+
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ PUBLICATION_ALLOWLIST.txt                     |  1 +
+ docs/WINE_PS5_BUILD.md                        |  1 +
+ tests/test_build_wine_ps5.py                  |  7 +-
+ tools/build_wine_ps5.sh                       |  3 +
+ ...p-resampling-taps-within-the-samples.patch | 92 +++++++++++++++++++
+ 5 files changed, 101 insertions(+), 3 deletions(-)
+ create mode 100644 wine/patches/0972-faudio-keep-resampling-taps-within-the-samples.patch
+
+diff --git a/PUBLICATION_ALLOWLIST.txt b/PUBLICATION_ALLOWLIST.txt
+index d840589..487bcd2 100644
+--- a/PUBLICATION_ALLOWLIST.txt
++++ b/PUBLICATION_ALLOWLIST.txt
+@@ -603,3 +603,4 @@ wine/ps5/pw_framegen_vk.h
+ wine/ps5/pw_pc5_hud.h
+ wine/patches/0877-secur32-log-gnutls-errors-and-the-clock-on-handshake-failure.patch
+ tests/test_build_tls_ps5.py
++wine/patches/0972-faudio-keep-resampling-taps-within-the-samples.patch
+diff --git a/docs/WINE_PS5_BUILD.md b/docs/WINE_PS5_BUILD.md
+index 064414c..1a50af3 100644
+--- a/docs/WINE_PS5_BUILD.md
++++ b/docs/WINE_PS5_BUILD.md
+@@ -130,6 +130,7 @@ before evaluating a candidate built from that cache.
+ | 0899 | `include`: list the PS5 sync headers (0810, 0820, 0885, 0887) in `include/Makefile.in`, which makedep needs to resolve them; configure failed without it |
+ | 0902 | `win32u`: the PS5 driver sends the arrows, Insert, Delete, Home, End, Page Up, Page Down, right Ctrl and Alt, the Windows and menu keys and keypad `/` with `KEYEVENTF_EXTENDEDKEY`; their scan codes are the keypad's without it, so DirectInput reported the keypad's 8 for the up arrow and a game's arrow-key bindings never fired |
+ | 0903 | `ntdll`: a signal frame keeps the FS base it was taken with when the thread resumes where it was; the host's is set only where the handler sends a context to Wine's 64-bit code (the exception dispatcher, a different 64-bit context). The native WoW64 CPU sets the guest FS just before it switches to 32-bit code, and a signal in that window used to send the thread into its 32-bit code with the host FS (GTA San Andreas' DXVK workers crashing at startup in `RtlEnterCriticalSection`) |
++| 0972 | `faudio` (Wine's bundled FAudio 26.09): upstream FAudio a3b49d6 and 2ead980 (2026-09-26). A source voice that played at the output rate never advanced `resampleOffset`, so when it started resampling, the tap loops of `FAudio_INTERNAL_MixSource` ran from the stale offset, `toResample - tap_samples` wrapped and the SSE2 resampler wrote far past `resampled_audio`. A game corrupted its process heap and crashed in the mixer, or in the heap. FAudio is a static library, so every `xaudio2_*` and `xactengine*` module is in `PE_MODULES` |
+ 
+ ## Allocator
+ 
+diff --git a/tests/test_build_wine_ps5.py b/tests/test_build_wine_ps5.py
+index 1c969da..36bddd9 100644
+--- a/tests/test_build_wine_ps5.py
++++ b/tests/test_build_wine_ps5.py
+@@ -26,7 +26,8 @@ def check_patched_pe_staging() -> None:
+     # both architecture targets, emitted bytes, stale staging cleanup and errors
+     # without requiring the SDK/full Wine rebuild for this focused contract.
+     text = SCRIPT.read_text()
+-    modules = re.search(r'^PE_MODULES="([^"\n]+)"', text, re.M).group(1)
++    # Every assignment, in order: later lines append to the list.
++    modules = ''.join(re.findall(r'^PE_MODULES="[^"\n]+"\n', text, re.M))
+     block = text.split('# The patched PE modules,', 1)[1].split('# The PRX link.', 1)[0]
+     block = block[block.index('rm -rf'):]
+     with tempfile.TemporaryDirectory() as directory:
+@@ -50,7 +51,7 @@ make() {
+     printf 'MZfresh:%s' "$target" > "$build/$target"
+ }
+ """
+-        script = setup + 'PE_MODULES="' + modules + '"\n' + block + '\nprintf "%s" "$status" > "$work/status"\n'
++        script = setup + modules + block + '\nprintf "%s" "$status" > "$work/status"\n'
+         result = subprocess.run(['sh'], input=script, env=env, capture_output=True, text=True)
+         assert result.returncode == 0, result.stderr
+         assert not stale.exists()
+@@ -60,7 +61,7 @@ make() {
+             assert requests.count(target) == 1
+             assert (work / f'pe/{arch}-windows/winevulkan.dll').read_bytes() == ('MZfresh:' + target).encode()
+         for arch in ('i386', 'x86_64'):
+-            for module in ('ntdll', 'win32u'):
++            for module in ('ntdll', 'win32u', 'xaudio2_7', 'xactengine3_7'):
+                 assert requests.count(f'dlls/{module}/{arch}-windows/{module}.dll') == 1
+         assert requests.count('dlls/wow64/x86_64-windows/wow64.dll') == 1
+         assert 'dlls/wow64/i386-windows/wow64.dll' not in requests
+diff --git a/tools/build_wine_ps5.sh b/tools/build_wine_ps5.sh
+index adcc994..1ec7d99 100755
+--- a/tools/build_wine_ps5.sh
++++ b/tools/build_wine_ps5.sh
+@@ -109,7 +109,10 @@ TARGETS="dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver dlls/winevu
+ # wow64); xinput9_1_0 forwards to xinput1_4. quartz: its renderers wait for a state change without the filter
+ # lock (patch 0700). winevulkan: emit its PE thunks alongside the Unix side so command-stream
+ # hooks and dispatch table capability checks come from the same source.
++# xaudio2_* and xactengine*: they link Wine's static FAudio, whose resampler
++# wrote past its buffer (patch 0972).
+ PE_MODULES="ntdll win32u xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan"
++PE_MODULES="$PE_MODULES xaudio2_0 xaudio2_1 xaudio2_2 xaudio2_3 xaudio2_4 xaudio2_5 xaudio2_6 xaudio2_7 xaudio2_8 xaudio2_9 xactengine2_0 xactengine2_4 xactengine2_7 xactengine2_9 xactengine3_0 xactengine3_1 xactengine3_2 xactengine3_3 xactengine3_4 xactengine3_5 xactengine3_6 xactengine3_7"
+ # Everything optional but FreeType (built below) is off: the console has none
+ # of these libraries, and a configure-time probe against the payload SDK must
+ # not pick up host headers.
+diff --git a/wine/patches/0972-faudio-keep-resampling-taps-within-the-samples.patch b/wine/patches/0972-faudio-keep-resampling-taps-within-the-samples.patch
+new file mode 100644
+index 0000000..8512849
+--- /dev/null
++++ b/wine/patches/0972-faudio-keep-resampling-taps-within-the-samples.patch
+@@ -0,0 +1,92 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: prospero-win <prospero-win@invalid>
++Date: Fri, 16 Oct 2026 10:25:05 +0200
++Subject: [PATCH] faudio: Keep resampling taps within the samples to resample.
++
++From upstream FAudio a3b49d6 (Fix resample taps exceeding the total
++resample sample count) and 2ead980 (Increment resampleOffset even when
++resampleStep is 1), both 2026-09-26, after the FAudio 26.09 that Wine
++carries.
++
++A voice that played at the output rate never advanced resampleOffset, so
++when it started resampling (a new frequency ratio) the tap loops ran
++from that stale offset to the decoded sample count. tap_samples then
++exceeded toResample, toResample - tap_samples wrapped, and the SSE2
++resampler wrote far past resampled_audio: a game
++corrupted the process heap and crashed in its XAudio2 mixer.
++---
++ libs/faudio/src/FAudio_internal.c | 45 ++++++++++++++++++++-----------
++ 1 file changed, 30 insertions(+), 15 deletions(-)
++
++diff --git a/libs/faudio/src/FAudio_internal.c b/libs/faudio/src/FAudio_internal.c
++index eb059ce..aaa8051 100644
++--- a/libs/faudio/src/FAudio_internal.c
+++++ b/libs/faudio/src/FAudio_internal.c
++@@ -1147,6 +1147,7 @@ static void FAudio_INTERNAL_MixSource(FAudioSourceVoice *voice)
++ 	{
++ 		/* Actually, just use the existing buffer... */
++ 		finalSamples = voice->audio->decoded_audio;
+++		voice->src.resampleOffset += (toResample << FIXED_PRECISION);
++ 	}
++ 	else
++ 	{
++@@ -1175,30 +1176,44 @@ static void FAudio_INTERNAL_MixSource(FAudioSourceVoice *voice)
++ 				*dst++ = lerp(voice->src.resample_taps[0][i], voice->src.resample_taps[1][i], frac);
++ 
++ 			voice->src.resampleOffset += voice->src.resampleStep;
++-			++tap_samples;
+++
+++			if (++tap_samples >= toResample)
+++			{
+++				break;
+++			}
++ 		}
++ 
++ 		/* Then the samples between the last sample of the
++ 		 * previous quantum and the first sample of this one. */
++-		while ((voice->src.resampleOffset >> FIXED_PRECISION) < prev_sample_count)
+++		if (tap_samples < toResample)
++ 		{
++-			float frac = fixed_to_float(voice->src.resampleOffset & FIXED_FRACTION_MASK);
+++			while ((voice->src.resampleOffset >> FIXED_PRECISION) < prev_sample_count)
+++			{
+++				float frac = fixed_to_float(voice->src.resampleOffset & FIXED_FRACTION_MASK);
++ 
++-			for (unsigned int i = 0; i < channels; ++i)
++-				*dst++ = lerp(voice->src.resample_taps[1][i], voice->audio->decoded_audio[i], frac);
+++				for (unsigned int i = 0; i < channels; ++i)
+++					*dst++ = lerp(voice->src.resample_taps[1][i], voice->audio->decoded_audio[i], frac);
++ 
++-			voice->src.resampleOffset += voice->src.resampleStep;
++-			++tap_samples;
+++				voice->src.resampleOffset += voice->src.resampleStep;
+++
+++				if (++tap_samples >= toResample)
+++				{
+++					break;
+++				}
+++			}
++ 		}
++ 
++-		voice->src.resample(
++-			voice->audio->decoded_audio,
++-			dst,
++-			(uint64_t *)&voice->src.resampleOffset,
++-			voice->src.resampleStep,
++-			toResample - tap_samples,
++-			channels
++-		);
+++		if (tap_samples < toResample)
+++		{
+++			voice->src.resample(
+++				voice->audio->decoded_audio,
+++				dst,
+++				(uint64_t *)&voice->src.resampleOffset,
+++				voice->src.resampleStep,
+++				toResample - tap_samples,
+++				channels
+++			);
+++		}
++ 		finalSamples = voice->audio->resampled_audio;
++ 
++ 		/* Actually this is probably wrong in the case we do get a
