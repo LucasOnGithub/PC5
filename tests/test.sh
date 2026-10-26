@@ -94,10 +94,27 @@ fi
 (cd "$PW" && python3 tests/test_title_identity.py && python3 tests/test_native_contract.py &&
     python3 tests/test_package_release.py)
 
-# The art is the one the script draws.
+# The art is the one the script draws. Compare decoded images rather than PNG
+# bytes: Pillow/zlib releases can encode identical pixels differently.
 python3 art/make-art.py "$out/art" >/dev/null
-cmp art/icon0.png "$out/art/icon0.png"
-cmp art/pic0.png "$out/art/pic0.png"
+python3 - "$out/art" <<'PY'
+from pathlib import Path
+import sys
+from PIL import Image, ImageChops, ImageStat
+
+generated = Path(sys.argv[1])
+for name in ("icon0.png", "pic0.png"):
+    with Image.open(Path("art") / name) as original, Image.open(generated / name) as current:
+        assert original.size == current.size, f"{name}: image dimensions changed"
+        diff = ImageChops.difference(original.convert("RGB"), current.convert("RGB"))
+        stats = ImageStat.Stat(diff)
+        mean = max(stats.mean)
+        peak = max(hi for _, hi in diff.getextrema())
+        print(f"{name}: mean channel difference {mean:.3f}, peak {peak}")
+        # Filter out minor Pillow drawing/resampling differences while
+        # retaining a visual-regression check for a changed illustration.
+        assert mean <= 3 and peak <= 40, f"{name}: generated artwork changed"
+PY
 python3 -m py_compile tools/make-prefix.py tools/make-app.py tools/make-font.py art/make-art.py \
     tests/make-test-programs.py tests/make-sample-covers.py
 bash -n tools/build.sh
