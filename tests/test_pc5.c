@@ -861,6 +861,70 @@ static void test_install(void)
         path(file, sizeof(file), "%s/neondrift/drive_c/Games/NeonDrift/bin/Real Game.exe", prefixes);
         unlink(file);
     }
+    /* An updater/launcher/bootstrapper chain downloaded into this game's Local AppData:
+     * each replacement keeps its real path, working directory, architecture and graphics. */
+    {
+        char error[PC5_ERROR], handoff[PC5_PATH], dir[PC5_PATH];
+        CHECK(!pc5_handoff_env(root, "neondrift", handoff, sizeof(handoff), dir, sizeof(dir)),
+              "AppData hand-off enabled");
+        path(file, sizeof(file),
+             "%s/neondrift/drive_c/users/prospero/AppData/Local/Plutonium/bin/plutonium-launcher-win32.exe", prefixes);
+        path(other, sizeof(other), "%s/game32.exe", programs);
+        copy_file(other, file);
+        path(file, sizeof(file),
+             "%s/neondrift/drive_c/users/prospero/AppData/Local/Plutonium/bin/plutonium-bootstrapper-win32.exe", prefixes);
+        path(other, sizeof(other), "%s/launcher.exe", programs);
+        copy_file(other, file);
+        path(file, sizeof(file),
+             "%s/neondrift/drive_c/users/prospero/AppData/Local/Plutonium/bin/games/t5sp.exe", prefixes);
+        path(other, sizeof(other), "%s/game32.exe", programs);
+        copy_file(other, file);
+        write_text(handoff, "C:\\users\\prospero\\AppData\\Local\\Plutonium\\bin\\plutonium-launcher-win32.exe\n"
+                            "\"C:\\users\\prospero\\AppData\\Local\\Plutonium\\bin\\plutonium-launcher-win32.exe\" --test\n"
+                            "C:\\users\\prospero\\AppData\\Local\\Plutonium\\bin\n");
+        CHECK(pc5_handoff_take(root, "neondrift", error, sizeof(error)) == 1, "first AppData hand-off: %s", error);
+        pw_wine_library_load(pw, root);
+        profile = pw_wine_library_find(pw, "neondrift");
+        CHECK(profile && !strcmp(profile->app.executable,
+               "C:\\users\\prospero\\AppData\\Local\\Plutonium\\bin\\plutonium-launcher-win32.exe") &&
+              !strcmp(profile->app.working_directory, "C:\\users\\prospero\\AppData\\Local\\Plutonium\\bin") &&
+              !strcmp(profile->app.arguments, "--test") &&
+              profile->app.architecture == PW_APP_ARCH_PE32 && profile->app.graphics == PW_APP_GRAPHICS_DXVK,
+              "AppData 32-bit launcher profile");
+
+        write_text(handoff, "C:\\users\\prospero\\AppData\\Roaming\\Other.exe\nOther.exe\nC:\\users\n");
+        CHECK(pc5_handoff_take(root, "neondrift", error, sizeof(error)) == -1, "Roaming is not allowed");
+        write_text(handoff, "C:\\users\\prospero\\AppData\\Local\\Plutonium\\..\\escape.exe\nescape\nC:\\users\n");
+        CHECK(pc5_handoff_take(root, "neondrift", error, sizeof(error)) == -1, "AppData traversal is not allowed");
+        write_text(handoff, "C:\\users\\someone-else\\AppData\\Local\\Plutonium\\bin\\fake.exe\nfake\nC:\\users\n");
+        CHECK(pc5_handoff_take(root, "neondrift", error, sizeof(error)) == -1, "other users are not allowed");
+        write_text(handoff, "C:\\users\\prospero\\AppData\\Local\\Plutonium\\bin\\missing.exe\nmissing\nC:\\users\n");
+        CHECK(pc5_handoff_take(root, "neondrift", error, sizeof(error)) == -1, "missing AppData executable is refused");
+
+        write_text(handoff, "C:\\users\\prospero\\AppData\\Local\\Plutonium\\bin\\plutonium-bootstrapper-win32.exe\n"
+                            "plutonium-bootstrapper-win32.exe --game t5\n"
+                            "C:\\users\\prospero\\AppData\\Local\\Plutonium\\bin\n");
+        CHECK(pc5_handoff_take(root, "neondrift", error, sizeof(error)) == 1, "second AppData hand-off: %s", error);
+        pw_wine_library_load(pw, root);
+        profile = pw_wine_library_find(pw, "neondrift");
+        CHECK(profile && profile->app.architecture == PW_APP_ARCH_PE64 &&
+              profile->app.graphics == PW_APP_GRAPHICS_GDI &&
+              !strcmp(profile->app.arguments, "--game t5"), "64-bit bootstrapper profile");
+
+        write_text(handoff, "C:\\users\\prospero\\AppData\\Local\\Plutonium\\bin\\games\\t5sp.exe\n"
+                            "t5sp.exe --zombies\nC:\\users\\prospero\\AppData\\Local\\Plutonium\\bin\\games\n");
+        CHECK(pc5_handoff_take(root, "neondrift", error, sizeof(error)) == 1, "third AppData hand-off: %s", error);
+        pw_wine_library_load(pw, root);
+        profile = pw_wine_library_find(pw, "neondrift");
+        CHECK(profile && !strcmp(profile->app.executable,
+              "C:\\users\\prospero\\AppData\\Local\\Plutonium\\bin\\games\\t5sp.exe") &&
+              profile->app.architecture == PW_APP_ARCH_PE32 &&
+              profile->app.graphics == PW_APP_GRAPHICS_DXVK, "32-bit game reached after three hand-offs");
+        write_text(handoff, "C:\\users\\prospero\\AppData\\Local\\Plutonium\\bin\\games\\t5sp.exe\nx\nC:\\users\n");
+        CHECK(pc5_handoff_take(root, "neondrift", error, sizeof(error)) == -1 &&
+              strstr(error, "kept starting"), "fourth AppData hand-off is refused");
+        CHECK(!pc5_profile_refresh(root, "neondrift", error, sizeof(error)), "normal start resets AppData chain");
+    }
     /* A batch file chosen as the game's program: the profile starts the program it starts,
      * with its options, then launch.txt's, in its folder. */
     {
