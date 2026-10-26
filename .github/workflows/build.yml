@@ -62,43 +62,94 @@ jobs:
 
       - name: Cache keys
         id: keys
-        # Zink: Mesa and llvm-mingw as prospero-win pins them. DXVK: its commit with patches/dxvk
-        # (step dxvk itself rebuilds when the patched source differs from the one kept).
+        # Each slow part is kept between runs under a fingerprint of what it is built from,
+        # and built again only when that changes. Wine (both), RADV and the 32-bit CPU: the
+        # build's pins and packages and patches/prospero-win and patches/radv (PC5's own code
+        # in title/ goes into the eboot only). Zink: Mesa and llvm-mingw as prospero-win pins
+        # them. DXVK: its commit with patches/dxvk.
         run: |
           pw=.build/prospero-win
+          echo "wine=wine-$(cat tools/build.sh tools/packages.txt patches/prospero-win/*.patch patches/radv/*.patch | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
           echo "zink=zink-$(cat "$pw/tools/build_mesa_zink.sh" "$pw/tools/mesa_zink_manifest.py" | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
           echo "dxvk=dxvk-$(git -C .build/dxvk-source rev-parse HEAD)-$(sed -n 's/^DXVK_NAME=//p' tools/build.sh)" >> "$GITHUB_OUTPUT"
+
+      # What packaging and the sources archive take from the Wine, RADV and CPU steps.
+      - name: Restore Wine
+        id: wine
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            /mnt/pc5/build/prospero-win/.deps/wine-host/install
+            /mnt/pc5/build/prospero-win/.deps/wine-host/build/dlls/wowprospero
+            /mnt/pc5/build/prospero-win/.deps/wine-ps5/prx
+            /mnt/pc5/build/prospero-win/.deps/wine-ps5/pe
+            /mnt/pc5/build/prospero-win/.deps/wine-ps5/report.json
+            /mnt/pc5/build/prospero-win/.deps/wine-ps5/source
+            /mnt/pc5/build/prospero-win/.deps/wine-ps5/freetype/src
+            /mnt/pc5/build/prospero-win/.deps/wow64native
+            /mnt/pc5/build/PS5_Vulkan/.deps/work/radv-src/subprojects/zlib-*
+          key: ${{ steps.keys.outputs.wine }}
 
       - name: Restore Zink
         id: zink
         uses: actions/cache/restore@v4
         with:
-          path: .build/mesa-zink/artifacts
+          path: /mnt/pc5/build/mesa-zink/artifacts
           key: ${{ steps.keys.outputs.zink }}
 
       - name: Restore DXVK
+        id: dxvk
         uses: actions/cache/restore@v4
         with:
-          path: .build/dxvk
+          path: /mnt/pc5/build/dxvk
           key: ${{ steps.keys.outputs.dxvk }}
 
       - name: Title
         run: bash tools/build.sh title
 
       - name: RADV
+        if: steps.wine.outputs.cache-hit != 'true'
         run: bash tools/build.sh radv
 
       - name: Wine for this computer
+        if: steps.wine.outputs.cache-hit != 'true'
         run: bash tools/build.sh hostwine
 
       - name: Wine for the PS5
+        if: steps.wine.outputs.cache-hit != 'true'
         run: bash tools/build.sh wineps5
 
       - name: 32-bit games' CPU
+        if: steps.wine.outputs.cache-hit != 'true'
         run: bash tools/build.sh cpu
+
+      - name: Keep Wine
+        if: steps.wine.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: |
+            /mnt/pc5/build/prospero-win/.deps/wine-host/install
+            /mnt/pc5/build/prospero-win/.deps/wine-host/build/dlls/wowprospero
+            /mnt/pc5/build/prospero-win/.deps/wine-ps5/prx
+            /mnt/pc5/build/prospero-win/.deps/wine-ps5/pe
+            /mnt/pc5/build/prospero-win/.deps/wine-ps5/report.json
+            /mnt/pc5/build/prospero-win/.deps/wine-ps5/source
+            /mnt/pc5/build/prospero-win/.deps/wine-ps5/freetype/src
+            /mnt/pc5/build/prospero-win/.deps/wow64native
+            /mnt/pc5/build/PS5_Vulkan/.deps/work/radv-src/subprojects/zlib-*
+          key: ${{ steps.keys.outputs.wine }}
 
       - name: DXVK
         run: bash tools/build.sh dxvk
+
+      - name: Keep DXVK
+        if: steps.dxvk.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: /mnt/pc5/build/dxvk
+          key: ${{ steps.keys.outputs.dxvk }}
 
       - name: Zink
         if: steps.zink.outputs.cache-hit != 'true'
@@ -107,16 +158,10 @@ jobs:
       - name: Keep Zink
         if: steps.zink.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
+        continue-on-error: true
         with:
-          path: .build/mesa-zink/artifacts
+          path: /mnt/pc5/build/mesa-zink/artifacts
           key: ${{ steps.keys.outputs.zink }}
-
-      - name: Keep DXVK
-        uses: actions/cache/save@v4
-        continue-on-error: true   # already kept under this key
-        with:
-          path: .build/dxvk
-          key: ${{ steps.keys.outputs.dxvk }}
 
       - name: Package, app and sources
         run: bash tools/build.sh package app bundle
