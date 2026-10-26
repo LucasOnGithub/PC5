@@ -38,7 +38,7 @@ jobs:
           ln -s /mnt/pc5/build .build
           sudo fallocate -l 8G /mnt/pc5/swap && sudo chmod 600 /mnt/pc5/swap
           sudo mkswap /mnt/pc5/swap >/dev/null && sudo swapon /mnt/pc5/swap
-          df -h / /mnt; free -g
+          df -h / /mnt | tail -2; free -g | head -2
 
       - name: 1/12 Packages
         timeout-minutes: 15
@@ -55,8 +55,8 @@ jobs:
             sudo apt-get update -q $apt
             sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends $apt \
               -o Dpkg::Use-Pty=0 -o DPkg::Lock::Timeout=300 $(cat tools/packages.txt)
-          } 2>&1 | tee .build/logs/packages.log
-          exit "${PIPESTATUS[0]}"
+          } > .build/logs/packages.log 2>&1 || { tail -40 .build/logs/packages.log; exit 1; }
+          echo "✓ Packages done"
 
       - name: 2/12 Sources
         run: bash tools/ci-step.sh 2 sources
