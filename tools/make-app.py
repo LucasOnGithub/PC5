@@ -39,7 +39,7 @@ def main() -> int:
     if param.get("titleId") != TITLE:
         problems.append(f"sce_sys/param.json is {param.get('titleId')}, not {TITLE}")
     for needed in ("eboot.bin", "lapy.elf", "sce_sys/icon0.png", "sce_sys/pic0.png", "sce_module/libc.prx",
-                   "pc5/fonts.bin", "pc5/ca-certificates.crt", "pc5/prefix.list", "pc5/prefix/system.reg",
+                   "pc5/fonts.bin", "pc5/startup.wav", "pc5/ca-certificates.crt", "pc5/prefix.list", "pc5/prefix/system.reg",
                    "pc5/prefix-media.reg", "win/wine/lib/wine/x86_64-unix/winedmo.prx",
                    "win/wine/lib/wine/x86_64-unix/winegstreamer.prx", "LICENSES/ps5-framegen/COPYING",
                    "win/wine/lib/wine/x86_64-windows/winegstreamer.dll",
@@ -104,7 +104,8 @@ for Settings and choose Install games from USB: one game, or several ticked with
 PC5 copies each once to /data/prospero-win, checks the copy, finds its cover online and
 adds it to the library. A game's menu (Triangle) sets its controller and Frame generation,
 changes its program or uninstalls it with its saves and settings. In a game, the touchpad and Options held for two seconds bring
-you back to PC5. No game is part of this app.
+you back to PC5. When a newer PC5 is out on GitHub, PC5 offers to download and install it
+(Settings › Updates). No game is part of this app.
 
 The app as a whole is under the GNU GPL 3.0 or later (the PS5 boilerplate's startup code
 and libc.prx are); PC5's own code and prospero-win are under the GNU LGPL 2.1 or later.
@@ -156,6 +157,8 @@ Built from <https://github.com/bornaradusin/PC5> at commit {repo_commit}:
   or later), unchanged, which PC5 copies into each home screen tile it makes; its library,
   psfwd, is built into the eboot.
 - The icon and the Home background are drawn by `art/make-art.py` in that repository.
+- `pc5/startup.wav`: PC5's startup sound (`art/startup.wav` in that repository), played on
+  the controller's speaker when PC5 is opened.
 
 Covers are looked up on Steam's store, GOG's catalogue and Wikipedia, which need no
 account; they are saved with each game on the console.

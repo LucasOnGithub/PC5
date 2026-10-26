@@ -20,7 +20,9 @@
 #include "pc5_settings.h"
 #include "pc5_source.h"
 #include "pc5_ui.h"
+#include "pc5_sound.h"
 #include "pc5_update.h"
+#include "pc5_upgrade.h"
 #include "pc5_zip.h"
 
 #include "pw_game_profile.h"
@@ -184,6 +186,13 @@ typedef struct FakeNet {
     int requests;
     char last[1024];
     const char *release;     /* GitHub's answer about the newest PC5, or NULL: none published */
+    /* the release's zip, for downloads */
+    char zip[PC5_PATH];
+    int download_status;     /* 0: 200 */
+    int corrupt;             /* one byte of the download changed */
+    uint64_t gate_bytes;     /* the download waits there while gate is set */
+    volatile int gate, at_gate;
+    int downloads;
 } FakeNet;
 
 static int fake_get(void *context, const char *url, Pc5Buf *out, size_t max, int *status)
@@ -226,10 +235,42 @@ static int fake_get(void *context, const char *url, Pc5Buf *out, size_t max, int
     return 0;
 }
 
+#define TEST_ZIP_URL "https://github.com/bornaradusin/PC5/releases/download/v99.0.0/PPSA11018.zip"
+
+/* GitHub's download of the release's zip: a piece at a time, as pc5_net_download gives it. */
+static int fake_download(void *context, const char *url, const Pc5Sink *sink, int *status)
+{
+    FakeNet *net = context;
+    Pc5Buf zip = { 0 };
+    int result = 0;
+
+    net->downloads++;
+    *status = 0;
+    if (net->offline) return -1;
+    if (strcmp(url, TEST_ZIP_URL) || pc5_read_file(net->zip, &zip, 64u << 20)) { *status = 404; return 0; }
+    *status = net->download_status ? net->download_status : 200;
+    if (*status != 200) goto out;
+    if (net->corrupt && zip.len > 400) zip.data[zip.len / 3] ^= 0x5a;
+    if (sink->begin && sink->begin(sink->context, zip.len)) { result = -1; goto out; }
+    for (size_t at = 0; at < zip.len;) {
+        if (net->gate && net->gate_bytes && at >= net->gate_bytes) {
+            net->at_gate = 1;
+            while (net->gate) usleep(1000);
+        }
+        if (sink->stop && sink->stop(sink->context)) { result = -1; goto out; }
+        size_t n = zip.len - at < 7000 ? zip.len - at : 7000;
+        if (sink->write(sink->context, zip.data + at, n)) { result = -1; goto out; }
+        at += n;
+    }
+out:
+    pc5_buf_free(&zip);
+    return result;
+}
+
 static void test_cover_search(void)
 {
     FakeNet net = { 0 };
-    Pc5Http http = { &net, fake_get };
+    Pc5Http http = { &net, fake_get, NULL };
     Pc5CoverSearch search;
     Pc5CoverHint hint = { .folder = "NeonDrift", .product = "Neon Drift: Complete Edition", .program = "NeonDrift" };
     Pc5Image cover;
@@ -977,7 +1018,14 @@ typedef struct FakeConsole {
     int plays;
     char told[256];
     int notifications;
+    int quits;
 } FakeConsole;
+
+static void fake_quit(void *context)
+{
+    FakeConsole *console = context;
+    console->quits++;
+}
 
 static void fake_notify(void *context, const char *text)
 {
@@ -1102,7 +1150,7 @@ static void test_settings(void)
     pc5_mkdirs(dir);
     CHECK(pc5_settings_load(dir, &set) == -1 && !set.fps && !set.frame_time && !set.cpu_usage && !set.cpu_temperature &&
           !set.soc_temperature && !set.memory && !pc5_game_overlay_lines(&set) && set.vibration == 100 &&
-          set.check_updates && !set.keep_logs &&
+          set.check_updates && !set.keep_logs && set.startup_sound &&
           set.fps_corner == PC5_CORNER_TOP_RIGHT && set.light_bar == PC5_LIGHT_GAME && set.triggers == PC5_TRIGGERS_OFF &&
           set.trigger_rumble == 100 && set.trigger_resistance == 50,
           "defaults without a file");
@@ -1117,6 +1165,7 @@ static void test_settings(void)
     set.trigger_resistance = 75;
     set.check_updates = 0;
     set.keep_logs = 1;
+    set.startup_sound = 0;
     CHECK(!pc5_settings_save(dir, &set), "saved");
     CHECK(!pc5_settings_load(dir, &back) && !memcmp(&set, &back, sizeof(set)), "read back the same");
     path(file, sizeof(file), "%s/pc5/settings.txt", dir);
@@ -1144,7 +1193,7 @@ static void test_settings(void)
 static void test_update(void)
 {
     FakeNet net = { 0 };
-    Pc5Http http = { &net, fake_get };
+    Pc5Http http = { &net, fake_get, NULL };
     Pc5Update update;
     Pc5UpdateMemory memory, back;
     char dir[PC5_PATH];
@@ -1180,6 +1229,495 @@ static void test_update(void)
     pc5_update_load(dir, &back);
     CHECK(back.checked == memory.checked && !strcmp(back.told, "9.0.0") && back.last.state == PC5_UPDATE_AVAILABLE &&
           !strcmp(back.last.version, "9.0.0"), "read back");
+}
+
+
+/* ---- PC5 updating itself ------------------------------------------------------------------- */
+
+/* A release's JSON with its zip: digest "" leaves it out. */
+static void release_json(char *out, size_t size, const char *tag, uint64_t zip_size, const char *digest)
+{
+    char extra[120] = "";
+    if (digest && digest[0]) snprintf(extra, sizeof(extra), ",\"digest\":\"sha256:%s\"", digest);
+    snprintf(out, size,
+             "{\"tag_name\":\"%s\",\"name\":\"PC5\",\"html_url\":\"https://github.com/bornaradusin/PC5/releases/tag/%s\","
+             "\"assets\":[{\"name\":\"SHA256SUMS\",\"size\":10,\"browser_download_url\":\"https://github.com/x/y\"},"
+             "{\"name\":\"PPSA11018.zip\",\"size\":%llu,\"uploader\":{\"login\":\"x\"}%s,"
+             "\"browser_download_url\":\"" TEST_ZIP_URL "\"}]}",
+             tag, tag, (unsigned long long)zip_size, extra);
+}
+
+static void file_sha256(const char *file, char *out)
+{
+    Pc5Buf data = { 0 };
+    Pc5Sha256 sha;
+    uint8_t digest[32];
+    pc5_read_file(file, &data, 64u << 20);
+    pc5_sha256_init(&sha);
+    pc5_sha256_update(&sha, data.data, data.len);
+    pc5_sha256_final(&sha, digest);
+    hex(digest, out);
+    pc5_buf_free(&data);
+}
+
+static int file_is(const char *file, const char *text)
+{
+    Pc5Buf data = { 0 };
+    int same = !pc5_read_file(file, &data, 1u << 20) && data.len == strlen(text) && !memcmp(data.data, text, data.len);
+    pc5_buf_free(&data);
+    return same;
+}
+
+static const char *const new_files[][2] = {
+    { "eboot.bin", "PC5 NEW EBOOT\n" },
+    { "sce_sys/param.json", "{\"titleId\":\"PPSA11018\",\"contentVersion\":\"99.000.000\"}" },
+    { "sce_sys/icon0.png", "new icon" },
+    { "pc5/fonts.bin", "new fonts" },
+    { "LICENSE", "new licence" },
+    { "win/wine/lib/empty.txt", "" },
+    /* a folder, and one whose name goes on past it with a byte above 0x7f (sorted after '/') */
+    { "pc5/data/a.bin", "a" },
+    { "pc5/data\xc3\xa9/b.bin", "b" },
+};
+
+/* A file's size and CRC-32 as the update's journal gives them. */
+static void mark_of(const char *text, char *out, size_t size)
+{
+    snprintf(out, size, "%zu %08x", strlen(text), (unsigned)pc5_crc32(text, strlen(text)));
+}
+
+/* The large file's bytes: half that deflates well, half that hardly does. */
+static uint8_t big_byte(size_t i)
+{
+    if (i < 150000) return (uint8_t)((i * 7 + (i >> 11)) % 61);
+    uint32_t x = (uint32_t)i * 0x9e3779b1u;
+    x ^= x >> 15;
+    x *= 0x85ebca77u;
+    x ^= x >> 13;
+    return (uint8_t)(x >> 24);
+}
+
+/* The release's zip as pc5_zip writes it, with a large file that deflates. */
+static void make_release_zip(const char *file, const char *extra_name)
+{
+    Pc5Zip zip;
+    char name[PC5_PATH];
+    uint8_t *big = pc5_alloc(300000);
+    for (size_t i = 0; i < 300000; i++) big[i] = big_byte(i);
+    CHECK(!pc5_zip_open(&zip, file), "a zip to update with");
+    for (size_t i = 0; i < sizeof(new_files) / sizeof(new_files[0]); i++) {
+        path(name, sizeof(name), "PPSA11018/%s", new_files[i][0]);
+        pc5_zip_add(&zip, name, new_files[i][1], strlen(new_files[i][1]), 1792700000);
+    }
+    pc5_zip_add(&zip, "PPSA11018/win/wine/lib/big.bin", big, 300000, 1792700000);
+    if (extra_name) pc5_zip_add(&zip, extra_name, "x", 1, 1792700000);
+    CHECK(!pc5_zip_close(&zip), "the zip written");
+    pc5_free(big);
+}
+
+/* An installed PC5 at folder, the same as the running app at app. */
+static void make_installed(const char *app, const char *folder)
+{
+    char command[3 * PC5_PATH];
+    snprintf(command, sizeof(command), "rm -rf '%s' && mkdir -p '%s' && cp -r '%s/.' '%s/'", folder, folder, app, folder);
+    run(command);
+    char file[PC5_PATH];
+    path(file, sizeof(file), "%s/notes.txt", folder);
+    write_text(file, "mine");
+}
+
+static void wait_upgrade(Pc5Upgrade *upgrade)
+{
+    for (int i = 0; i < 20000 && pc5_upgrade_busy(upgrade); i++) usleep(1000);
+}
+
+static void test_upgrade(void)
+{
+    char base[PC5_PATH], app[PC5_PATH], data[PC5_PATH], usb0[PC5_PATH], folder[PC5_PATH], user[PC5_PATH],
+        zip[PC5_PATH], file[PC5_PATH], found[PC5_PATH], digest[65], json[2048], unpacked[PC5_PATH], error[PC5_ERROR];
+    FakeNet net = { 0 };
+    static Pc5Upgrade upgrade;
+    Pc5Update update;
+
+    path(base, sizeof(base), "%s/upgrade", work);
+    path(app, sizeof(app), "%s/app0", base);
+    path(data, sizeof(data), "%s/data", base);
+    path(usb0, sizeof(usb0), "%s/usb0", base);
+    path(folder, sizeof(folder), "%s/homebrew/PPSA11018", usb0);
+    path(user, sizeof(user), "%s/user", base);
+    path(zip, sizeof(zip), "%s/release/PPSA11018.zip", base);
+    const char *drives[] = { data, usb0, NULL };
+    Pc5UpgradeConfig config = { { &net, fake_get, fake_download }, app, NULL, drives, user, NULL, NULL };
+
+    /* The running PC5, its installed folder, and two that aren't it. */
+    path(file, sizeof(file), "%s/eboot.bin", app);
+    write_text(file, "PC5 OLD EBOOT\n");
+    path(file, sizeof(file), "%s/sce_sys/param.json", app);
+    write_text(file, "{\"titleId\":\"PPSA11018\",\"contentVersion\":\"01.007.000\"}");
+    path(file, sizeof(file), "%s/pc5/fonts.bin", app);
+    write_text(file, "old fonts");
+    path(file, sizeof(file), "%s/LICENSE", app);
+    write_text(file, "old licence");
+    path(file, sizeof(file), "%s/old-only.txt", app);
+    write_text(file, "only in the old version");
+    path(file, sizeof(file), "%s/homebrew/Other/eboot.bin", usb0);
+    write_text(file, "PC5 OLD EBOOT\n");
+    path(file, sizeof(file), "%s/homebrew/Other/sce_sys/param.json", usb0);
+    write_text(file, "{\"titleId\":\"PPSA99999\"}");
+    path(file, sizeof(file), "%s/PC5-copy/eboot.bin", usb0);
+    write_text(file, "PC5 SOME OTHER EBOOT\n");
+    path(file, sizeof(file), "%s/PC5-copy/sce_sys/param.json", usb0);
+    write_text(file, "{\"titleId\":\"PPSA11018\"}");
+    path(file, sizeof(file), "%s/appmeta/PPSA11018/icon0.png", user);
+    write_text(file, "old icon");
+    path(file, sizeof(file), "%s/app/PPSA11018/sce_sys/param.json", user);
+    write_text(file, "old param");
+    path(file, sizeof(file), "%s/app/PPSA11018/icon0.png", user);
+    write_text(file, "old icon");
+    pc5_mkdirs(data);
+    make_installed(app, folder);
+    path(file, sizeof(file), "%s/release", base);
+    pc5_mkdirs(file);
+    make_release_zip(zip, NULL);
+    pc5_copy(net.zip, sizeof(net.zip), zip);
+    file_sha256(zip, digest);
+    struct stat st;
+    stat(zip, &st);
+
+    /* The release's zip, as the update check reads it. */
+    release_json(json, sizeof(json), "v99.0.0", (uint64_t)st.st_size, digest);
+    net.release = json;
+    pc5_update_check(&config.http, PC5_VERSION, &update);
+    CHECK(update.state == PC5_UPDATE_AVAILABLE && !strcmp(update.asset_url, TEST_ZIP_URL) &&
+          update.asset_size == (uint64_t)st.st_size && !strcmp(update.asset_sha256, digest),
+          "the release's zip: %s %llu %s", update.asset_url, (unsigned long long)update.asset_size, update.asset_sha256);
+    {
+        char other[2048];
+        snprintf(other, sizeof(other), "{\"tag_name\":\"v99.0.0\",\"assets\":[{\"name\":\"PPSA11018.zip\",\"size\":5,"
+                 "\"digest\":\"md5:abc\",\"browser_download_url\":\"https://example.com/PPSA11018.zip\"}]}");
+        net.release = other;
+        pc5_update_check(&config.http, PC5_VERSION, &update);
+        CHECK(update.state == PC5_UPDATE_AVAILABLE && !update.asset_url[0], "a zip somewhere other than GitHub is ignored");
+        net.release = json;
+    }
+
+    /* PC5's folder: the one whose eboot is the running one's, and a PC5 title. */
+    char other[PC5_PATH];
+    CHECK(!pc5_upgrade_find(&config, found, sizeof(found), other, sizeof(other)) && !strcmp(found, folder),
+          "PC5's folder: %s", found);
+    /* A copy of PC5 named like the work folder, at the top of a drive: not PC5's folder, and
+     * not PC5's work folder either (no marker), so nothing deletes it. */
+    {
+        char copy[PC5_PATH], command[4 * PC5_PATH];
+        path(copy, sizeof(copy), "%s/pc5-update", usb0);
+        snprintf(command, sizeof(command), "cp -r '%s' '%s'", folder, copy);
+        run(command);
+        CHECK(!pc5_upgrade_find(&config, found, sizeof(found), other, sizeof(other)) && !strcmp(found, folder),
+              "a pc5-update folder isn't PC5's: %s", found);
+        CHECK(!pc5_upgrade_tidy(&config, NULL, 0) && pc5_is_dir(copy), "and nothing deletes it");
+        upgrade.config = config;
+        pc5_upgrade_run(&upgrade);
+        CHECK(atomic_load(&upgrade.step) == PC5_UPGRADE_FAILED && strstr(upgrade.error, "work folder") && pc5_is_dir(copy),
+              "nor the update: %s", upgrade.error);
+        snprintf(command, sizeof(command), "rm -rf '%s'", copy);
+        run(command);
+        /* Two of them: PC5 doesn't guess. */
+        path(copy, sizeof(copy), "%s/homebrew/PC5-backup", data);
+        snprintf(command, sizeof(command), "mkdir -p '%s/homebrew' && cp -r '%s' '%s'", data, folder, copy);
+        run(command);
+        CHECK(pc5_upgrade_find(&config, found, sizeof(found), other, sizeof(other)) == -2 && !strcmp(found, copy) &&
+              !strcmp(other, folder), "PC5 twice: %s %s", found, other);
+        pc5_upgrade_run(&upgrade);
+        CHECK(atomic_load(&upgrade.step) == PC5_UPGRADE_FAILED && strstr(upgrade.error, "more than once"),
+              "nothing updated: %s", upgrade.error);
+        snprintf(command, sizeof(command), "rm -rf '%s'", copy);
+        run(command);
+    }
+
+    /* What the zip holds, and only that. */
+    path(unpacked, sizeof(unpacked), "%s/unpacked", base);
+    {
+        atomic_uint_fast64_t done = 0, total = 0;
+        uint64_t expected = 300000;
+        for (size_t i = 0; i < sizeof(new_files) / sizeof(new_files[0]); i++) expected += strlen(new_files[i][1]);
+        Pc5Buf names = { 0 };
+        CHECK(!pc5_unzip(zip, "PPSA11018/", unpacked, &done, &total, NULL, UINT64_MAX, &names, error, sizeof(error)) &&
+              atomic_load(&done) == atomic_load(&total) && atomic_load(&total) == expected,
+              "unzipped: %s %llu", error, (unsigned long long)atomic_load(&total));
+        CHECK(pc5_buf_terminate(&names) == 0 && strstr((char *)names.data, "eboot.bin\t14\n") &&
+              strstr((char *)names.data, "win/wine/lib/big.bin\t300000\n") && !strstr((char *)names.data, "PPSA11018"),
+              "its names: %.80s", names.data ? (char *)names.data : "");
+        pc5_buf_free(&names);
+        CHECK(pc5_unzip(zip, "PPSA11018", unpacked, NULL, NULL, NULL, UINT64_MAX, NULL, error, sizeof(error)),
+              "a prefix that isn't a folder");
+        path(file, sizeof(file), "%s/eboot.bin", unpacked);
+        CHECK(file_is(file, "PC5 NEW EBOOT\n"), "a file unzipped");
+        path(file, sizeof(file), "%s/win/wine/lib/empty.txt", unpacked);
+        CHECK(pc5_is_file(file) && file_is(file, ""), "an empty file");
+        Pc5Buf big = { 0 };
+        path(file, sizeof(file), "%s/win/wine/lib/big.bin", unpacked);
+        int same = !pc5_read_file(file, &big, 1u << 20) && big.len == 300000;
+        for (size_t i = 0; same && i < big.len; i++) same = big.data[i] == big_byte(i);
+        CHECK(same, "a deflated file intact");
+        pc5_buf_free(&big);
+        struct stat mode;
+        CHECK(!stat(file, &mode) && (mode.st_mode & 0777) == 0777, "made 0777: %o", (unsigned)(mode.st_mode & 0777));
+        CHECK(pc5_unzip(zip, "PPSA11018/", unpacked, NULL, NULL, NULL, 1000, NULL, error, sizeof(error)) && strstr(error, "room"),
+              "not without room: %s", error);
+    }
+    {
+        char bad[PC5_PATH], escaped[PC5_PATH];
+        path(bad, sizeof(bad), "%s/release/bad.zip", base);
+        path(escaped, sizeof(escaped), "%s/evil.txt", base);
+        make_release_zip(bad, "PPSA11018/../../evil.txt");
+        CHECK(pc5_unzip(bad, "PPSA11018/", unpacked, NULL, NULL, NULL, UINT64_MAX, NULL, error, sizeof(error)) &&
+              strstr(error, "won't unpack") && !pc5_exists(escaped), "a name leaving the folder: %s", error);
+        make_release_zip(bad, "Other/x.txt");
+        CHECK(pc5_unzip(bad, "PPSA11018/", unpacked, NULL, NULL, NULL, UINT64_MAX, NULL, error, sizeof(error)), "outside PPSA11018/");
+        /* As Python's zipfile writes one (tools/make-app.py): folders listed, files stored and deflated. */
+        char command[4 * PC5_PATH];
+        snprintf(command, sizeof(command), "python3 -c \"import zipfile, sys\n"
+                 "z = zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED, compresslevel=6)\n"
+                 "z.writestr('PPSA11018/', '')\nz.writestr('PPSA11018/pc5/', '')\n"
+                 "z.writestr(zipfile.ZipInfo('PPSA11018/stored.txt'), 'stored ' * 50)\n"
+                 "z.writestr('PPSA11018/pc5/deflated.txt', 'deflated ' * 5000)\nz.close()\" '%s'", bad);
+        run(command);
+        char python[PC5_PATH];
+        path(python, sizeof(python), "%s/python", base);
+        CHECK(!pc5_unzip(bad, "PPSA11018/", python, NULL, NULL, NULL, UINT64_MAX, NULL, error, sizeof(error)), "Python's zip: %s", error);
+        path(file, sizeof(file), "%s/pc5/deflated.txt", python);
+        Pc5Buf text = { 0 };
+        CHECK(!pc5_read_file(file, &text, 1u << 20) && text.len == 45000 && !memcmp(text.data, "deflated deflated", 17),
+              "its deflated file");
+        pc5_buf_free(&text);
+        path(file, sizeof(file), "%s/stored.txt", python);
+        CHECK(pc5_is_file(file), "its stored file");
+        /* A damaged byte: the CRC-32 (or the deflate data) says so. */
+        Pc5Buf copy = { 0 };
+        pc5_read_file(zip, &copy, 64u << 20);
+        copy.data[copy.len / 3] ^= 0x5a;
+        pc5_write_file(bad, copy.data, copy.len);
+        pc5_buf_free(&copy);
+        CHECK(pc5_unzip(bad, "PPSA11018/", python, NULL, NULL, NULL, UINT64_MAX, NULL, error, sizeof(error)) &&
+              (strstr(error, "damaged") || strstr(error, "can read")), "damaged: %s", error);
+    }
+
+    /* The update: downloaded, checked, unpacked, in place; the player's files at the top stay,
+     * what the release's folders no longer have goes. */
+    path(file, sizeof(file), "%s/pc5/stale.txt", folder);
+    write_text(file, "from an older PC5");
+    path(file, sizeof(file), "%s/win/wine/lib/stale-folder/x.dll", folder);
+    write_text(file, "from an older PC5");
+    path(file, sizeof(file), "%s/mystuff/keep.txt", folder);
+    write_text(file, "mine too");
+    path(file, sizeof(file), "%s/pc5/data", folder);
+    write_text(file, "a file where the release has a folder");
+    /* A folder at the top where the release has a file: the player's place, so PC5 stops
+     * before anything moves. */
+    path(file, sizeof(file), "%s/LICENSE", folder);
+    unlink(file);
+    path(file, sizeof(file), "%s/LICENSE/mine.txt", folder);
+    write_text(file, "a player's file");
+    upgrade.config = config;
+    pc5_upgrade_run(&upgrade);
+    path(found, sizeof(found), "%s/eboot.bin", folder);
+    CHECK(atomic_load(&upgrade.step) == PC5_UPGRADE_FAILED && strstr(upgrade.error, "Move it") && !upgrade.partial &&
+          file_is(found, "PC5 OLD EBOOT\n") && file_is(file, "a player's file"), "a folder in the way at the top: %s",
+          upgrade.error);
+    path(found, sizeof(found), "%s/pc5-update", usb0);
+    CHECK(!pc5_exists(found), "and nothing kept");
+    {
+        char command[3 * PC5_PATH];
+        snprintf(command, sizeof(command), "rm -rf '%s/LICENSE'", folder);
+        run(command);
+    }
+    pc5_upgrade_run(&upgrade);
+    CHECK(atomic_load(&upgrade.step) == PC5_UPGRADE_DONE && !strcmp(upgrade.version, "99.0.0") &&
+          !strcmp(upgrade.folder, folder), "updated: %d %s", atomic_load(&upgrade.step), upgrade.error);
+    path(file, sizeof(file), "%s/eboot.bin", folder);
+    CHECK(file_is(file, "PC5 NEW EBOOT\n"), "the new eboot in PC5's folder");
+    path(file, sizeof(file), "%s/pc5/fonts.bin", folder);
+    CHECK(file_is(file, "new fonts"), "the new pc5 folder");
+    path(file, sizeof(file), "%s/notes.txt", folder);
+    CHECK(file_is(file, "mine"), "a file of the player's stays");
+    path(file, sizeof(file), "%s/old-only.txt", folder);
+    CHECK(pc5_is_file(file), "a file the new version doesn't have stays");
+    path(file, sizeof(file), "%s/win/wine/lib/big.bin", folder);
+    CHECK(pc5_is_file(file), "folders in place");
+    path(file, sizeof(file), "%s/pc5/stale.txt", folder);
+    CHECK(!pc5_exists(file), "a file the release's pc5 folder no longer has is gone");
+    path(file, sizeof(file), "%s/win/wine/lib/stale-folder", folder);
+    CHECK(!pc5_exists(file), "and a folder deep in it");
+    path(file, sizeof(file), "%s/mystuff/keep.txt", folder);
+    CHECK(file_is(file, "mine too"), "a folder of the player's at the top stays");
+    path(file, sizeof(file), "%s/sce_module", folder);
+    CHECK(!pc5_exists(file), "nothing made that the release doesn't have");
+    path(file, sizeof(file), "%s/pc5/data/a.bin", folder);
+    CHECK(file_is(file, "a"), "a file in a folder's place moved away, and the folder's file kept");
+    path(file, sizeof(file), "%s/pc5-update", usb0);
+    CHECK(!pc5_exists(file), "the work folder deleted");
+    path(file, sizeof(file), "%s/appmeta/PPSA11018/icon0.png", user);
+    CHECK(file_is(file, "new icon"), "the console's copy of the icon");
+    path(file, sizeof(file), "%s/appmeta/PPSA11018/param.json", user);
+    CHECK(file_is(file, new_files[1][1]), "and of param.json");
+    path(file, sizeof(file), "%s/app/PPSA11018/sce_sys/param.json", user);
+    CHECK(file_is(file, new_files[1][1]), "the registered sce_sys");
+    path(file, sizeof(file), "%s/app/PPSA11018/icon0.png", user);
+    CHECK(file_is(file, "new icon"), "the registered icon");
+    path(file, sizeof(file), "%s/homebrew/Other/eboot.bin", usb0);
+    CHECK(file_is(file, "PC5 OLD EBOOT\n"), "another title's folder untouched");
+
+    /* Its eboot isn't the running one's any more: no folder to update. */
+    pc5_upgrade_run(&upgrade);
+    CHECK(atomic_load(&upgrade.step) == PC5_UPGRADE_FAILED && strstr(upgrade.error, "folder wasn't found"),
+          "no folder: %s", upgrade.error);
+
+    /* Downloads that aren't right change nothing. */
+    make_installed(app, folder);
+    path(file, sizeof(file), "%s/eboot.bin", folder);
+    release_json(json, sizeof(json), "v99.0.0", (uint64_t)st.st_size,
+                 "0000000000000000000000000000000000000000000000000000000000000000");
+    pc5_upgrade_run(&upgrade);
+    CHECK(atomic_load(&upgrade.step) == PC5_UPGRADE_FAILED && strstr(upgrade.error, "checksum") &&
+          file_is(file, "PC5 OLD EBOOT\n"), "a wrong checksum: %s", upgrade.error);
+    release_json(json, sizeof(json), "v99.0.0", (uint64_t)st.st_size, "");
+    net.corrupt = 1;
+    pc5_upgrade_run(&upgrade);
+    CHECK(atomic_load(&upgrade.step) == PC5_UPGRADE_FAILED && (strstr(upgrade.error, "damaged") || strstr(upgrade.error, "can read")) &&
+          file_is(file, "PC5 OLD EBOOT\n"), "damaged on the way, no checksum listed: %s", upgrade.error);
+    net.corrupt = 0;
+    release_json(json, sizeof(json), "v99.0.0", (uint64_t)st.st_size + 1, digest);
+    pc5_upgrade_run(&upgrade);
+    CHECK(atomic_load(&upgrade.step) == PC5_UPGRADE_FAILED && file_is(file, "PC5 OLD EBOOT\n"), "the wrong size: %s",
+          upgrade.error);
+    release_json(json, sizeof(json), "v99.0.0", (uint64_t)st.st_size, digest);
+    net.download_status = 404;
+    pc5_upgrade_run(&upgrade);
+    CHECK(atomic_load(&upgrade.step) == PC5_UPGRADE_FAILED && strstr(upgrade.error, "HTTP 404"), "not found: %s", upgrade.error);
+    net.download_status = 0;
+    release_json(json, sizeof(json), "v1.0.0", (uint64_t)st.st_size, digest);
+    pc5_upgrade_run(&upgrade);
+    CHECK(atomic_load(&upgrade.step) == PC5_UPGRADE_FAILED && strstr(upgrade.error, "newest"), "nothing newer: %s",
+          upgrade.error);
+    release_json(json, sizeof(json), "v99.0.0", (uint64_t)st.st_size, digest);
+    path(found, sizeof(found), "%s/pc5-update", usb0);
+    CHECK(!pc5_exists(found), "nothing left behind");
+
+    /* Stopped while downloading, on the worker thread. */
+    net.gate = 1;
+    net.gate_bytes = 14000;
+    net.at_gate = 0;
+    CHECK(!pc5_upgrade_start(&upgrade, &config), "the worker started");
+    for (int i = 0; i < 20000 && !net.at_gate; i++) usleep(1000);
+    CHECK(net.at_gate && atomic_load(&upgrade.step) == PC5_UPGRADE_DOWNLOADING && atomic_load(&upgrade.done) == 14000 &&
+          pc5_upgrade_busy(&upgrade), "downloading: %d %llu", atomic_load(&upgrade.step),
+          (unsigned long long)atomic_load(&upgrade.done));
+    pc5_upgrade_cancel(&upgrade);
+    net.gate = 0;
+    wait_upgrade(&upgrade);
+    CHECK(atomic_load(&upgrade.step) == PC5_UPGRADE_CANCELLED && file_is(file, "PC5 OLD EBOOT\n") && !pc5_exists(found),
+          "stopped: %d %s", atomic_load(&upgrade.step), upgrade.error);
+
+    /* The console stopped part way through putting files in place: the next start finishes it,
+     * even when the drive comes back with another number (usb0 then, usb1 now). */
+    {
+        char work[PC5_PATH], usb1[PC5_PATH], moved[PC5_PATH], finished[32], command[4 * PC5_PATH], old_mark[48],
+            new_mark[48], text[1024];
+        path(work, sizeof(work), "%s/pc5-update", usb0);
+        path(file, sizeof(file), "%s/pc5-update.txt", work);
+        write_text(file, "PC5's update work folder.\n");
+        path(file, sizeof(file), "%s/files.txt", work);
+        snprintf(text, sizeof(text), "eboot.bin\t16\npc5/fonts.bin\t11\nLICENSE\t11\nsce_sys/param.json\t%zu\n"
+                 "sce_sys/icon0.png\t10\n", strlen(new_files[1][1]));
+        write_text(file, text);
+        mark_of("PC5 OLD EBOOT\n", old_mark, sizeof(old_mark));
+        mark_of("PC5 NEWER EBOOT\n", new_mark, sizeof(new_mark));
+        snprintf(text, sizeof(text), "homebrew/PPSA11018\n98.0.0\n%s\n%s\n", old_mark, new_mark);
+        path(file, sizeof(file), "%s/replacing.txt", work);
+        write_text(file, text);
+        path(file, sizeof(file), "%s/new/PPSA11018/eboot.bin", work);
+        write_text(file, "PC5 NEWER EBOOT\n");
+        path(file, sizeof(file), "%s/new/PPSA11018/sce_sys/icon0.png", work);
+        write_text(file, "newer icon");
+        /* fonts.bin, LICENSE and param.json were in place already; the eboot not yet. */
+        path(file, sizeof(file), "%s/pc5/fonts.bin", folder);
+        write_text(file, "newer fonts");
+        /* A new update waits for it. */
+        upgrade.config = config;
+        atomic_store(&upgrade.cancel, 0);
+        pc5_upgrade_run(&upgrade);
+        path(file, sizeof(file), "%s/replacing.txt", work);
+        CHECK(atomic_load(&upgrade.step) == PC5_UPGRADE_FAILED && strstr(upgrade.error, "isn't finished") &&
+              pc5_is_file(file), "an unfinished update isn't thrown away: %s", upgrade.error);
+        path(usb1, sizeof(usb1), "%s/usb1", base);
+        snprintf(command, sizeof(command), "mv '%s' '%s'", usb0, usb1);
+        run(command);
+        const char *later[] = { data, usb1, NULL };
+        Pc5UpgradeConfig next = config;
+        next.drives = later;
+        CHECK(pc5_upgrade_tidy(&next, finished, sizeof(finished)) == 1 && !strcmp(finished, "98.0.0"),
+              "finished as PC5 opens, the eboot last: %s", finished);
+        path(moved, sizeof(moved), "%s/homebrew/PPSA11018/eboot.bin", usb1);
+        CHECK(file_is(moved, "PC5 NEWER EBOOT\n"), "the new eboot put in place");
+        path(moved, sizeof(moved), "%s/homebrew/PPSA11018/pc5/fonts.bin", usb1);
+        CHECK(file_is(moved, "newer fonts"), "what was in place stays");
+        path(moved, sizeof(moved), "%s/pc5-update", usb1);
+        CHECK(!pc5_exists(moved), "then the work folder deleted");
+        path(moved, sizeof(moved), "%s/appmeta/PPSA11018/icon0.png", user);
+        CHECK(file_is(moved, "newer icon"), "and the console's copies brought up to date");
+        /* A journal it can't finish: everything kept for the next try. */
+        path(work, sizeof(work), "%s/pc5-update", usb1);
+        path(file, sizeof(file), "%s/pc5-update.txt", work);
+        write_text(file, "PC5's update work folder.\n");
+        path(file, sizeof(file), "%s/files.txt", work);
+        write_text(file, "eboot.bin\t21\nmissing.txt\t3\n");
+        mark_of("PC5 NEWER EBOOT\n", old_mark, sizeof(old_mark));
+        mark_of("PC5 EVEN NEWER EBOOT\n", new_mark, sizeof(new_mark));
+        snprintf(text, sizeof(text), "homebrew/PPSA11018\n98.0.1\n%s\n%s\n", old_mark, new_mark);
+        path(file, sizeof(file), "%s/replacing.txt", work);
+        write_text(file, text);
+        path(file, sizeof(file), "%s/new/PPSA11018/eboot.bin", work);
+        write_text(file, "PC5 EVEN NEWER EBOOT\n");
+        CHECK(!pc5_upgrade_tidy(&next, finished, sizeof(finished)) && pc5_is_file(file), "kept when it can't finish");
+        path(moved, sizeof(moved), "%s/homebrew/PPSA11018/eboot.bin", usb1);
+        CHECK(file_is(moved, "PC5 NEWER EBOOT\n"), "and the eboot not replaced before the rest");
+        /* PC5 installed again meanwhile (its eboot neither the old nor the new): the update is dropped. */
+        write_text(moved, "PC5 INSTALLED BY HAND\n");
+        CHECK(!pc5_upgrade_tidy(&next, finished, sizeof(finished)) && !pc5_exists(work) &&
+              file_is(moved, "PC5 INSTALLED BY HAND\n"), "a PC5 installed again isn't touched");
+        snprintf(command, sizeof(command), "mv '%s' '%s'", usb1, usb0);
+        run(command);
+    }
+}
+
+static void test_sound(void)
+{
+    uint8_t wav[44 + 8];
+    Pc5Sound sound;
+    const int16_t samples[4] = { 1000, -1000, 32767, -32768 };
+    memcpy(wav, "RIFF\0\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x80\xbb\0\0\0\x77\x01\0\x02\0\x10\0data\x08\0\0\0", 44);
+    memcpy(wav + 44, samples, 8);
+    CHECK(!pc5_sound_from_wav(wav, sizeof(wav), &sound) && sound.frames == 4 && sound.samples[2] == 32767 &&
+          sound.samples[3] == -32768, "a mono WAV: %zu", sound.frames);
+    pc5_sound_free(&sound);
+    wav[22] = 2;   /* stereo: two frames, mixed */
+    CHECK(!pc5_sound_from_wav(wav, sizeof(wav), &sound) && sound.frames == 2 && sound.samples[0] == 0 &&
+          sound.samples[1] == 0, "a stereo WAV, mixed to one: %d %d", sound.frames ? sound.samples[0] : -1,
+          sound.frames > 1 ? sound.samples[1] : -1);
+    pc5_sound_free(&sound);
+    wav[22] = 1;
+    wav[24] = 0x44;   /* 44100 Hz */
+    wav[25] = 0xac;
+    CHECK(pc5_sound_from_wav(wav, sizeof(wav), &sound) && !sound.samples, "only 48 kHz");
+    CHECK(pc5_sound_from_wav((const uint8_t *)"RIFF", 4, &sound), "not a WAV");
+    /* The app's own. */
+    char file[PC5_PATH];
+    Pc5Buf data = { 0 };
+    path(file, sizeof(file), "%s/../../art/startup.wav", fixtures);
+    CHECK(!pc5_read_file(file, &data, 16u << 20) && !pc5_sound_from_wav(data.data, data.len, &sound) &&
+          sound.frames > 48000 && sound.frames < 48000 * 10, "art/startup.wav: %zu frames", sound.frames);
+    pc5_sound_free(&sound);
+    pc5_buf_free(&data);
 }
 
 /* The names in a zip's directory, one per line (its central directory, read as unzip does). */
@@ -2394,7 +2932,7 @@ static void test_tile_start(const char *fonts)
 {
     FakeConsole console = { 0 };
     FakeNet net = { 0 };
-    Pc5Platform platform = { &console, { &net, fake_get }, fake_clock, fake_play, NULL, fake_notify, fake_time, 0 };
+    Pc5Platform platform = { &console, { &net, fake_get, NULL }, fake_clock, fake_play, NULL, fake_notify, fake_time, 0, NULL };
     const char *roots[] = { usb, NULL };
     Pc5Canvas canvas = { pc5_alloc(1920u * 1080u * 4u), 1920, 1080, 1920 };
     Pc5Library library;
@@ -2406,7 +2944,7 @@ static void test_tile_start(const char *fonts)
     CHECK(library.count > 0, "games to start");
     if (!library.count) return;
     {
-        Pc5UiConfig config = { root, template_prefix, fonts, roots, tiles, tile_template, library.games[0].id };
+        Pc5UiConfig config = { root, template_prefix, fonts, roots, tiles, tile_template, library.games[0].id, NULL, NULL, NULL };
         Pc5Ui *ui = pc5_ui_create(&config, &platform);
         for (int i = 0; i < 2000 && !console.plays; i++) frames(ui, 0, 0, 1, &canvas);
         CHECK(console.plays == 1 && !strcmp(console.played, library.games[0].id), "the tile's game started: %d %s",
@@ -2414,7 +2952,7 @@ static void test_tile_start(const char *fonts)
         pc5_ui_destroy(ui);
     }
     {
-        Pc5UiConfig config = { root, template_prefix, fonts, roots, tiles, tile_template, "not-installed" };
+        Pc5UiConfig config = { root, template_prefix, fonts, roots, tiles, tile_template, "not-installed", NULL, NULL, NULL };
         Pc5Ui *ui = pc5_ui_create(&config, &platform);
         until_screen(ui, "message", &canvas);
         CHECK(!strcmp(pc5_ui_screen(ui), "message") && console.plays == 1, "a game no longer there: %s",
@@ -2436,7 +2974,7 @@ static void test_tile_start(const char *fonts)
         later[0].tv_sec += 60;
         later[1] = later[0];
         utimes(file, later);
-        Pc5UiConfig config = { root, template_prefix, fonts, roots, tiles, tile_template, NULL };
+        Pc5UiConfig config = { root, template_prefix, fonts, roots, tiles, tile_template, NULL, NULL, NULL, NULL };
         Pc5Ui *ui = pc5_ui_create(&config, &platform);
         until_screen(ui, "library", &canvas);
         path(saved, sizeof(saved), "%s/prefixes/%s/pc5/cover.bin", root, library.games[0].prefix);
@@ -2458,12 +2996,12 @@ static void test_screens(const char *fonts)
 {
     FakeConsole console = { 0 };
     FakeNet net = { 0 };
-    Pc5Platform platform = { &console, { &net, fake_get }, fake_clock, fake_play, NULL, fake_notify, fake_time, 0 };
+    Pc5Platform platform = { &console, { &net, fake_get, NULL }, fake_clock, fake_play, NULL, fake_notify, fake_time, 0, NULL };
     const char *roots[] = { usb, NULL };
     char tiles[PC5_PATH], tile_template[PC5_PATH], tile[PC5_HOME_ID];
     path(tiles, sizeof(tiles), "%s/screens-homebrew", work);
     make_tile_template(tile_template, sizeof(tile_template));
-    Pc5UiConfig config = { root, template_prefix, fonts, roots, tiles, tile_template, NULL };
+    Pc5UiConfig config = { root, template_prefix, fonts, roots, tiles, tile_template, NULL, NULL, NULL, NULL };
     Pc5Canvas canvas = { pc5_alloc(1920u * 1080u * 4u), 1920, 1080, 1920 };
     Pc5Ui *ui = pc5_ui_create(&config, &platform);
     Pc5Library library;
@@ -2557,36 +3095,40 @@ static void test_screens(const char *fonts)
     press(ui, PC5_KEY_UP, &canvas);
     press(ui, PC5_KEY_LEFT, &canvas);        /* vibration: 100 % -> 75 % */
     press(ui, PC5_KEY_DOWN, &canvas);
-    press(ui, PC5_KEY_DOWN, &canvas);        /* Adaptive triggers, the last row while they are off */
-    press(ui, PC5_KEY_DOWN, &canvas);
-    press(ui, PC5_KEY_LEFT, &canvas);        /* still on it: off -> rumble + resistance */
+    press(ui, PC5_KEY_DOWN, &canvas);        /* Adaptive triggers */
+    press(ui, PC5_KEY_LEFT, &canvas);        /* off -> rumble + resistance */
     press(ui, PC5_KEY_DOWN, &canvas);
     press(ui, PC5_KEY_LEFT, &canvas);        /* trigger rumble: 100 % -> 75 % */
     press(ui, PC5_KEY_DOWN, &canvas);
     press(ui, PC5_KEY_RIGHT, &canvas);       /* trigger resistance: 50 % -> 75 % */
+    press(ui, PC5_KEY_DOWN, &canvas);
+    press(ui, PC5_KEY_ACCEPT, &canvas);      /* Startup sound: on -> off */
+    press(ui, PC5_KEY_DOWN, &canvas);        /* the last row: still on it */
     {
         Pc5Settings set;
         pc5_settings_load(root, &set);
         CHECK(!set.fps && set.light_bar == PC5_LIGHT_CONSOLE && set.vibration == 75 && set.triggers == PC5_TRIGGERS_BOTH &&
-              set.trigger_rumble == 75 && set.trigger_resistance == 75,
-              "settings saved: fps=%d light=%d vibration=%d triggers=%d rumble=%d resistance=%d", set.fps,
-              (int)set.light_bar, set.vibration, (int)set.triggers, set.trigger_rumble, set.trigger_resistance);
+              set.trigger_rumble == 75 && set.trigger_resistance == 75 && !set.startup_sound,
+              "settings saved: fps=%d light=%d vibration=%d triggers=%d rumble=%d resistance=%d sound=%d", set.fps,
+              (int)set.light_bar, set.vibration, (int)set.triggers, set.trigger_rumble, set.trigger_resistance,
+              set.startup_sound);
     }
-    /* Off again, then rumble: only its own strength shows. */
+    /* Off again, then rumble: only its own strength shows, then Startup sound. */
     press(ui, PC5_KEY_UP, &canvas);
     press(ui, PC5_KEY_UP, &canvas);
+    press(ui, PC5_KEY_UP, &canvas);          /* Adaptive triggers */
     press(ui, PC5_KEY_RIGHT, &canvas);       /* both -> off */
+    press(ui, PC5_KEY_RIGHT, &canvas);       /* off -> rumble */
     press(ui, PC5_KEY_DOWN, &canvas);
-    press(ui, PC5_KEY_RIGHT, &canvas);       /* still on it: off -> rumble */
+    press(ui, PC5_KEY_RIGHT, &canvas);       /* trigger rumble: 75 % -> 100 % */
     press(ui, PC5_KEY_DOWN, &canvas);
-    press(ui, PC5_KEY_DOWN, &canvas);
-    press(ui, PC5_KEY_RIGHT, &canvas);       /* the last row is the rumble's: 75 % -> 100 % */
+    press(ui, PC5_KEY_RIGHT, &canvas);       /* the next row is Startup sound's: off -> on */
     {
         Pc5Settings set;
         pc5_settings_load(root, &set);
-        CHECK(set.triggers == PC5_TRIGGERS_RUMBLE && set.trigger_rumble == 100 && set.trigger_resistance == 75,
-              "a strength row only while it is used: triggers=%d rumble=%d resistance=%d", (int)set.triggers,
-              set.trigger_rumble, set.trigger_resistance);
+        CHECK(set.triggers == PC5_TRIGGERS_RUMBLE && set.trigger_rumble == 100 && set.trigger_resistance == 75 &&
+              set.startup_sound, "a strength row only while it is used: triggers=%d rumble=%d resistance=%d sound=%d",
+              (int)set.triggers, set.trigger_rumble, set.trigger_resistance, set.startup_sound);
     }
     /* Overlay: its lines, each on its own, and the corner. */
     press(ui, PC5_KEY_BACK, &canvas);
@@ -2776,7 +3318,7 @@ static void test_report(const char *fonts)
     /* The crash message after a game crashed: Triangle shows the code, Back goes back. */
     FakeConsole console = { 0 };
     FakeNet net = { 0 };
-    Pc5Platform platform = { &console, { &net, fake_get }, fake_clock, fake_play, NULL, fake_notify, fake_time, 0 };
+    Pc5Platform platform = { &console, { &net, fake_get, NULL }, fake_clock, fake_play, NULL, fake_notify, fake_time, 0, NULL };
     const char *roots[] = { usb, NULL };
     Pc5Canvas canvas = { pc5_alloc(1920u * 1080u * 4u), 1920, 1080, 1920 };
     Pc5Library library;
@@ -2794,7 +3336,7 @@ static void test_report(const char *fonts)
     path(file, sizeof(file), "%s/session-0.log", logs);
     write_text(file, text);
     {
-        Pc5UiConfig config = { root, template_prefix, fonts, roots, NULL, NULL, NULL };
+        Pc5UiConfig config = { root, template_prefix, fonts, roots, NULL, NULL, NULL, NULL, NULL, NULL };
         Pc5Ui *ui = pc5_ui_create(&config, &platform);
         until_screen(ui, "message", &canvas);
         CHECK(!strcmp(pc5_ui_screen(ui), "message"), "the crash told: %s", pc5_ui_screen(ui));
@@ -2808,6 +3350,129 @@ static void test_report(const char *fonts)
     }
     CHECK(!pc5_logs_newest(root, library.games[0].id, kept, sizeof(kept)) && pc5_ends_with_ci(kept, ".zip"), "kept: %s", kept);
     unlink(kept);
+    pc5_free(canvas.px);
+}
+
+
+/* The screen as a PPM in WORK/shots (for a look at the new screens). */
+static void save_shot(const Pc5Canvas *c, const char *name)
+{
+    char file[PC5_PATH];
+    path(file, sizeof(file), "%s/shots", work);
+    pc5_mkdirs(file);
+    path(file, sizeof(file), "%s/shots/%s.ppm", work, name);
+    FILE *out = fopen(file, "wb");
+    if (!out) return;
+    fprintf(out, "P6\n%d %d\n255\n", c->w, c->h);
+    for (int y = 0; y < c->h; y++)
+        for (int x = 0; x < c->w; x++) {
+            uint32_t p = c->px[(size_t)y * (size_t)c->stride + (size_t)x];
+            fputc((int)(p >> 16 & 255), out);
+            fputc((int)(p >> 8 & 255), out);
+            fputc((int)(p & 255), out);
+        }
+    fclose(out);
+}
+
+/* When PC5 opens with a newer release out: it asks; Later leaves it for Settings ›
+ * Updates, whose Update now installs it, shows the progress, and closes PC5. */
+static void test_upgrade_screens(const char *fonts)
+{
+    FakeConsole console = { 0 };
+    static FakeNet net;
+    Pc5Platform platform = { &console, { &net, fake_get, fake_download }, fake_clock, fake_play, NULL, fake_notify,
+                             fake_time, 0, fake_quit };
+    const char *roots[] = { usb, NULL };
+    char app[PC5_PATH], drive[PC5_PATH], folder[PC5_PATH], file[PC5_PATH], zip[PC5_PATH], digest[65];
+    static char json[2048];
+    Pc5Canvas canvas = { pc5_alloc(1920u * 1080u * 4u), 1920, 1080, 1920 };
+    struct stat st;
+
+    memset(&net, 0, sizeof(net));
+    path(app, sizeof(app), "%s/app0", work);
+    path(file, sizeof(file), "%s/eboot.bin", app);
+    write_text(file, "PC5 SCREENS EBOOT\n");
+    path(file, sizeof(file), "%s/sce_sys/param.json", app);
+    write_text(file, "{\"titleId\":\"PPSA11018\"}");
+    path(drive, sizeof(drive), "%s/screens-drive", work);
+    path(folder, sizeof(folder), "%s/homebrew/PPSA11018", drive);
+    make_installed(app, folder);
+    path(zip, sizeof(zip), "%s/screens-release.zip", work);
+    make_release_zip(zip, NULL);
+    file_sha256(zip, digest);
+    stat(zip, &st);
+    release_json(json, sizeof(json), "v99.0.0", (uint64_t)st.st_size, digest);
+    net.release = json;
+    pc5_copy(net.zip, sizeof(net.zip), zip);
+    const char *drives[] = { drive, NULL };
+    {
+        Pc5UpdateMemory memory;
+        Pc5Settings set;
+        memset(&memory, 0, sizeof(memory));
+        pc5_update_save(root, &memory);
+        pc5_settings_load(root, &set);
+        set.check_updates = 1;
+        pc5_settings_save(root, &set);
+    }
+    Pc5UiConfig config = { root, template_prefix, fonts, roots, NULL, NULL, NULL, drives, NULL, NULL };
+    Pc5Ui *ui = pc5_ui_create(&config, &platform);
+    until_screen(ui, "upgrade-ask", &canvas);
+    CHECK(!strcmp(pc5_ui_screen(ui), "upgrade-ask") && !console.notifications, "asked when PC5 opens: %s %d",
+          pc5_ui_screen(ui), console.notifications);
+    pc5_ui_draw(ui, &canvas);
+    save_shot(&canvas, "upgrade-ask");
+    press(ui, PC5_KEY_RIGHT, &canvas);
+    press(ui, PC5_KEY_ACCEPT, &canvas);
+    until_screen(ui, "library", &canvas);
+    CHECK(!strcmp(pc5_ui_screen(ui), "library") && !net.downloads, "Later: %s", pc5_ui_screen(ui));
+
+    press(ui, PC5_KEY_OPTIONS, &canvas);
+    for (int i = 0; i < 4; i++) press(ui, PC5_KEY_DOWN, &canvas);
+    press(ui, PC5_KEY_ACCEPT, &canvas);      /* Updates */
+    press(ui, PC5_KEY_DOWN, &canvas);
+    press(ui, PC5_KEY_DOWN, &canvas);        /* Update now */
+    pc5_ui_draw(ui, &canvas);
+    save_shot(&canvas, "updates-page");
+    net.gate = 1;
+    net.gate_bytes = 14000;
+    press(ui, PC5_KEY_ACCEPT, &canvas);
+    CHECK(!strcmp(pc5_ui_screen(ui), "upgrading"), "Update now: %s", pc5_ui_screen(ui));
+    for (int i = 0; i < 20000 && !net.at_gate; i++) usleep(1000);
+    for (int i = 0; i < 70; i++) { frames(ui, 0, 0, 1, &canvas); usleep(1000); }
+    pc5_ui_draw(ui, &canvas);
+    save_shot(&canvas, "upgrading");
+    press(ui, PC5_KEY_ACCEPT, &canvas);      /* nothing to choose while it works */
+    CHECK(!strcmp(pc5_ui_screen(ui), "upgrading") && !console.quits, "still updating");
+    net.gate = 0;
+    /* Done once the new files are in place and the work folder is gone; then Close PC5. */
+    path(zip, sizeof(zip), "%s/pc5-update", drive);
+    path(file, sizeof(file), "%s/eboot.bin", folder);
+    for (int i = 0; i < 20000 && (pc5_exists(zip) || !file_is(file, "PC5 NEW EBOOT\n")); i++) {
+        frames(ui, 0, 0, 1, &canvas);
+        usleep(1000);
+    }
+    CHECK(file_is(file, "PC5 NEW EBOOT\n") && !pc5_exists(zip), "installed from the screens");
+    for (int i = 0; i < 100 && !console.quits; i++) {
+        usleep(2000);
+        frames(ui, 0, 0, 1, &canvas);
+        if (i == 50) {
+            pc5_ui_draw(ui, &canvas);
+            save_shot(&canvas, "upgraded");
+        }
+        if (i >= 50) press(ui, PC5_KEY_ACCEPT, &canvas);
+    }
+    CHECK(console.quits == 1, "Close PC5: %d", console.quits);
+    pc5_ui_destroy(ui);
+    /* An update finished as PC5 opened: this PC5 is the old one, and closes. */
+    config.finished = "98.0.0";
+    ui = pc5_ui_create(&config, &platform);
+    until_screen(ui, "upgrading", &canvas);
+    CHECK(!strcmp(pc5_ui_screen(ui), "upgrading"), "finished as it opened: %s", pc5_ui_screen(ui));
+    pc5_ui_draw(ui, &canvas);
+    save_shot(&canvas, "upgrade-finished");
+    press(ui, PC5_KEY_ACCEPT, &canvas);
+    CHECK(console.quits == 2, "and it closes: %d", console.quits);
+    pc5_ui_destroy(ui);
     pc5_free(canvas.px);
 }
 
@@ -2833,6 +3498,8 @@ int main(int argc, char **argv)
     test_controls();
     test_settings();
     test_update();
+    test_sound();
+    test_upgrade();
     test_zip();
     test_logs();
     test_cover_fill();
@@ -2848,6 +3515,7 @@ int main(int argc, char **argv)
     test_screens(fonts);
     test_tile_start(fonts);
     test_report(fonts);
+    test_upgrade_screens(fonts);
     printf("test_pc5: %d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

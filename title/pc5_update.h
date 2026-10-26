@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 /* PC5: is there a newer PC5? GitHub's public API answers with the newest
- * release of the repository (no account, no key). PC5 only says so; the
- * new release is installed like the first. */
+ * release of the repository (no account, no key), with the app's zip
+ * (PPSA11018.zip) that PC5 can install itself (pc5_upgrade.h). */
 #ifndef PC5_UPDATE_H
 #define PC5_UPDATE_H
 #include "pc5.h"
@@ -23,6 +23,12 @@ typedef struct Pc5Update {
     char version[32];         /* the newest release's, without a leading v */
     char name[96];            /* its title */
     char url[256];            /* its page */
+    /* The app's zip in the release (PC5_TITLE_ID ".zip"): where it is, how big, its
+     * SHA-256 as GitHub gives it (lower-case hex, "" when it gives none). url "" when
+     * the release has none. */
+    char asset_url[512];
+    uint64_t asset_size;
+    char asset_sha256[65];
 } Pc5Update;
 
 /* <0, 0, >0 as version a is older, the same, newer than b ("1.2.0", "v1.10"). */

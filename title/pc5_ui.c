@@ -11,6 +11,7 @@
 #include "pc5_settings.h"
 #include "pc5_source.h"
 #include "pc5_update.h"
+#include "pc5_upgrade.h"
 
 #include <dirent.h>
 #include <math.h>
@@ -19,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 enum { W = 1920, H = 1080, COVER_W = 400, COVER_H = 600, FLOOR_Y = 712, MARGIN = 72 };
 
@@ -38,14 +40,15 @@ enum { W = 1920, H = 1080, COVER_W = 400, COVER_H = 600, FLOOR_Y = 712, MARGIN =
 typedef enum Screen {
     S_START, S_COVERS, S_LIBRARY, S_SETTINGS, S_ABOUT, S_SCAN, S_SOURCES, S_READING, S_SEARCH, S_REVIEW,
     S_PROGRAMS, S_INSTALL, S_STOP, S_UNINSTALL_LIST, S_UNINSTALL_CONFIRM, S_REMOVING, S_MESSAGE, S_LAUNCH,
-    S_UPDATE, S_CHECKING, S_GAME_MENU, S_GAME_READING, S_QUEUE_READ, S_QUEUE, S_BUTTONS, S_KEYS, S_REPORT
+    S_UPDATE, S_CHECKING, S_GAME_MENU, S_GAME_READING, S_QUEUE_READ, S_QUEUE, S_BUTTONS, S_KEYS, S_REPORT,
+    S_UPGRADE_ASK, S_UPGRADING
 } Screen;
 
 static const char *const screen_names[] = { "start", "covers", "library", "settings", "about", "scan", "sources",
                                             "reading", "search", "review", "programs", "install", "stop",
                                             "uninstall-list", "uninstall-confirm", "removing", "message", "launch",
                                             "update", "checking", "game-menu", "game-reading", "queue-read", "queue",
-                                            "buttons", "keys", "report" };
+                                            "buttons", "keys", "report", "upgrade-ask", "upgrading" };
 
 /* One game of several being installed in a row. */
 typedef enum QueueState { Q_WAITING, Q_INSTALLED, Q_FAILED, Q_STOPPED, Q_SKIPPED } QueueState;
@@ -70,14 +73,15 @@ typedef enum SettingRow {
     SR_INSTALL, SR_UNINSTALL, SR_GAMES, SR_OVERLAY, SR_UPDATES, SR_KEEP_LOGS, SR_ABOUT,
     SR_FPS, SR_FRAME_TIME, SR_CPU_USAGE, SR_CPU_TEMPERATURE, SR_SOC_TEMPERATURE, SR_MEMORY, SR_FPS_CORNER,
     SR_VIBRATION, SR_LIGHT, SR_TRIGGERS, SR_TRIGGER_RUMBLE, SR_TRIGGER_RESISTANCE,
-    SR_CHECK_ON_OPEN, SR_CHECK_NOW
+    SR_CHECK_ON_OPEN, SR_CHECK_NOW, SR_STARTUP_SOUND, SR_UPDATE_NOW
 } SettingRow;
 
 enum { PAGE_ROWS = 7, PAGE_GAMES = 1, PAGE_UPDATES = 2, PAGE_OVERLAY = 3 };
 static const char *const page_titles[4] = { "Settings", "In games", "Updates", "Overlay" };
 
-/* A page's rows: the triggers' strengths only while they are used. */
-static int page_rows(const Pc5Settings *set, int page, SettingRow rows[PAGE_ROWS])
+/* A page's rows: the triggers' strengths only while they are used, Update now only
+ * while there is a newer PC5 it can install (offer_update). */
+static int page_rows(const Pc5Settings *set, int page, int offer_update, SettingRow rows[PAGE_ROWS])
 {
     int n = 0;
     if (page == PAGE_OVERLAY) {
@@ -95,9 +99,11 @@ static int page_rows(const Pc5Settings *set, int page, SettingRow rows[PAGE_ROWS
         if (set->triggers == PC5_TRIGGERS_RUMBLE || set->triggers == PC5_TRIGGERS_BOTH) rows[n++] = SR_TRIGGER_RUMBLE;
         if (set->triggers == PC5_TRIGGERS_RESISTANCE || set->triggers == PC5_TRIGGERS_BOTH)
             rows[n++] = SR_TRIGGER_RESISTANCE;
+        rows[n++] = SR_STARTUP_SOUND;
     } else if (page == PAGE_UPDATES) {
         rows[n++] = SR_CHECK_ON_OPEN;
         rows[n++] = SR_CHECK_NOW;
+        if (offer_update) rows[n++] = SR_UPDATE_NOW;
     } else {
         rows[n++] = SR_INSTALL;
         rows[n++] = SR_UNINSTALL;
@@ -226,6 +232,10 @@ struct Pc5Ui {
     int installing;
     uint64_t speed_at, speed_bytes;
     double speed;
+    Pc5Upgrade upgrade;            /* PC5 updating itself, on its own thread */
+    int upgrade_step;              /* the step speed is measured for */
+    Screen upgrade_back;           /* where a stopped update goes back to */
+    uint64_t upgrade_drawn;
     Pc5Remove remove;
     char removing_title[PC5_NAME];
 
@@ -560,6 +570,11 @@ Pc5Ui *pc5_ui_create(const Pc5UiConfig *config, const Pc5Platform *platform)
 void pc5_ui_destroy(Pc5Ui *ui)
 {
     if (!ui) return;
+    /* The update's thread works in ui: it stops first (or finishes putting files in place). */
+    if (pc5_upgrade_busy(&ui->upgrade)) {
+        pc5_upgrade_cancel(&ui->upgrade);
+        while (pc5_upgrade_busy(&ui->upgrade)) usleep(10000);
+    }
     if (ui->runtime_state == 1) pc5_runtime_end(&ui->runtime);
     covers_clear(ui);
     queue_free(ui);
@@ -1086,7 +1101,7 @@ static void setting_text(Pc5Ui *ui, SettingRow row, const char **label, char *ab
         break;
     case SR_GAMES:
         *label = "In games";
-        pc5_copy(about, about_size, "Vibration, light bar and triggers");
+        pc5_copy(about, about_size, "Vibration, light bar, triggers and startup sound");
         pc5_copy(value, value_size, "\xe2\x80\xba");
         break;
     case SR_OVERLAY:
@@ -1184,6 +1199,15 @@ static void setting_text(Pc5Ui *ui, SettingRow row, const char **label, char *ab
         *label = "Check now";
         pc5_update_text(&ui->update.last, about, about_size);
         break;
+    case SR_STARTUP_SOUND:
+        *label = "Startup sound";
+        pc5_copy(about, about_size, "PC5's sound on the controller's speaker when it opens");
+        pc5_copy(value, value_size, set->startup_sound ? "On" : "Off");
+        break;
+    case SR_UPDATE_NOW:
+        *label = "Update now";
+        snprintf(about, about_size, "Downloads PC5 %s from GitHub and installs it", ui->update.last.version);
+        break;
     }
 }
 
@@ -1206,14 +1230,15 @@ static int setting_change(Pc5Ui *ui, SettingRow row, int step)
     case SR_LIGHT: set->light_bar = (Pc5Light)((set->light_bar + PC5_LIGHTS + step) % PC5_LIGHTS); break;
     case SR_TRIGGERS: set->triggers = (Pc5Triggers)((set->triggers + PC5_TRIGGERS_COUNT + step) % PC5_TRIGGERS_COUNT); break;
     case SR_CHECK_ON_OPEN: set->check_updates = !set->check_updates; break;
+    case SR_STARTUP_SOUND: set->startup_sound = !set->startup_sound; break;
     default: return 0;
     }
     if (pc5_settings_save(ui->root, set)) say(ui, "PC5 problem settings: can't write them");
     say(ui, "PC5 settings fps=%d frame_time=%d cpu=%d cpu_temp=%d soc_temp=%d memory=%d corner=%d vibration=%d light=%d "
-        "triggers=%d trigger_rumble=%d trigger_resistance=%d updates=%d keep_logs=%d", set->fps, set->frame_time,
+        "triggers=%d trigger_rumble=%d trigger_resistance=%d updates=%d keep_logs=%d startup_sound=%d", set->fps, set->frame_time,
         set->cpu_usage, set->cpu_temperature, set->soc_temperature, set->memory, (int)set->fps_corner, set->vibration,
         (int)set->light_bar, (int)set->triggers, set->trigger_rumble, set->trigger_resistance, set->check_updates,
-        set->keep_logs);
+        set->keep_logs, set->startup_sound);
     return 1;
 }
 
@@ -1300,21 +1325,51 @@ static void settings_open(Pc5Ui *ui, int page, int row)
     go(ui, S_SETTINGS);
 }
 
-/* Asks GitHub (blocking, one request) and tells once per release. */
-static void update_check_now(Pc5Ui *ui)
+/* PC5 can update itself here: the screens were given its drives and a way to download. */
+static int can_upgrade(const Pc5Ui *ui)
+{
+    return ui->config.drives && ui->platform.http.download && ui->app[0];
+}
+
+/* A newer PC5 to offer: Settings › Updates' Update now, and the question when PC5 opens. */
+static int offer_update(const Pc5Ui *ui)
+{
+    return can_upgrade(ui) && ui->update.last.state == PC5_UPDATE_AVAILABLE;
+}
+
+/* Asks GitHub (blocking, one request) and tells once per release, unless asked (quiet
+ * when PC5 will offer to install it at once). 1 when the release has PC5's zip. */
+static int update_check_now(Pc5Ui *ui, int quiet_if_offered)
 {
     Pc5Update update;
     pc5_update_check(&ui->platform.http, PC5_VERSION, &update);
     ui->update.last = update;
     ui->update.checked = unix_now(ui, NULL);
-    say(ui, "PC5 update state=%d latest=%s", (int)update.state, update.version);
-    if (update.state == PC5_UPDATE_AVAILABLE && strcmp(ui->update.told, update.version)) {
+    say(ui, "PC5 update state=%d latest=%s zip=%d", (int)update.state, update.version, update.asset_url[0] != 0);
+    int offered = update.state == PC5_UPDATE_AVAILABLE && update.asset_url[0] && can_upgrade(ui);
+    if (offered && quiet_if_offered) {
+        pc5_copy(ui->update.told, sizeof(ui->update.told), update.version);
+    } else if (update.state == PC5_UPDATE_AVAILABLE && strcmp(ui->update.told, update.version)) {
         char text[200];
         snprintf(text, sizeof(text), "PC5 %s is available on GitHub (you have %s).", update.version, PC5_VERSION);
         notify(ui, text);
         pc5_copy(ui->update.told, sizeof(ui->update.told), update.version);
     }
     if (pc5_update_save(ui->root, &ui->update)) say(ui, "PC5 problem update: can't remember the answer");
+    return offered;
+}
+
+/* PC5 updates itself: the worker starts, the screen follows it. */
+static void upgrade_begin(Pc5Ui *ui, Screen back)
+{
+    Pc5UpgradeConfig config = { ui->platform.http, ui->app, ui->root, ui->config.drives, ui->config.user,
+                                ui->platform.log, ui->platform.context };
+    ui->upgrade_back = back;
+    ui->upgrade_step = -1;
+    ui->speed = 0;
+    say(ui, "PC5 update start latest=%s", ui->update.last.version);
+    pc5_upgrade_start(&ui->upgrade, &config);
+    go(ui, S_UPGRADING);
 }
 
 /* What went wrong last time, as a message (once the library shows). */
@@ -1410,6 +1465,16 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
     switch (ui->screen) {
     case S_START:
         if (!ui->drawn) break;
+        if (ui->config.finished && ui->config.finished[0]) {
+            /* An update the console stopped was finished as PC5 opened: the new PC5 is in place, this one closes. */
+            pc5_copy(ui->upgrade.version, sizeof(ui->upgrade.version), ui->config.finished);
+            ui->config.finished = NULL;
+            atomic_store(&ui->upgrade.step, PC5_UPGRADE_DONE);
+            ui->upgrade_back = S_LIBRARY;
+            say(ui, "PC5 update finished as it opened: %s", ui->upgrade.version);
+            go(ui, S_UPGRADING);
+            break;
+        }
         if (pc5_recover_step(ui->root, &ui->remove, 14)) { ui->dirty = 1; break; }
         pc5_remove_end(&ui->remove);
         {
@@ -1450,10 +1515,66 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
         break;
     case S_UPDATE:
         if (!ui->drawn) break;
-        update_check_now(ui);
-        if (ui->cover_count) go(ui, S_COVERS);
-        else to_library(ui);
+        if (update_check_now(ui, 1)) {
+            ui->button = 0;
+            go(ui, S_UPGRADE_ASK);
+        } else if (ui->cover_count) {
+            go(ui, S_COVERS);
+        } else {
+            to_library(ui);
+        }
         break;
+    case S_UPGRADE_ASK:
+        if (k & (PC5_KEY_LEFT | PC5_KEY_RIGHT)) { ui->button = !ui->button; ui->dirty = 1; }
+        if ((k & accept) && !ui->button) {
+            upgrade_begin(ui, S_LIBRARY);
+        } else if (k & (accept | back)) {
+            say(ui, "PC5 update later latest=%s", ui->update.last.version);
+            if (ui->cover_count) go(ui, S_COVERS);
+            else to_library(ui);
+        }
+        break;
+    case S_UPGRADING: {
+        int step = atomic_load(&ui->upgrade.step);
+        if (step == PC5_UPGRADE_DONE) {
+            if (k & (accept | back)) {
+                say(ui, "PC5 update closing PC5");
+                if (ui->platform.quit) ui->platform.quit(ui->platform.context);
+                to_library(ui);
+            }
+            break;
+        }
+        if (step == PC5_UPGRADE_FAILED || step == PC5_UPGRADE_CANCELLED) {
+            if (ui->upgrade_back == S_SETTINGS) ui->page = PAGE_UPDATES;
+            if (step == PC5_UPGRADE_CANCELLED)
+                message(ui, 0, "The update was stopped", "PC5 is as it was, and what was downloaded is deleted.",
+                        ui->upgrade_back);
+            else
+                message(ui, 0, ui->upgrade.partial ? "PC5's update isn't finished" : "PC5 wasn't updated",
+                        ui->upgrade.error, ui->upgrade_back);
+            break;
+        }
+        if ((k & back) && step <= PC5_UPGRADE_UNPACKING && !atomic_load(&ui->upgrade.cancel)) {
+            say(ui, "PC5 update stop asked");
+            pc5_upgrade_cancel(&ui->upgrade);
+            ui->dirty = 1;
+        }
+        /* The speed, as an install's: measured each second, smoothed. */
+        uint64_t done = atomic_load(&ui->upgrade.done);
+        if (step != ui->upgrade_step || done < ui->speed_bytes) {
+            ui->upgrade_step = step;
+            ui->speed_at = ui->now;
+            ui->speed_bytes = done;
+            ui->speed = 0;
+        } else if (ui->now - ui->speed_at >= 1000) {
+            double rate = (double)(done - ui->speed_bytes) * 1000.0 / (double)(ui->now - ui->speed_at);
+            ui->speed = ui->speed ? ui->speed * 0.6 + rate * 0.4 : rate;
+            ui->speed_at = ui->now;
+            ui->speed_bytes = done;
+        }
+        if (ui->now - ui->upgrade_drawn >= 200) { ui->upgrade_drawn = ui->now; ui->dirty = 1; }
+        break;
+    }
     case S_COVERS:
         if (k & (accept | back)) { to_library(ui); break; }
         if (!ui->drawn) break;
@@ -1500,7 +1621,7 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
     }
     case S_SETTINGS: {
         SettingRow rows[PAGE_ROWS], row;
-        int count = page_rows(&ui->settings, ui->page, rows);
+        int count = page_rows(&ui->settings, ui->page, offer_update(ui), rows);
         if (ui->menu >= count) ui->menu = count - 1;
         row = rows[ui->menu];
         if (list_move(&ui->menu, count, k)) ui->dirty = 1;
@@ -1526,6 +1647,7 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
             case SR_UPDATES: settings_open(ui, PAGE_UPDATES, 0); break;
             case SR_ABOUT: go(ui, S_ABOUT); break;
             case SR_CHECK_NOW: go(ui, S_CHECKING); break;
+            case SR_UPDATE_NOW: upgrade_begin(ui, S_SETTINGS); break;
             default: if (setting_change(ui, row, 1)) ui->dirty = 1; break;
             }
         }
@@ -1533,8 +1655,8 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
     }
     case S_CHECKING:
         if (!ui->drawn) break;
-        update_check_now(ui);
-        settings_open(ui, PAGE_UPDATES, 1);
+        update_check_now(ui, 0);
+        settings_open(ui, PAGE_UPDATES, offer_update(ui) ? 2 : 1);   /* on Update now when there is one */
         break;
     case S_ABOUT:
         if (k & (back | accept)) settings_open(ui, 0, 6);
@@ -2012,7 +2134,9 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
     /* Spinners turn. */
     if (ui->screen == S_START || ui->screen == S_COVERS || ui->screen == S_SCAN || ui->screen == S_READING ||
         ui->screen == S_SEARCH || ui->screen == S_REMOVING || ui->screen == S_LAUNCH || ui->screen == S_UPDATE ||
-        ui->screen == S_CHECKING || ui->screen == S_GAME_READING || ui->screen == S_QUEUE_READ || ui->fetching)
+        ui->screen == S_CHECKING || ui->screen == S_GAME_READING || ui->screen == S_QUEUE_READ || ui->fetching ||
+        (ui->screen == S_UPGRADING && atomic_load(&ui->upgrade.step) != PC5_UPGRADE_DONE &&
+         atomic_load(&ui->upgrade.step) != PC5_UPGRADE_DOWNLOADING && atomic_load(&ui->upgrade.step) != PC5_UPGRADE_UNPACKING))
         ui->dirty = 1;
     int dirty = ui->dirty;
     ui->dirty = 0;
@@ -2257,7 +2381,7 @@ static void settings_screen(Pc5Ui *ui, Pc5Canvas *c)
 {
     float x = drawer(ui, c, page_titles[ui->page]);
     SettingRow rows[PAGE_ROWS];
-    int count = page_rows(&ui->settings, ui->page, rows);
+    int count = page_rows(&ui->settings, ui->page, offer_update(ui), rows);
     float pitch = count > 6 ? 106 : 118;   /* seven rows fit above the hints */
 
     for (int i = 0; i < count; i++) {
@@ -2268,10 +2392,13 @@ static void settings_screen(Pc5Ui *ui, Pc5Canvas *c)
     }
     if (ui->page == PAGE_UPDATES && ui->update.last.state == PC5_UPDATE_AVAILABLE)
         pc5_text_wrap(c, &ui->fonts, PC5_FACE_BODY, (int)x + 72, 196 + (int)pitch * count + 60, 760 - 144, 4, 42, C_DIM,
-                      "Get it from github.com/bornaradusin/PC5 (Releases) and copy it to the console the way you "
-                      "added PC5. Your games, saves and settings stay.", 0);
+                      offer_update(ui) ? "Update now downloads it from GitHub, puts it in place of this PC5 and closes "
+                                         "PC5. Your games, saves and settings stay."
+                                       : "Get it from github.com/bornaradusin/PC5 (Releases) and copy it to the console "
+                                         "the way you added PC5. Your games, saves and settings stay.", 0);
     SettingRow row = rows[ui->menu < count ? ui->menu : 0];
-    int changes = row == SR_KEEP_LOGS || (row >= SR_FPS && row <= SR_TRIGGER_RESISTANCE) || row == SR_CHECK_ON_OPEN;
+    int changes = row == SR_KEEP_LOGS || (row >= SR_FPS && row <= SR_TRIGGER_RESISTANCE) || row == SR_CHECK_ON_OPEN ||
+                  row == SR_STARTUP_SOUND;
     Hint list[] = { { accept_glyph(ui), changes ? "Change" : "Choose" }, { back_glyph(ui), "Back" } };
     hints(ui, c, (int)x + 64, 1012, list, 2);
 }
@@ -2810,6 +2937,83 @@ static void report_screen(Pc5Ui *ui, Pc5Canvas *c)
     hints(ui, c, tx, (int)(y + h - 48), list, 1);
 }
 
+/* PC5 updating itself: its steps, the download's and the unpacking's progress, then done. */
+static void upgrade_screen(Pc5Ui *ui, Pc5Canvas *c)
+{
+    const Pc5Upgrade *u = &ui->upgrade;
+    int step = atomic_load(&u->step);
+    uint64_t done = atomic_load(&u->done), total = atomic_load(&u->total);
+    float w = 1180, h = 520, x = (W - w) / 2, y = (H - h) / 2;
+    char title[200], line[300], have[32], all[32], speed[32], left[48] = "";
+    const char *what;
+    int number;
+
+    dim(c, 150);
+    panel(c, x, y, w, h);
+    if (step == PC5_UPGRADE_DONE) {
+        pc5_circle(c, x + 92, y + 108, 22, 0xff3fb27fu);
+        pc5_line(c, x + 81, y + 109, x + 89, y + 117, 4, 0xff0b0d10u);
+        pc5_line(c, x + 89, y + 117, x + 104, y + 99, 4, 0xff0b0d10u);
+        snprintf(title, sizeof(title), "PC5 %s is installed", u->version);
+        pc5_text(c, &ui->fonts, PC5_FACE_HEAD, (int)x + 140, (int)y + 122, C_TEXT, title, (int)w - 204, 0);
+        pc5_text_wrap(c, &ui->fonts, PC5_FACE_BODY, (int)x + 140, (int)y + 200, (int)w - 204, 5, 42, C_DIM,
+                      "PC5 closes now. Open it again from the home screen. Your games, saves and settings are as they "
+                      "were. If the old version still opens, restart the console.", 0);
+        Hint list[] = { { accept_glyph(ui), "Close PC5" } };
+        hints(ui, c, (int)x + 140, (int)(y + h - 48), list, 1);
+        return;
+    }
+    switch (step) {
+    case PC5_UPGRADE_DOWNLOADING: what = "Downloading it from GitHub"; number = 1; break;
+    case PC5_UPGRADE_UNPACKING: what = "Unpacking it and checking every file"; number = 2; break;
+    case PC5_UPGRADE_REPLACING: what = "Putting the new files in place"; number = 3; break;
+    case PC5_UPGRADE_TIDYING: what = "Deleting the old files"; number = 3; break;
+    default: what = "Asking GitHub and finding PC5's folder"; number = 0; break;
+    }
+    int stopping = atomic_load(&u->cancel) && step <= PC5_UPGRADE_UNPACKING;
+    if (stopping) { what = "Stopping"; number = 0; }
+    if (step >= PC5_UPGRADE_DOWNLOADING && u->version[0]) snprintf(title, sizeof(title), "Updating PC5 to %s", u->version);
+    else pc5_copy(title, sizeof(title), "Updating PC5");
+    pc5_text(c, &ui->fonts, PC5_FACE_HEAD, (int)x + 64, (int)y + 116, C_TEXT, title, (int)w - 128, 0);
+    if (number) snprintf(line, sizeof(line), "Step %d of 3 \xc2\xb7 %s", number, what);
+    else pc5_copy(line, sizeof(line), what);
+    pc5_text(c, &ui->fonts, PC5_FACE_LABEL, (int)x + 64, (int)y + 186, C_TEXT, line, (int)w - 128, 0);
+    if (step == PC5_UPGRADE_REPLACING && total) {
+        progress_bar(c, x + 64, y + 236, w - 128, (double)done / (double)total, pc5_mix(C_ACCENT, C_TEXT, 60));
+        snprintf(line, sizeof(line), "%llu of %llu files", (unsigned long long)done, (unsigned long long)total);
+        pc5_text(c, &ui->fonts, PC5_FACE_BODY, (int)x + 64, (int)y + 306, C_DIM, line, (int)w - 128, 0);
+    } else if ((step == PC5_UPGRADE_DOWNLOADING || step == PC5_UPGRADE_UNPACKING) && total && !stopping) {
+        progress_bar(c, x + 64, y + 236, w - 128, (double)done / (double)total, pc5_mix(C_ACCENT, C_TEXT, 60));
+        pc5_size_text(done, have, sizeof(have));
+        pc5_size_text(total, all, sizeof(all));
+        if (ui->speed > 1024) {
+            pc5_size_text((uint64_t)ui->speed, speed, sizeof(speed));
+            if (total > done) {
+                double seconds = (double)(total - done) / ui->speed;
+                if (seconds < 60) snprintf(left, sizeof(left), " \xc2\xb7 under a minute left");
+                else snprintf(left, sizeof(left), " \xc2\xb7 about %d min left", (int)(seconds / 60 + 0.5));
+            }
+            snprintf(line, sizeof(line), "%s of %s \xc2\xb7 %s/s%s", have, all, speed, left);
+        } else {
+            snprintf(line, sizeof(line), "%s of %s \xc2\xb7 measuring the speed", have, all);
+        }
+        pc5_text(c, &ui->fonts, PC5_FACE_BODY, (int)x + 64, (int)y + 306, C_DIM, line, (int)w - 128, 0);
+    } else {
+        spinner(c, x + w - 100, y + 176, 22, ui->now, C_TEXT);
+    }
+    if (step >= PC5_UPGRADE_DOWNLOADING && u->folder[0]) {
+        snprintf(line, sizeof(line), "Into %.280s", u->folder);
+        pc5_text(c, &ui->fonts, PC5_FACE_SMALL, (int)x + 64, (int)y + 350, C_FAINT, line, (int)w - 128, 0);
+    }
+    if (step <= PC5_UPGRADE_UNPACKING && !stopping) {
+        Hint list[] = { { back_glyph(ui), "Stop" } };
+        hints(ui, c, (int)x + 64, (int)(y + h - 44), list, 1);
+    } else if (step >= PC5_UPGRADE_REPLACING) {
+        pc5_text(c, &ui->fonts, PC5_FACE_SMALL, (int)x + 64, (int)(y + h - 44), C_DIM,
+                 "Don't turn the console off now. This takes a moment.", (int)w - 128, 0);
+    }
+}
+
 static void start_screen(Pc5Ui *ui, Pc5Canvas *c, const char *line, int can_skip)
 {
     pc5_clear(c, 0xff07080au);
@@ -2847,6 +3051,17 @@ void pc5_ui_draw(Pc5Ui *ui, Pc5Canvas *c)
     switch (ui->screen) {
     case S_SETTINGS: settings_screen(ui, c); break;
     case S_CHECKING: settings_screen(ui, c); busy_dialog(ui, c, "Checking for a newer PC5", "Asking GitHub", 0); break;
+    case S_UPGRADE_ASK: {
+        char title[120], body[400], size[32];
+        pc5_size_text(ui->update.last.asset_size, size, sizeof(size));
+        snprintf(title, sizeof(title), "PC5 %s is available", ui->update.last.version);
+        snprintf(body, sizeof(body), "You have %s. PC5 can download it from GitHub (%s), install it and close; then "
+                 "open it again. Your games, saves and settings stay. Later: Settings \xe2\x80\xba Updates.",
+                 PC5_VERSION, size);
+        confirm_dialog(ui, c, title, body, "Update now", "Later", 0, NULL);
+        break;
+    }
+    case S_UPGRADING: upgrade_screen(ui, c); break;
     case S_GAME_MENU: game_menu_screen(ui, c, ui->menu); break;
     case S_BUTTONS: buttons_screen(ui, c); break;
     case S_KEYS: buttons_screen(ui, c); keys_dialog(ui, c); break;

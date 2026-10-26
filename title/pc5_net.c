@@ -12,19 +12,23 @@
 #include "mbedtls/x509_crt.h"
 #include "psa/crypto.h"
 
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
-enum { CONNECT_MS = 8000, IO_MS = 15000, REDIRECTS = 4, HEADER_MAX = 64 * 1024 };
+enum { CONNECT_MS = 8000, IO_MS = 15000, REDIRECTS = 4, HEADER_MAX = 64 * 1024, PATH_MAX_URL = 4096 };
 
 static Pc5NetOps ops;
 static int have_ops, crypto_state;     /* crypto_state: 0 not tried, 1 ready, -1 failed */
 static mbedtls_entropy_context entropy;
 static mbedtls_ctr_drbg_context drbg;
 static mbedtls_x509_crt roots;
+/* One request at a time: mbedTLS's random generator and PSA state are shared, and the
+ * update downloads on a thread of its own while the screens may ask for a cover. */
+static pthread_mutex_t net_lock = PTHREAD_MUTEX_INITIALIZER;
 
 #define USER_AGENT "PC5/" PC5_VERSION " (PS5 homebrew game launcher; +https://github.com/bornaradusin/PC5)"
 
@@ -159,76 +163,110 @@ int pc5_url_split(const char *url, char *host, size_t host_size, uint16_t *port,
     return pc5_format(path, path_size, "%s", *slash ? slash : "/");
 }
 
-/* One request: the raw answer (headers and body) into answer. */
-static int exchange(const char *host, uint16_t port, const char *path, Pc5Buf *answer, size_t max)
-{
+/* A TLS connection to host:port, checked against the roots. */
+typedef struct Tls {
     mbedtls_ssl_context ssl;
     mbedtls_ssl_config conf;
-    uint32_t address = 0;
-    int sock = -1, status = -1, r;
-    char request[2600];
+    int sock;
+} Tls;
 
+static void tls_close(Tls *t)
+{
+    mbedtls_ssl_free(&t->ssl);
+    mbedtls_ssl_config_free(&t->conf);
+    if (t->sock >= 0) ops.close(t->sock);
+    t->sock = -1;
+}
+
+/* Connects, shakes hands and sends "GET path": 0, or -1 (closed again). */
+static int tls_get(Tls *t, const char *host, uint16_t port, const char *path)
+{
+    uint32_t address = 0;
+    int r;
+    char request[PATH_MAX_URL + 512];
+
+    mbedtls_ssl_init(&t->ssl);
+    mbedtls_ssl_config_init(&t->conf);
+    t->sock = -1;
     if (ops.resolve(host, &address)) {
         note("PC5 net no address for %s", host);
-        return -1;
+        goto fail;
     }
-    if ((sock = ops.connect(address, port, CONNECT_MS)) < 0) {
+    if ((t->sock = ops.connect(address, port, CONNECT_MS)) < 0) {
         note("PC5 net can't connect to %s:%u", host, (unsigned)port);
-        return -1;
+        goto fail;
     }
-    mbedtls_ssl_init(&ssl);
-    mbedtls_ssl_config_init(&conf);
-    if ((r = mbedtls_ssl_config_defaults(&conf, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM,
+    if ((r = mbedtls_ssl_config_defaults(&t->conf, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM,
                                          MBEDTLS_SSL_PRESET_DEFAULT)))
-        goto out;
-    mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_REQUIRED);
-    mbedtls_ssl_conf_ca_chain(&conf, &roots, NULL);
-    mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &drbg);
-    if ((r = mbedtls_ssl_setup(&ssl, &conf)) || (r = mbedtls_ssl_set_hostname(&ssl, host))) goto out;
-    mbedtls_ssl_set_bio(&ssl, &sock, bio_send, bio_recv, NULL);
-    while ((r = mbedtls_ssl_handshake(&ssl))) {
+        goto fail;
+    mbedtls_ssl_conf_authmode(&t->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
+    mbedtls_ssl_conf_ca_chain(&t->conf, &roots, NULL);
+    mbedtls_ssl_conf_rng(&t->conf, mbedtls_ctr_drbg_random, &drbg);
+    if ((r = mbedtls_ssl_setup(&t->ssl, &t->conf)) || (r = mbedtls_ssl_set_hostname(&t->ssl, host))) goto fail;
+    mbedtls_ssl_set_bio(&t->ssl, &t->sock, bio_send, bio_recv, NULL);
+    while ((r = mbedtls_ssl_handshake(&t->ssl))) {
         if (r != MBEDTLS_ERR_SSL_WANT_READ && r != MBEDTLS_ERR_SSL_WANT_WRITE) {
             char why[120];
-            uint32_t flags = mbedtls_ssl_get_verify_result(&ssl);
+            uint32_t flags = mbedtls_ssl_get_verify_result(&t->ssl);
             mbedtls_strerror(r, why, sizeof(why));
             note("PC5 net handshake with %s failed: -%#x %s (verify %#x)", host, (unsigned)-r, why, (unsigned)flags);
-            goto out;
+            goto fail;
         }
     }
     if (pc5_format(request, sizeof(request),
                    "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: " USER_AGENT "\r\nAccept: */*\r\n"
                    "Accept-Encoding: identity\r\nConnection: close\r\n\r\n", path, host))
-        goto out;
+        goto fail;
     for (size_t done = 0, length = strlen(request); done < length;) {
-        r = mbedtls_ssl_write(&ssl, (const unsigned char *)request + done, length - done);
+        r = mbedtls_ssl_write(&t->ssl, (const unsigned char *)request + done, length - done);
         if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
-        if (r <= 0) goto out;
+        if (r <= 0) goto fail;
         done += (size_t)r;
     }
-    answer->len = 0;
+    return 0;
+fail:
+    tls_close(t);
+    return -1;
+}
+
+/* Up to size bytes of the answer: how many, 0 at its end, -1 on an error. lenient: an
+ * error once something came is its end too (some servers close without notifying). */
+static int tls_read(Tls *t, uint8_t *data, size_t size, int lenient)
+{
     for (;;) {
-        if (pc5_buf_reserve(answer, 32 * 1024)) goto out;
-        r = mbedtls_ssl_read(&ssl, answer->data + answer->len, 32 * 1024);
+        int r = mbedtls_ssl_read(&t->ssl, data, size);
         if (r == MBEDTLS_ERR_SSL_WANT_READ || r == MBEDTLS_ERR_SSL_WANT_WRITE) continue;
 #ifdef MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET
         if (r == MBEDTLS_ERR_SSL_RECEIVED_NEW_SESSION_TICKET) continue;
 #endif
-        if (r == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || r == 0) break;
-        if (r < 0) {
-            /* Some servers close without notifying: what came is what there is. */
-            if (answer->len) break;
-            goto out;
-        }
-        answer->len += (size_t)r;
-        if (answer->len > max + HEADER_MAX) goto out;
+        if (r == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY || r == 0) return 0;
+#ifdef MBEDTLS_ERR_SSL_CONN_EOF
+        if (r == MBEDTLS_ERR_SSL_CONN_EOF) return 0;
+#endif
+        if (r < 0) return lenient ? 0 : -1;
+        return r;
     }
-    status = 0;
-    mbedtls_ssl_close_notify(&ssl);
-out:
-    mbedtls_ssl_free(&ssl);
-    mbedtls_ssl_config_free(&conf);
-    ops.close(sock);
-    return status;
+}
+
+/* One request: the raw answer (headers and body) into answer. */
+static int exchange(const char *host, uint16_t port, const char *path, Pc5Buf *answer, size_t max)
+{
+    Tls t;
+    int r;
+
+    if (tls_get(&t, host, port, path)) return -1;
+    answer->len = 0;
+    for (;;) {
+        if (pc5_buf_reserve(answer, 32 * 1024)) { tls_close(&t); return -1; }
+        r = tls_read(&t, answer->data + answer->len, 32 * 1024, answer->len > 0);
+        if (r < 0) { tls_close(&t); return -1; }
+        if (r == 0) break;
+        answer->len += (size_t)r;
+        if (answer->len > max + HEADER_MAX) { tls_close(&t); return -1; }
+    }
+    mbedtls_ssl_close_notify(&t.ssl);
+    tls_close(&t);
+    return 0;
 }
 
 static int header_value(const char *headers, const char *name, char *out, size_t size)
@@ -244,7 +282,7 @@ static int header_value(const char *headers, const char *name, char *out, size_t
             size_t n = 0;
             while (p[n] && p[n] != '\r' && n + 1 < size) { out[n] = p[n]; n++; }
             out[n] = 0;
-            return 0;
+            return p[n] && p[n] != '\r' ? -1 : 0;   /* longer than out: as if it weren't there */
         }
     }
     return -1;
@@ -285,11 +323,30 @@ static int take_body(Pc5Buf *answer, size_t header_length, const char *headers)
     return pc5_buf_terminate(answer);
 }
 
-int pc5_net_get(void *context, const char *url, Pc5Buf *out, size_t max, int *status)
+static int redirected(int status)
 {
-    char host[256], path[2048], next[2400], location[2048];
+    return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
+}
+
+/* Where a redirect from https://host:port/path to location goes, into next: 0, or -1
+ * when it doesn't fit. */
+static int follow(const char *host, uint16_t port, char *path, const char *location, char *next, size_t size)
+{
+    if (!strncmp(location, "https://", 8)) return pc5_format(next, size, "%s", location);
+    if (!strncmp(location, "http://", 7)) return pc5_format(next, size, "https://%s", location + 7);
+    if (!strncmp(location, "//", 2)) return pc5_format(next, size, "https:%s", location);
+    if (location[0] == '/') return pc5_format(next, size, "https://%s:%u%s", host, (unsigned)port, location);
+    /* Beside the request's own path, its query left out. */
+    char *query = strchr(path, '?'), *slash;
+    if (query) *query = 0;
+    if ((slash = strrchr(path, '/'))) slash[1] = 0;
+    return pc5_format(next, size, "https://%s:%u%s%s", host, (unsigned)port, path, location);
+}
+
+static int get_locked(const char *url, Pc5Buf *out, size_t max, int *status)
+{
+    char host[256], path[PATH_MAX_URL], next[PATH_MAX_URL + 300], location[PATH_MAX_URL];
     uint16_t port;
-    (void)context;
 
     out->len = 0;
     *status = 0;
@@ -310,16 +367,10 @@ int pc5_net_get(void *context, const char *url, Pc5Buf *out, size_t max, int *st
         *end = 0;
         size_t header_length = (size_t)(end - (char *)out->data) + 4;
         *status = atoi((char *)out->data + 9);
-        if ((*status == 301 || *status == 302 || *status == 303 || *status == 307 || *status == 308) &&
-            !header_value((char *)out->data, "Location", location, sizeof(location))) {
-            if (!strncmp(location, "https://", 8)) pc5_format(next, sizeof(next), "%s", location);
-            else if (!strncmp(location, "http://", 7)) pc5_format(next, sizeof(next), "https://%s", location + 7);
-            else if (!strncmp(location, "//", 2)) pc5_format(next, sizeof(next), "https:%s", location);
-            else if (location[0] == '/') pc5_format(next, sizeof(next), "https://%s:%u%s", host, (unsigned)port, location);
-            else {
-                char *slash = strrchr(path, '/');
-                if (slash) slash[1] = 0;
-                pc5_format(next, sizeof(next), "https://%s:%u%s%s", host, (unsigned)port, path, location);
+        if (redirected(*status) && !header_value((char *)out->data, "Location", location, sizeof(location))) {
+            if (follow(host, port, path, location, next, sizeof(next))) {
+                note("PC5 net %s: a redirect too long to follow", host);
+                return -1;
             }
             continue;
         }
@@ -332,4 +383,186 @@ int pc5_net_get(void *context, const char *url, Pc5Buf *out, size_t max, int *st
     }
     note("PC5 net too many redirects from %.200s", url);
     return -1;
+}
+
+int pc5_net_get(void *context, const char *url, Pc5Buf *out, size_t max, int *status)
+{
+    (void)context;
+    pthread_mutex_lock(&net_lock);
+    int result = get_locked(url, out, max, status);
+    pthread_mutex_unlock(&net_lock);
+    return result;
+}
+
+/* ---- a download, a piece at a time ----------------------------------------------------------- */
+
+enum { STREAM_BUFFER = 64 * 1024 };
+
+/* The answer as it arrives: buf[start, end) not used yet. */
+typedef struct Stream {
+    Tls *tls;
+    uint8_t *buf;
+    size_t start, end;
+    int ended;
+    uint64_t received;
+} Stream;
+
+static int stopped(const Pc5Sink *sink)
+{
+    return sink->stop && sink->stop(sink->context);
+}
+
+/* More of the answer after what is there: 1, 0 at its end, -1 on an error. */
+static int stream_fill(Stream *s)
+{
+    if (s->ended) return 0;
+    if (s->start == s->end) s->start = s->end = 0;
+    if (s->end == STREAM_BUFFER) {
+        if (!s->start) return -1;   /* a line longer than the buffer */
+        memmove(s->buf, s->buf + s->start, s->end - s->start);
+        s->end -= s->start;
+        s->start = 0;
+    }
+    int r = tls_read(s->tls, s->buf + s->end, STREAM_BUFFER - s->end, 0);
+    if (r < 0) return -1;
+    if (r == 0) { s->ended = 1; return 0; }
+    s->end += (size_t)r;
+    s->received += (uint64_t)r;
+    return 1;
+}
+
+/* The next line (its CRLF taken off) into out. */
+static int stream_line(Stream *s, char *out, size_t size)
+{
+    for (;;) {
+        for (size_t i = s->start; i + 1 < s->end; i++) {
+            if (s->buf[i] != '\r' || s->buf[i + 1] != '\n') continue;
+            size_t n = i - s->start;
+            if (n >= size) return -1;
+            memcpy(out, s->buf + s->start, n);
+            out[n] = 0;
+            s->start = i + 2;
+            return 0;
+        }
+        if (s->end - s->start > 4096 || stream_fill(s) <= 0) return -1;
+    }
+}
+
+/* count bytes of the body to sink (all of it, to the end, when count is UINT64_MAX). */
+static int stream_body(Stream *s, uint64_t count, const Pc5Sink *sink)
+{
+    while (count) {
+        if (stopped(sink)) return -1;
+        if (s->start == s->end) {
+            int r = stream_fill(s);
+            if (r < 0) return -1;
+            if (r == 0) return count == UINT64_MAX ? 0 : -1;   /* cut short */
+        }
+        size_t n = s->end - s->start;
+        if ((uint64_t)n > count) n = (size_t)count;
+        if (sink->write(sink->context, s->buf + s->start, n)) return -1;
+        s->start += n;
+        if (count != UINT64_MAX) count -= n;
+    }
+    return 0;
+}
+
+/* One request: its status, the Location of a redirect, and a 200's body to sink. */
+static int stream_exchange(const char *host, uint16_t port, const char *path, const Pc5Sink *sink, int *status,
+                           char *location, size_t location_size)
+{
+    Tls t;
+    Stream s = { &t, NULL, 0, 0, 0, 0 };
+    char value[64];
+    int result = -1;
+
+    location[0] = 0;
+    if (!(s.buf = pc5_alloc(STREAM_BUFFER + 1))) return -1;
+    if (tls_get(&t, host, port, path)) { pc5_free(s.buf); return -1; }
+    /* The headers: up to the empty line. */
+    char *headers = NULL;
+    for (;;) {
+        s.buf[s.end] = 0;
+        char *end = s.end ? strstr((char *)s.buf, "\r\n\r\n") : NULL;
+        if (end) {
+            *end = 0;
+            headers = (char *)s.buf;
+            s.start = (size_t)(end - (char *)s.buf) + 4;
+            break;
+        }
+        if (s.end >= STREAM_BUFFER || stream_fill(&s) <= 0) {
+            note("PC5 net %s answered with no HTTP headers", host);
+            goto out;
+        }
+    }
+    if (strncmp(headers, "HTTP/1.", 7) || strlen(headers) < 12) {
+        note("PC5 net %s answered with no HTTP headers", host);
+        goto out;
+    }
+    *status = atoi(headers + 9);
+    if (redirected(*status)) {
+        if (header_value(headers, "Location", location, location_size)) location[0] = 0;
+        result = 0;
+        goto out;
+    }
+    if (*status != 200) { result = 0; goto out; }
+    uint64_t length = 0;
+    int chunked = !header_value(headers, "Transfer-Encoding", value, sizeof(value)) && strstr(value, "chunked");
+    if (!chunked && !header_value(headers, "Content-Length", value, sizeof(value))) length = strtoull(value, NULL, 10);
+    /* The headers' text is overwritten by the body from here. */
+    if (sink->begin && sink->begin(sink->context, length)) goto out;
+    if (chunked) {
+        char line[64];
+        for (;;) {
+            if (stream_line(&s, line, sizeof(line))) goto cut;
+            char *end;
+            uint64_t size = strtoull(line, &end, 16);
+            if (end == line) goto cut;
+            if (!size) break;   /* trailers, if any, aren't needed */
+            if (stream_body(&s, size, sink) || stream_line(&s, line, sizeof(line)) || line[0]) goto cut;
+        }
+    } else if (stream_body(&s, length ? length : UINT64_MAX, sink)) {
+        goto cut;
+    }
+    result = 0;
+    mbedtls_ssl_close_notify(&t.ssl);
+    goto out;
+cut:
+    if (!stopped(sink)) note("PC5 net %s: the download was cut short", host);
+out:
+    tls_close(&t);
+    pc5_free(s.buf);
+    return result;
+}
+
+int pc5_net_download(void *context, const char *url, const Pc5Sink *sink, int *status)
+{
+    char host[256], path[PATH_MAX_URL], next[PATH_MAX_URL + 300], location[PATH_MAX_URL];
+    uint16_t port;
+    int result = -1;
+    (void)context;
+
+    *status = 0;
+    pthread_mutex_lock(&net_lock);
+    if (!have_ops || !crypto_ready() || pc5_format(next, sizeof(next), "%s", url)) goto out;
+    for (int hop = 0; hop <= REDIRECTS; hop++) {
+        if (pc5_url_split(next, host, sizeof(host), &port, path, sizeof(path))) {
+            note("PC5 net not an https address: %.200s", next);
+            goto out;
+        }
+        if (stream_exchange(host, port, path, sink, status, location, sizeof(location))) goto out;
+        if (redirected(*status) && location[0]) {
+            if (follow(host, port, path, location, next, sizeof(next))) {
+                note("PC5 net %s: a redirect too long to follow", host);
+                goto out;
+            }
+            continue;
+        }
+        result = 0;
+        goto out;
+    }
+    note("PC5 net too many redirects from %.200s", url);
+out:
+    pthread_mutex_unlock(&net_lock);
+    return result;
 }

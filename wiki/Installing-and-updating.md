@@ -1,4 +1,4 @@
-PC5 is a homebrew app: you copy it to the console once, and replace it with a newer version when one comes out. Your games, saves and settings are kept outside the app's folder, so updating PC5 never touches them. This page covers installing PC5, updating it, checking for new versions and finding the version you have.
+PC5 is a homebrew app: you copy it to the console once. From 1.7.0 on, PC5 updates itself from GitHub when a newer version comes out; you can still replace it by hand. Your games, saves and settings are kept outside the app's folder, so updating PC5 never touches them. This page covers installing PC5, updating it, checking for new versions and finding the version you have.
 
 ## Installing PC5
 
@@ -14,11 +14,23 @@ The first time, the library is empty. Press **Options** and choose **Install gam
 
 ## Updating PC5
 
+### From PC5 (1.7.0 and newer)
+
+When PC5 opens and a newer release is out on GitHub, it asks: **Update now** or **Later**. Later leaves it for **Settings › Updates › Update now**.
+
+1. Choose **Update now**. PC5 downloads the new `PPSA11018.zip` from the release, unpacks it and checks every file, then puts the new files in place of its own. A progress bar shows the download and the unpacking; **○** stops it until the files are put in place, and PC5 is then as it was.
+2. When it says the new version is installed, press **✕** (**Close PC5**). PC5 closes.
+3. Open PC5 again from the home screen and check the version in **Settings › About PC5**. If the old version still opens, restart the console.
+
+PC5 needs room for the download and its unpacked files on the drive it is installed on: about four times the size of the zip, freed again when it is done. It finds its own folder on the console's drives (in `homebrew`, `etaHEN/games` or at the top of a USB or extended drive). The folder stays where it is and only PC5's own files in it change; files you added at the top of the folder stay. If PC5 is on the console more than once, it asks you to delete the copy you don't use first. If something goes wrong before the new files are put in place, PC5 says why and stays as it was; if the console turns off while they are being put in place, PC5 finishes the job the next time it opens, and then closes so you can open the new version.
+
+### By hand
+
 1. Download the new `PPSA11018.zip` from the [Releases page](https://github.com/bornaradusin/PC5/releases) and unzip it.
 2. Replace the `PPSA11018` folder on the console with the new one, the way you added PC5.
 3. Start PC5, then check the version in **Settings › About PC5**.
 
-Your games, saves and settings are in `/data/prospero-win`, not in the app's folder, so they stay where they are. There is no need to reinstall your games.
+Either way, your games, saves and settings are in `/data/prospero-win`, not in the app's folder, so they stay where they are. There is no need to reinstall your games.
 
 When a new version brings something games need (for example new video and sound decoders, or a newer DXVK), a game installed with an older PC5 gets it the next time it starts. That first start can take a little longer.
 
@@ -33,17 +45,18 @@ PC5 can ask GitHub whether a newer release is out. Open **Settings › Updates**
 | --- | --- |
 | Check when PC5 opens | **On** (the default): PC5 asks GitHub when it opens, at most once an hour. **Off**: it only asks when you choose Check now. |
 | Check now | Asks GitHub straight away and shows the answer under the row. |
+| Update now | Shows while a newer release is out: downloads it and installs it (see [Updating PC5](#updating-pc5)). |
 
 The answer is one of these:
 
 | Message | Meaning |
 | --- | --- |
-| You have the newest PC5 (1.6.6) | No newer release is published. |
-| PC5 1.x.y is available on GitHub | A newer release is out. The console also shows a notification, once for each new release. |
+| You have the newest PC5 (1.7.0) | No newer release is published. |
+| PC5 1.x.y is available on GitHub | A newer release is out. When PC5 opens it asks whether to update; after Check now, the console shows a notification, once for each new release. |
 | GitHub didn't answer: is the console online? | The check failed. Check the console's internet connection and try again. |
 | Not checked yet | PC5 hasn't asked since it was installed. |
 
-PC5 only tells you about a new version. It never downloads or installs anything by itself: you update it as described above.
+PC5 never updates without asking: it downloads and installs a new version only when you choose Update now.
 
 ## Which version do I have?
 

@@ -1,13 +1,19 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 /* PC5 on the console (pc5_console.h): prospero-win's presenter, pad and
- * keyboard, the console's clock and settings, and its HTTPS. */
+ * keyboard, the console's clock and settings, its HTTPS, the startup sound on
+ * the controller's speaker, and closing PC5 after it updated itself. */
 #include "pc5_console.h"
 #include "pc5_home.h"
 #include "pc5.h"
 #include "pc5_game.h"
 #include "pc5_net.h"
+#include "pc5_settings.h"
+#include "pc5_sound.h"
 #include "pc5_ui.h"
+#include "pc5_upgrade.h"
 
+#include "pw_audio_ps5.h"
+#include "pw_diagnostics.h"
 #include "pw_hid_ps5.h"
 #include "pw_pad_ps5.h"
 #include "pw_videoout_ps5.h"
@@ -15,7 +21,9 @@
 #include "../include/prospero_win.h"
 
 #include <fcntl.h>
+#include <pthread.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -154,6 +162,98 @@ static PwVideoOutPs5 video;
 static PwPadPs5 pad;
 static int video_status = PW_ERR_STATE, pad_status = PW_ERR_STATE;
 
+/* ---- the startup sound -----------------------------------------------------------------------
+ * The app's pc5/startup.wav on the controller's speaker (sceAudioOut's pad speaker port: the
+ * user's controller, 16-bit mono at 48 kHz), on a thread of its own, once when PC5 is opened:
+ * not when its screens come back after a game (the title restarted, cycle above 0). */
+enum { AUDIO_PORT_PADSPK = 4, AUDIO_FORMAT_S16_MONO = 0, AUDIO_GRAIN = 256, AUDIO_VOLUME_0DB = 0x8000,
+       AUDIO_VOLUME_FLAG_CH0 = 1 };
+
+static Pc5Sound startup_sound;
+static pthread_t sound_thread;
+static int sound_started, sound_user;
+static atomic_int sound_stop;
+
+static void *play_sound(void *argument)
+{
+    PwAudioPs5Ops ops;
+    int16_t grain[AUDIO_GRAIN];
+    int init = -1, port = -1, volume = -1, output = 0;
+    size_t played = 0;
+    char line[200];
+    (void)argument;
+
+    if (pw_audio_ps5_platform_ops(&ops) == PW_OK && (init = ops.init()) >= 0) {
+        port = ops.open(sound_user, AUDIO_PORT_PADSPK, 0, AUDIO_GRAIN, PC5_SOUND_RATE, AUDIO_FORMAT_S16_MONO);
+        if (port >= 0) {
+            int32_t volumes[8];
+            for (int i = 0; i < 8; i++) volumes[i] = AUDIO_VOLUME_0DB;
+            volume = ops.volume(port, AUDIO_VOLUME_FLAG_CH0, volumes);
+        }
+    }
+    snprintf(line, sizeof(line), "PC5 startup sound user=%d init=%d port=%d volume=%d frames=%zu", sound_user, init, port,
+             volume, startup_sound.frames);
+    plain_log(line);
+    if (port >= 0) {
+        while (played < startup_sound.frames && !atomic_load(&sound_stop)) {
+            size_t n = startup_sound.frames - played < AUDIO_GRAIN ? startup_sound.frames - played : AUDIO_GRAIN;
+            memset(grain, 0, sizeof(grain));
+            memcpy(grain, startup_sound.samples + played, n * sizeof(int16_t));
+            if ((output = ops.output(port, grain)) < 0) break;
+            played += n;
+        }
+        if (output >= 0) (void)ops.output(port, NULL);   /* until what was given is heard */
+        (void)ops.close(port);
+        snprintf(line, sizeof(line), "PC5 startup sound played=%zu output=%d", played, output);
+        plain_log(line);
+    }
+    pc5_sound_free(&startup_sound);
+    return NULL;
+}
+
+static void sound_start(const Pc5Console *config, int32_t user)
+{
+    char path[PC5_PATH], line[PC5_PATH + 80];
+    Pc5Buf file = { 0 };
+    Pc5Settings settings;
+
+    pc5_settings_load(config->root, &settings);
+    if (!settings.startup_sound || config->cycle || (config->start && config->start[0]) || user < 0) return;
+    if (pc5_format(path, sizeof(path), "%s/pc5/startup.wav", config->app) || pc5_read_file(path, &file, 16u << 20) ||
+        pc5_sound_from_wav(file.data, file.len, &startup_sound)) {
+        snprintf(line, sizeof(line), "PC5 startup sound: can't read %s", path);
+        plain_log(line);
+        pc5_buf_free(&file);
+        return;
+    }
+    pc5_buf_free(&file);
+    sound_user = user;
+    atomic_store(&sound_stop, 0);
+    sound_started = !pthread_create(&sound_thread, NULL, play_sound, NULL);
+    if (!sound_started) pc5_sound_free(&startup_sound);
+}
+
+/* Before the title is replaced or closed: the sound stops and its port is closed. */
+static void sound_end(void)
+{
+    if (!sound_started) return;
+    atomic_store(&sound_stop, 1);
+    pthread_join(sound_thread, NULL);
+    sound_started = 0;
+}
+
+/* PC5 updated itself: it closes, and the console shows its home screen. */
+static void quit(void *context)
+{
+    (void)context;
+    sound_end();
+    plain_log("PC5 closing after its update");
+    if (pad_status == PW_OK) pw_pad_ps5_close(&pad);
+    if (video_status == PW_OK) pw_videoout_ps5_close(&video);
+    pw_diagnostics_close("pc5-update");
+    _exit(0);
+}
+
 /* The game gets the screen and the pad: PC5 lets go of them first, and
  * takes them again only if the game could not be started. */
 static void play(void *context, const char *id)
@@ -161,6 +261,7 @@ static void play(void *context, const char *id)
     static const PwPadKeyMap open_map[] = { { PAD_CROSS, 0x20, 0, 0, "cross" } };
     PwPadPs5Ops ops;
     (void)context;
+    sound_end();
     if (pad_status == PW_OK) pw_pad_ps5_close(&pad);
     if (video_status == PW_OK) pw_videoout_ps5_close(&video);
     pad_status = video_status = PW_ERR_STATE;
@@ -200,7 +301,7 @@ void pc5_console_run(const Pc5Console *config)
     static PwHidPs5 hid;
     const char *usb_roots[] = { "/mnt/usb0", "/mnt/usb1", "/mnt/usb2", "/mnt/usb3", "/mnt/usb4", "/mnt/usb5",
                                 "/mnt/usb6", "/mnt/usb7", NULL };
-    char template_prefix[PC5_PATH], tile_template[PC5_PATH], fonts[PC5_PATH], line[256];
+    char template_prefix[PC5_PATH], tile_template[PC5_PATH], fonts[PC5_PATH], line[256], finished[32] = "";
     const size_t frame_bytes = (size_t)1920 * 1080 * 4;
     uint32_t *frame;
     PwPadPs5Ops pad_ops;
@@ -225,6 +326,11 @@ void pc5_console_run(const Pc5Console *config)
     plain_log(line);
     pc5_system_text(line, sizeof(line));
     plain_log(line);
+    {
+        /* What an update left, before anything reads the app's files. */
+        Pc5UpgradeConfig upgrade = { { NULL, NULL, NULL }, config->app, config->root, NULL, "/user", log_line, NULL };
+        pc5_upgrade_tidy(&upgrade, finished, sizeof(finished));
+    }
 
     frame = mmap(NULL, frame_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     video_status = pw_videoout_ps5_open(&video);
@@ -244,6 +350,7 @@ void pc5_console_run(const Pc5Console *config)
             (void)pad_ops.foreground_user(&user);
         }
         hid_status = pw_hid_ps5_open(&hid, pw_hid_ps5_system_ops(plain_log), user);
+        sound_start(config, user);
     }
     snprintf(line, sizeof(line), "PC5 devices pad=%s keyboard=%s", pw_result_name(pad_status), pw_result_name(hid_status));
     plain_log(line);
@@ -258,14 +365,16 @@ void pc5_console_run(const Pc5Console *config)
     }
 
     watch_for_crashes(config->root);
-    platform = (Pc5Platform){ NULL, { NULL, pc5_net_get }, clock_text, play, log_line, notify_text, unix_time, enter == 0 };
+    platform = (Pc5Platform){ NULL, { NULL, pc5_net_get, pc5_net_download }, clock_text, play, log_line, notify_text,
+                              unix_time, enter == 0, quit };
     {
         Pc5UiConfig ui_config = { config->root, template_prefix, fonts, usb_roots, PC5_HOME_ROOT, tile_template,
-                                  config->start };
+                                  config->start, pc5_upgrade_drives, "/user", finished };
         ui = pc5_ui_create(&ui_config, &platform);
     }
     if (!ui) {
         plain_log("PC5 out of memory");
+        sound_end();
         pw_videoout_ps5_close(&video);
         return;
     }

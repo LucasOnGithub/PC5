@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LGPL-2.1-or-later
-"""A small HTTPS server for tests/test_net.c: plain and chunked answers, a redirect, a 404.
+"""A small HTTPS server for tests/test_net.c: plain and chunked answers, redirects, a short body, a 404.
 
     tests/https_server.py PORT CERT KEY READY_FILE
 
@@ -45,6 +45,43 @@ class Handler(http.server.BaseHTTPRequestHandler):
             for part in (b'{"parts":', b'[1,2,3]', b"}"):
                 self.wfile.write(b"%x\r\n%s\r\n" % (len(part), part))
             self.wfile.write(b"0\r\n\r\n")
+        elif self.path == "/bigchunked":
+            self.send_response(200)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            at, size = 0, 1
+            while at < len(BIG):
+                part = BIG[at:at + size]
+                self.wfile.write(b"%X; x=y\r\n%s\r\n" % (len(part), part))
+                at, size = at + len(part), size * 3 + 1
+            self.wfile.write(b"0\r\nX-Trailer: 1\r\n\r\n")
+        elif self.path == "/redirect-big":
+            self.send_response(307)
+            self.send_header("Location", "big")
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
+        elif self.path == "/short":
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(BIG)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(BIG[:1000])
+        elif self.path.startswith("/dir/rq?"):
+            self.send_response(302)
+            self.send_header("Location", "file")
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
+        elif self.path == "/dir/file":
+            self.send_body(b'{"hello":"world"}')
+        elif self.path == "/longredirect":
+            self.send_response(302)
+            self.send_header("Location", "/" + "a" * 5000)
+            self.send_header("Content-Length", "0")
+            self.send_header("Connection", "close")
+            self.end_headers()
         elif self.path == "/redirect":
             self.send_response(302)
             self.send_header("Location", "/small")

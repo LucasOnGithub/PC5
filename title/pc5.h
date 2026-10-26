@@ -9,7 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define PC5_VERSION "1.6.6"
+#define PC5_VERSION "1.7.0"
 #ifndef PC5_TITLE_ID
 #define PC5_TITLE_ID "PPSA11018"
 #endif
@@ -42,6 +42,18 @@ int pc5_buf_printf(Pc5Buf *buf, const char *format, ...) __attribute__((format(p
 /* Ends the text with a 0 byte that len does not count. */
 int pc5_buf_terminate(Pc5Buf *buf);
 void pc5_buf_free(Pc5Buf *buf);
+
+/* ---- a download, a piece at a time ----------------------------------------------- */
+typedef struct Pc5Sink {
+    void *context;
+    /* Before the first piece: the body's length when the server says it (0 when it
+     * doesn't). 0, or -1 to stop. */
+    int (*begin)(void *context, uint64_t length);
+    /* A piece of the body: 0, or -1 to stop. */
+    int (*write)(void *context, const void *data, size_t size);
+    /* Asked between pieces: non-zero stops the download (NULL: never). */
+    int (*stop)(void *context);
+} Pc5Sink;
 
 /* ---- images ------------------------------------------------------------------
  * Pixels are 0xAARRGGBB, which is B, G, R, A in memory: the console's BGRX

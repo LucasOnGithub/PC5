@@ -24,6 +24,7 @@ void pc5_settings_default(Pc5Settings *settings)
     settings->trigger_resistance = 50;
     settings->check_updates = 1;
     settings->keep_logs = 0;
+    settings->startup_sound = 1;
 }
 
 static int pick(const char *value, const char *const *keys, int count, int fallback)
@@ -92,6 +93,7 @@ int pc5_settings_load(const char *root, Pc5Settings *settings)
             settings->triggers = (Pc5Triggers)pick(value, trigger_keys, PC5_TRIGGERS_COUNT, (int)settings->triggers);
         else if (!strcmp(name, "check_updates")) settings->check_updates = on_off(value, settings->check_updates);
         else if (!strcmp(name, "keep_logs")) settings->keep_logs = on_off(value, settings->keep_logs);
+        else if (!strcmp(name, "startup_sound")) settings->startup_sound = on_off(value, settings->startup_sound);
     }
     pc5_buf_free(&text);
     return 0;
@@ -109,14 +111,14 @@ int pc5_settings_save(const char *root, const Pc5Settings *settings)
                       "# PC5's settings (Settings in PC5 changes them)\n"
                       "fps = %s\nframe_time = %s\ncpu_usage = %s\ncpu_temperature = %s\nsoc_temperature = %s\n"
                       "memory = %s\nfps_corner = %s\nvibration = %d\nlight_bar = %s\ntriggers = %s\n"
-                      "trigger_rumble = %d\ntrigger_resistance = %d\ncheck_updates = %s\nkeep_logs = %s\n",
+                      "trigger_rumble = %d\ntrigger_resistance = %d\ncheck_updates = %s\nkeep_logs = %s\nstartup_sound = %s\n",
                       settings->fps ? "on" : "off", settings->frame_time ? "on" : "off",
                       settings->cpu_usage ? "on" : "off", settings->cpu_temperature ? "on" : "off",
                       settings->soc_temperature ? "on" : "off", settings->memory ? "on" : "off",
                       corner_keys[settings->fps_corner % PC5_CORNERS], settings->vibration,
                       light_keys[settings->light_bar % PC5_LIGHTS], trigger_keys[settings->triggers % PC5_TRIGGERS_COUNT],
                       settings->trigger_rumble, settings->trigger_resistance, settings->check_updates ? "on" : "off",
-                      settings->keep_logs ? "on" : "off");
+                      settings->keep_logs ? "on" : "off", settings->startup_sound ? "on" : "off");
     return pc5_write_file(path, text, (size_t)length);
 }
 

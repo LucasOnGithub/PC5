@@ -14,6 +14,10 @@ typedef struct Pc5Http {
     /* GET url into out (at most max bytes). 0 with the HTTP status in
      * *status, or -1 when no answer came at all. */
     int (*get)(void *context, const char *url, Pc5Buf *out, size_t max, int *status);
+    /* GET url, its body handed to sink as it arrives (only when the final status is
+     * 200), never held whole: 0 with the status, -1 when it failed or was stopped.
+     * NULL where there is none. */
+    int (*download)(void *context, const char *url, const Pc5Sink *sink, int *status);
 } Pc5Http;
 
 /* What PC5 knows about the game before asking. */

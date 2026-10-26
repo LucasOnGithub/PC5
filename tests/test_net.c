@@ -87,6 +87,62 @@ static int random_bytes(void *data, size_t size)
 
 static void log_line(const char *line) { fprintf(stderr, "  (%s)\n", line); }
 
+/* A download's sink: what came, and when to stop. */
+typedef struct Got {
+    uint8_t *data;
+    size_t len, cap;
+    uint64_t said;
+    int begun, stop_after;
+    int cancel;
+} Got;
+
+static int got_stop(void *context)
+{
+    return ((Got *)context)->cancel;
+}
+
+static int got_begin(void *context, uint64_t length)
+{
+    Got *got = context;
+    got->begun++;
+    got->said = length;
+    return 0;
+}
+
+static int got_write(void *context, const void *data, size_t size)
+{
+    Got *got = context;
+    if (got->len + size > got->cap) {
+        size_t cap = (got->len + size) * 2;
+        uint8_t *more = realloc(got->data, cap);
+        if (!more) return -1;
+        got->data = more;
+        got->cap = cap;
+    }
+    memcpy(got->data + got->len, data, size);
+    got->len += size;
+    if (got->stop_after && got->len >= (size_t)got->stop_after) got->cancel = 1;
+    return 0;
+}
+
+static int download(const char *url, Got *got, int *status)
+{
+    free(got->data);
+    int stop_after = got->stop_after;
+    memset(got, 0, sizeof(*got));
+    got->stop_after = stop_after;
+    Pc5Sink sink = { got, got_begin, got_write, got_stop };
+    return pc5_net_download(NULL, url, &sink, status);
+}
+
+static int is_big(const Got *got)
+{
+    if (got->len != 1 << 20) return 0;
+    for (size_t i = 0; i < got->len; i++)
+        if (got->data[i] != (uint8_t)((i * 7 + (i >> 9)) & 255)) return 0;
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     char url[256], host[64], path[64];
@@ -113,6 +169,12 @@ int main(int argc, char **argv)
           !strcmp((char *)body.data, "{\"parts\":[1,2,3]}"), "chunked: %d '%s'", status, (char *)body.data);
     snprintf(url, sizeof(url), "https://localhost:%s/redirect", argv[3]);
     CHECK(!pc5_net_get(NULL, url, &body, 1 << 20, &status) && status == 200 && body.len == 17, "redirect: %d", status);
+    snprintf(url, sizeof(url), "https://localhost:%s/dir/rq?x=/y/z", argv[3]);
+    CHECK(!pc5_net_get(NULL, url, &body, 1 << 20, &status) && status == 200 && body.len == 17,
+          "a relative redirect beside the path, not its query: %d", status);
+    snprintf(url, sizeof(url), "https://localhost:%s/longredirect", argv[3]);
+    CHECK(!pc5_net_get(NULL, url, &body, 1 << 20, &status) && status == 302, "a Location too long isn't followed: %d",
+          status);
     snprintf(url, sizeof(url), "https://localhost:%s/agent", argv[3]);
     CHECK(!pc5_net_get(NULL, url, &body, 1 << 20, &status) && strstr((char *)body.data, "PC5/"), "user agent: %s",
           (char *)body.data);
@@ -136,6 +198,34 @@ int main(int argc, char **argv)
     CHECK(pc5_net_get(NULL, "https://localhost:1/small", &body, 1 << 20, &status), "connection refused");
     CHECK(pc5_net_get(NULL, "https://no-such-host.invalid/x", &body, 1 << 20, &status), "no such name");
     pc5_buf_free(&body);
+
+    /* Downloads: the body a piece at a time, as it comes. */
+    Got got = { 0 };
+    snprintf(url, sizeof(url), "https://localhost:%s/big", argv[3]);
+    CHECK(!download(url, &got, &status) && status == 200 && got.begun == 1 && got.said == 1 << 20 && is_big(&got),
+          "download: %d %zu", status, got.len);
+    snprintf(url, sizeof(url), "https://localhost:%s/bigchunked", argv[3]);
+    CHECK(!download(url, &got, &status) && status == 200 && got.said == 0 && is_big(&got), "download chunked: %zu",
+          got.len);
+    snprintf(url, sizeof(url), "https://localhost:%s/redirect-big", argv[3]);
+    CHECK(!download(url, &got, &status) && status == 200 && got.begun == 1 && is_big(&got), "download redirected");
+    snprintf(url, sizeof(url), "https://localhost:%s/missing", argv[3]);
+    CHECK(!download(url, &got, &status) && status == 404 && !got.begun && !got.len, "download 404: %d", status);
+    snprintf(url, sizeof(url), "https://localhost:%s/short", argv[3]);
+    CHECK(download(url, &got, &status) && got.len == 1000, "a download cut short fails: %zu", got.len);
+    snprintf(url, sizeof(url), "https://localhost:%s/loop", argv[3]);
+    CHECK(download(url, &got, &status), "download: endless redirects stop");
+    snprintf(url, sizeof(url), "https://localhost:%s/big", argv[4]);
+    CHECK(download(url, &got, &status) && !got.begun, "download: an untrusted certificate is refused");
+    got.stop_after = 100000;
+    snprintf(url, sizeof(url), "https://localhost:%s/big", argv[3]);
+    CHECK(download(url, &got, &status) && got.len >= 100000 && got.len < 1 << 20, "download cancelled: %zu", got.len);
+    got.stop_after = 0;
+    /* And a plain request still works after them. */
+    snprintf(url, sizeof(url), "https://localhost:%s/small", argv[3]);
+    CHECK(!pc5_net_get(NULL, url, &body, 1 << 20, &status) && status == 200 && body.len == 17, "get after downloads");
+    pc5_buf_free(&body);
+    free(got.data);
     printf("test_net: %d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

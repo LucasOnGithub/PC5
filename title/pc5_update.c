@@ -45,6 +45,23 @@ void pc5_update_check(const Pc5Http *http, const char *current, Pc5Update *updat
         strncmp(update->url, "https://github.com/", 19))
         pc5_copy(update->url, sizeof(update->url), PC5_RELEASES_PAGE);
     update->state = pc5_version_compare(update->version, current) > 0 ? PC5_UPDATE_AVAILABLE : PC5_UPDATE_CURRENT;
+    /* The app's zip among the release's files. */
+    uint32_t assets = pc5_json_get(&json, 0, "assets");
+    for (uint32_t i = 0, asset; assets && (asset = pc5_json_item(&json, assets, i)); i++) {
+        char name[64], url[512], digest[80];
+        double size = pc5_json_number(&json, pc5_json_get(&json, asset, "size"), -1);
+        if (pc5_json_text(&json, pc5_json_get(&json, asset, "name"), name, sizeof(name)) ||
+            strcmp(name, PC5_TITLE_ID ".zip") ||
+            pc5_json_text(&json, pc5_json_get(&json, asset, "browser_download_url"), url, sizeof(url)) ||
+            strncmp(url, "https://github.com/", 19) || !(size > 0 && size <= 4e9))
+            continue;
+        pc5_copy(update->asset_url, sizeof(update->asset_url), url);
+        update->asset_size = (uint64_t)size;
+        if (!pc5_json_text(&json, pc5_json_get(&json, asset, "digest"), digest, sizeof(digest)) &&
+            !strncmp(digest, "sha256:", 7) && strlen(digest + 7) == 64 && strspn(digest + 7, "0123456789abcdef") == 64)
+            pc5_copy(update->asset_sha256, sizeof(update->asset_sha256), digest + 7);
+        break;
+    }
 out:
     pc5_json_free(&json);
     pc5_buf_free(&body);

@@ -29,6 +29,11 @@ void pc5_net_init(const Pc5NetOps *ops);
  * HTTP status. 0 when an answer came, -1 when none did (no network, no name,
  * a certificate that doesn't check out). */
 int pc5_net_get(void *context, const char *url, Pc5Buf *out, size_t max, int *status);
+/* GET url (https:// only), following redirects, its body handed to sink as it arrives
+ * when the final status is 200 (Content-Length or chunked). 0 with *status the final
+ * HTTP status (nothing reaches sink for another status), -1 when no full answer came
+ * or sink stopped it. One request at a time: a GET waits for a download to end. */
+int pc5_net_download(void *context, const char *url, const Pc5Sink *sink, int *status);
 
 /* For the tests: parse "https://host[:port]/path". */
 int pc5_url_split(const char *url, char *host, size_t host_size, uint16_t *port, char *path, size_t path_size);

@@ -202,5 +202,20 @@ With ShadowMountPlus and elfldr running.
 | 88 | Install a game whose folder has a `Launch.bat` that starts its program with options | the review screen offers `Launch.bat` first, with the program's bits and graphics; the game starts with the batch file's options | `PC5 install … exe=Launch.bat`, the profile's `arguments =` holds them |
 | 89 | △ › Change program on that game, choose the game's `.exe`, then the `.bat` again | each starts the game | |
 
+## Updating itself and the startup sound (1.7.0)
+
+| # | Do | Expect | Expect in the log |
+| --- | --- | --- | --- |
+| 90 | Open PC5 | its sound plays on the controller's speaker | `PC5 startup sound user=… init=0 port=…` (port not negative), then `played=… output=0` |
+| 91 | Start a game, leave it | no sound when PC5's screens are back | no `PC5 startup sound` line in that session |
+| 92 | Settings › In games › Startup sound: Off; close PC5 and open it | no sound | no `PC5 startup sound` line |
+| 93 | With a newer release on GitHub, open PC5 | it asks: Update now or Later | `PC5 update state=4 latest=… zip=1` |
+| 94 | Later | the library; Settings › Updates shows Update now | `PC5 update later` |
+| 95 | Update now, then ○ during the download | it stops; PC5 is as it was | `PC5 update stopped: Cancelled.` |
+| 96 | Update now, let it finish | the progress bar through download and unpacking, then "PC5 x.y.z is installed"; ✕ closes PC5 | `PC5 update folder=…`, `download rc=0 status=200`, `replaced=…`, `registration copies=…`, `done` |
+| 97 | Open PC5 from the home screen | the new version (Settings › About PC5); games, saves and settings as before | `PC5 start version=…` the new one |
+| 98 | PC5 installed on a USB drive (homebrew folder), Update now | as on /data; the work folder `pc5-update` on that drive is gone afterwards | `PC5 update folder=/mnt/usb…` |
+
 A non-zero `rc=` on the light bar or triggers lines means the console refused that call; send
-that log.
+that log. On the startup sound line, a negative `port=` means the console refused the
+controller's speaker.
