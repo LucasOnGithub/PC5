@@ -472,9 +472,11 @@ void pc5_game_begin(Pc5GameSession *game, const Pc5GameOps *ops, const char *roo
         unlink(handoff);   /* one left from before was never taken */
         setenv("PW_HANDOFF", handoff, 1);
         setenv("PW_HANDOFF_DIR", handoff_dir, 1);
+        setenv("PW_HANDOFF_LOCALAPPDATA", PC5_HANDOFF_LOCALAPPDATA, 1);
     } else {
         unsetenv("PW_HANDOFF");
         unsetenv("PW_HANDOFF_DIR");
+        unsetenv("PW_HANDOFF_LOCALAPPDATA");
     }
     if (memory_2gb) setenv("PW_LARGE_ADDRESS_AWARE", "0", 1);
     else unsetenv("PW_LARGE_ADDRESS_AWARE");
