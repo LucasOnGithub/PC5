@@ -41,14 +41,18 @@ jobs:
           df -h / /mnt; free -g
 
       - name: Packages
-        timeout-minutes: 25
-        # man-db's index, rebuilt after every package, is what makes this slow on these machines.
+        timeout-minutes: 15
+        # Only Ubuntu's own sources (the machine's others, Microsoft's and the like, can stall a
+        # download), short timeouts with retries, and without man-db's index, which is rebuilt
+        # after every package.
         run: |
           mkdir -p .build/logs
           {
             sudo rm -f /var/lib/man-db/auto-update
-            sudo apt-get update -q
-            sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+            sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete
+            apt="-o Acquire::Retries=5 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+            sudo apt-get update -q $apt
+            sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends $apt \
               -o Dpkg::Use-Pty=0 -o DPkg::Lock::Timeout=300 $(cat tools/packages.txt)
           } 2>&1 | tee .build/logs/packages.log
           exit "${PIPESTATUS[0]}"
