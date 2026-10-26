@@ -40,13 +40,14 @@ jobs:
           sudo mkswap /mnt/pc5/swap >/dev/null && sudo swapon /mnt/pc5/swap
           df -h / /mnt; free -g
 
-      - name: Packages
+      - name: 1/12 Packages
         timeout-minutes: 15
         # Only Ubuntu's own sources (the machine's others, Microsoft's and the like, can stall a
         # download), short timeouts with retries, and without man-db's index, which is rebuilt
         # after every package.
         run: |
           mkdir -p .build/logs
+          bash tools/ci-step.sh 1
           {
             sudo rm -f /var/lib/man-db/auto-update
             sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete
@@ -57,8 +58,8 @@ jobs:
           } 2>&1 | tee .build/logs/packages.log
           exit "${PIPESTATUS[0]}"
 
-      - name: Sources
-        run: bash tools/build.sh sources
+      - name: 2/12 Sources
+        run: bash tools/ci-step.sh 2 sources
 
       - name: Cache keys
         id: keys
@@ -82,27 +83,27 @@ jobs:
           path: .build/dxvk
           key: ${{ steps.keys.outputs.dxvk }}
 
-      - name: Title
-        run: bash tools/build.sh title
+      - name: 3/12 Title (PC5 itself)
+        run: bash tools/ci-step.sh 3 title
 
-      - name: RADV
-        run: bash tools/build.sh radv
+      - name: 4/12 RADV (the PS5's Vulkan driver)
+        run: bash tools/ci-step.sh 4 radv
 
-      - name: Wine for this computer
-        run: bash tools/build.sh hostwine
+      - name: 5/12 Wine for this computer
+        run: bash tools/ci-step.sh 5 hostwine
 
-      - name: Wine for the PS5
-        run: bash tools/build.sh wineps5
+      - name: 6/12 Wine for the PS5
+        run: bash tools/ci-step.sh 6 wineps5
 
-      - name: 32-bit games' CPU
-        run: bash tools/build.sh cpu
+      - name: 7/12 32-bit games' CPU
+        run: bash tools/ci-step.sh 7 cpu
 
-      - name: DXVK
-        run: bash tools/build.sh dxvk
+      - name: 8/12 DXVK
+        run: bash tools/ci-step.sh 8 dxvk
 
-      - name: Zink
+      - name: 9/12 Zink
         if: steps.zink.outputs.cache-hit != 'true'
-        run: bash tools/build.sh zink
+        run: bash tools/ci-step.sh 9 zink
 
       - name: Keep Zink
         if: steps.zink.outputs.cache-hit != 'true'
@@ -118,12 +119,13 @@ jobs:
           path: .build/dxvk
           key: ${{ steps.keys.outputs.dxvk }}
 
-      - name: Package, app and sources
-        run: bash tools/build.sh package app bundle
+      - name: 10/12 Package, app and sources
+        run: bash tools/ci-step.sh 10 package app bundle
 
-      - name: The archives
+      - name: 11/12 The archives
         id: archives
         run: |
+          bash tools/ci-step.sh 11
           mono=$(sed -n 's/^MONO_VERSION=//p' tools/build.sh)
           cp ".build/downloads/wine-mono-$mono-src.tar.xz" "$PC5_RELEASE/"
           version=$(sed -n 's/^#define PC5_VERSION "\(.*\)"/\1/p' title/pc5.h)
@@ -138,7 +140,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Draft release
+      - name: 12/12 Draft release
         if: inputs.draft_release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -146,6 +148,7 @@ jobs:
         # Notes from release-notes/<version>.md. A draft left by an earlier run is replaced;
         # a published release is never touched.
         run: |
+          bash tools/ci-step.sh 12
           tag="v$VERSION"
           state=$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null || echo none)
           if [ "$state" = false ]; then
