@@ -64,9 +64,33 @@ int pc5_background_needed(const char *root, const Pc5BackgroundGame *game)
     return !pc5_exists(saved) && !pc5_exists(none);
 }
 
+/* A note of PC5's beside the game's background (pc5/<name>), its folder made when the game
+ * is still there (a game prospero-win installed has none yet). */
+static int write_note(const Pc5Backgrounds *b, const Pc5BackgroundGame *game, const char *name, const char *text)
+{
+    char path[PC5_PATH];
+    if (pc5_format(path, sizeof(path), "%s/prefixes/%s/system.reg", b->root, game->prefix) || !pc5_is_file(path) ||
+        pc5_format(path, sizeof(path), "%s/prefixes/%s/pc5", b->root, game->prefix) || pc5_mkdirs(path) ||
+        note_path(b->root, game->prefix, name, path, sizeof(path)))
+        return -1;
+    return pc5_write_file(path, text, strlen(text));
+}
+
+/* Waits while the worker is asked to (the screens use the network); 1 when it is to stop. */
+static int wait_turn(Pc5Backgrounds *b)
+{
+    while (atomic_load(&b->pause) && !atomic_load(&b->stop)) usleep(100000);
+    return atomic_load(&b->stop);
+}
+
 static int save(Pc5Backgrounds *b, const Pc5BackgroundGame *game, const Pc5Image *background, const char *from)
 {
     char path[PC5_PATH], dir[PC5_PATH], none[PC5_PATH];
+    /* A game being uninstalled (its Windows moved away) gets no folder made for it. */
+    if (pc5_format(path, sizeof(path), "%s/prefixes/%s/system.reg", b->root, game->prefix) || !pc5_is_file(path)) {
+        note(b, "PC5 background game=%s: the game is gone", game->id);
+        return -1;
+    }
     if (pc5_background_path(b->root, game->prefix, path, sizeof(path)) ||
         pc5_format(dir, sizeof(dir), "%s/prefixes/%s/pc5", b->root, game->prefix) || pc5_mkdirs(dir) ||
         pc5_cover_save(path, background, 0)) {
@@ -74,6 +98,7 @@ static int save(Pc5Backgrounds *b, const Pc5BackgroundGame *game, const Pc5Image
         return -1;
     }
     if (!note_path(b->root, game->prefix, "background-none.txt", none, sizeof(none))) unlink(none);
+    if (!note_path(b->root, game->prefix, "background-tries.txt", none, sizeof(none))) unlink(none);
     note(b, "PC5 background game=%s from=%s", game->id, from);
     atomic_fetch_add(&b->generation, 1);
     return 0;
@@ -94,6 +119,7 @@ static void one(Pc5Backgrounds *b, const Pc5BackgroundGame *game)
         return;
     }
     /* The background of the cover chosen at the install. */
+    if (wait_turn(b)) return;
     if (!note_path(b->root, game->prefix, "background.txt", path, sizeof(path)) &&
         !pc5_read_file(path, &text, 4096)) {
         char *url = (char *)text.data, *line = strchr(url, '\n');
@@ -117,12 +143,16 @@ static void one(Pc5Backgrounds *b, const Pc5BackgroundGame *game)
     hint.picture[0] = 0;
     hint.picture_only = 0;
     pc5_cover_search_start(search, &hint);
-    while (!atomic_load(&b->stop) && pc5_cover_search_step(search, &b->http)) {
+    while (!wait_turn(b) && pc5_cover_search_step(search, &b->http)) {
     }
-    int saved = 0;
-    for (int i = 0; i < search->count && !saved && !atomic_load(&b->stop); i++) {
+    int saved = 0, offered = 0;
+    for (int i = 0; i < search->count && !saved && !wait_turn(b); i++) {
         const Pc5CoverChoice *choice = &search->choices[i];
         if (!choice->background[0] && !choice->steam_appid) continue;
+        /* The same game as the best match, not a sequel or another game that scored lower. */
+        if (i && pc5_casecmp(choice->title, search->choices[0].title) && choice->score < search->choices[0].score - 10)
+            continue;
+        offered = 1;
         if (!pc5_background_fetch(choice->background, choice->steam_appid, &b->http, &background)) {
             char from[48];
             snprintf(from, sizeof(from), "%s", choice->source);
@@ -130,11 +160,21 @@ static void one(Pc5Backgrounds *b, const Pc5BackgroundGame *game)
             pc5_image_free(&background);
         }
     }
-    /* No source has one: kept as it is, and asked again only once there is a picture of the player's. */
-    if (!saved && search->answered && !atomic_load(&b->stop) &&
-        !note_path(b->root, game->prefix, "background-none.txt", path, sizeof(path))) {
-        pc5_write_file(path, "none\n", 5);
-        note(b, "PC5 background game=%s: none found", game->id);
+    /* None to have: kept as it is, and asked again only once there is a picture of the player's.
+     * Steam or GOG answered without one; or there were some and they couldn't be fetched three
+     * starts running (the network, or a store without the picture). */
+    if (!saved && !atomic_load(&b->stop)) {
+        int none = !offered && search->answered_stores;
+        if (offered && !note_path(b->root, game->prefix, "background-tries.txt", path, sizeof(path))) {
+            char text[16];
+            Pc5Buf tries = { 0 };
+            int count = !pc5_read_file(path, &tries, 16) && !pc5_buf_terminate(&tries) ? atoi((char *)tries.data) : 0;
+            pc5_buf_free(&tries);
+            snprintf(text, sizeof(text), "%d\n", ++count);
+            write_note(b, game, "background-tries.txt", text);
+            none = count >= 3;
+        }
+        if (none && !write_note(b, game, "background-none.txt", "none\n")) note(b, "PC5 background game=%s: none found", game->id);
     }
     pc5_free(search);
 }

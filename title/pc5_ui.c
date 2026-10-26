@@ -290,7 +290,8 @@ struct Pc5Ui {
     int bg_selected;
     uint64_t bg_selected_at;       /* when the chosen game changed */
     uint32_t *bg, *bg_old;         /* the background as drawn (W x H), and the one fading out */
-    int bg_has, bg_old_has;
+    int bg_has, bg_old_has, bg_fading;
+    int64_t bg_changed;            /* the shown background's file: its time and size */
     uint64_t bg_fade_at;
 
     uint8_t *falloff;              /* the glow's shape, 0-255 per pixel */
@@ -332,6 +333,12 @@ static void go(Pc5Ui *ui, Screen screen)
     if (screen == S_LAUNCH || ui->runtime_state == 1) ui->runtime_state = 0;
     ui->screen = screen;
     ui->entered = ui->now;
+    /* The backgrounds' worker waits while these screens use the network, so they don't wait for it. */
+    atomic_store(&ui->backgrounds.pause,
+                 screen == S_SCAN || screen == S_SOURCES || screen == S_READING || screen == S_SEARCH ||
+                 screen == S_REVIEW || screen == S_PROGRAMS || screen == S_INSTALL || screen == S_STOP ||
+                 screen == S_QUEUE_READ || screen == S_QUEUE || screen == S_CHECKING || screen == S_UPGRADE_ASK ||
+                 screen == S_UPGRADING || screen == S_GAME_UPDATE_ASK || screen == S_SAVES_ASK || screen == S_REPORT);
     ui->drawn = 0;
     ui->dirty = 1;
     say(ui, "PC5 screen=%s", screen_names[screen]);
@@ -897,7 +904,7 @@ static void background_prepare(const Pc5Image *small, uint32_t *out)
 }
 
 /* The chosen game's background, looked for once it stays chosen a moment, and again when
- * the worker has saved one for a game that had none. */
+ * the worker has saved one: for a game that had none, or a newer one (its file changed). */
 static void background_follow(Pc5Ui *ui)
 {
     char path[PC5_PATH];
@@ -910,16 +917,20 @@ static void background_follow(Pc5Ui *ui)
     unsigned generation = atomic_load(&ui->backgrounds.generation);
     const char *id = ui->library.count ? ui->library.games[ui->selected].id : "";
     int same = !strcmp(id, ui->bg_id) && ui->bg_id[0];
-    if (same && (generation == ui->bg_generation || ui->bg_has)) {
-        ui->bg_generation = generation;
-        return;
-    }
+    if (same && generation == ui->bg_generation) return;
     if (!same && ui->now - ui->bg_selected_at < BG_SETTLE_MS && ui->bg_id[0]) return;
     ui->bg_generation = generation;
-    int ok = ui->library.count &&
-             !pc5_background_path(ui->root, ui->library.games[ui->selected].prefix, path, sizeof(path)) &&
-             !pc5_cover_load(path, &small, NULL) && small.w == PC5_BACKGROUND_WIDTH && small.h == PC5_BACKGROUND_HEIGHT;
+    struct stat st;
+    int64_t changed = 0;
+    int have = ui->library.count &&
+               !pc5_background_path(ui->root, ui->library.games[ui->selected].prefix, path, sizeof(path)) && !stat(path, &st);
+    if (have) changed = (int64_t)st.st_mtime * 1000000000 + (int64_t)st.st_size;
+    /* Another game's saved: the chosen one's file is as it was. */
+    if (same && (!have || (ui->bg_has && changed == ui->bg_changed))) return;
+    int ok = have && !pc5_cover_load(path, &small, NULL) && small.w == PC5_BACKGROUND_WIDTH &&
+             small.h == PC5_BACKGROUND_HEIGHT;
     if (same && !ok) { pc5_image_free(&small); return; }
+    ui->bg_changed = ok ? changed : 0;
     pc5_copy(ui->bg_id, sizeof(ui->bg_id), id[0] ? id : "-");
     if ((ok || ui->bg_has) && !ui->bg && !(ui->bg = pc5_alloc((size_t)W * H * 4))) ok = 0;
     if ((ok || ui->bg_has) && !ui->bg_old && !(ui->bg_old = pc5_alloc((size_t)W * H * 4))) ok = 0;
@@ -1018,6 +1029,7 @@ static void begin_update(Pc5Ui *ui)
     ui->installing = 1;
     speed_reset(ui);
     say(ui, "PC5 update id=%s from=%s exe=%s", ui->launch_id, ui->folder.path, ui->install.info.exe);
+    atomic_store(&ui->backgrounds.stop, 1);   /* not to save into the game while it changes */
     go(ui, S_INSTALL);
 }
 
@@ -1783,8 +1795,15 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
         if (step == PC5_UPGRADE_DONE) {
             if (k & (accept | back)) {
                 say(ui, "PC5 update restarting PC5");
-                if (ui->platform.restart) ui->platform.restart(ui->platform.context);
-                to_library(ui);
+                if (ui->platform.restart) {
+                    ui->platform.restart(ui->platform.context);
+                    /* Still here: the console refused to start PC5 again or to close it. */
+                    say(ui, "PC5 problem restart: the console refused");
+                    message(ui, 0, "PC5 couldn't restart",
+                            "The new version is installed. Close PC5 from the PS button and open it again.", S_LIBRARY);
+                } else {
+                    to_library(ui);
+                }
             }
             break;
         }
@@ -2336,6 +2355,7 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
                 ui->removing_kind = keep && ui->button == 1;
                 pc5_copy(id, sizeof(id), game->id);
                 say(ui, "PC5 uninstall id=%s prefix=%s keep_saves=%d", game->id, game->prefix, ui->removing_kind);
+                atomic_store(&ui->backgrounds.stop, 1);   /* not to save into the game as it goes */
                 int begun = ui->removing_kind ? pc5_remove_keep_saves(&ui->remove, ui->root, game, &ui->library)
                                               : pc5_remove_begin(&ui->remove, ui->root, game, &ui->library);
                 /* It couldn't begin and the game's folder is where it was: nothing changed. */
@@ -2462,7 +2482,9 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
         if (ui->screen == S_LIBRARY) backgrounds_refresh(ui);
         background_follow(ui);
     }
-    if (ui->now - ui->bg_fade_at < BG_FADE_MS) ui->dirty = 1;
+    /* The fade, and one frame after it, so its last frame is the whole new picture. */
+    if (ui->now - ui->bg_fade_at < BG_FADE_MS) ui->dirty = 1, ui->bg_fading = 1;
+    else if (ui->bg_fading) ui->dirty = 1, ui->bg_fading = 0;
     /* The covers slide; the glow follows the chosen cover's colour. */
     if (ui->screen != S_START && ui->screen != S_COVERS && ui->screen != S_UPDATE && ui->screen != S_LIBRARY &&
         ui->screen != S_UNINSTALL_LIST && covers_near(ui))

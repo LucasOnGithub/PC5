@@ -85,7 +85,8 @@ int pc5_settings_load(const char *root, Pc5Settings *settings)
             pc5_copy(sound, sizeof(sound), v);
             for (size_t n = strlen(sound); n && (sound[n - 1] == ' ' || sound[n - 1] == '\r' || sound[n - 1] == '\t'); n--)
                 sound[n - 1] = 0;
-            if (!strcmp(sound, "on")) pc5_copy(sound, sizeof(sound), "PC5");   /* 1.7.0's */
+            if (!pc5_casecmp(sound, "on")) pc5_copy(sound, sizeof(sound), "PC5");   /* 1.7.0's */
+            if (!pc5_casecmp(sound, "off")) pc5_copy(sound, sizeof(sound), "off");
             if (sound[0] && !strchr(sound, '/')) pc5_copy(settings->startup_sound, sizeof(settings->startup_sound), sound);
             continue;
         }

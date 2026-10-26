@@ -106,8 +106,9 @@ static void list_in(const char *dir, Pc5SoundList *list)
     if (!folder) return;
     while ((entry = readdir(folder)) && list->count < PC5_SOUNDS) {
         size_t n = strlen(entry->d_name);
-        if (entry->d_name[0] == '.' || n <= 4 || n - 4 >= PC5_SOUND_NAME || !pc5_ends_with_ci(entry->d_name, ".wav"))
-            continue;
+        if (entry->d_name[0] == '.' || n <= 4 || n - 4 >= PC5_SOUND_NAME || !pc5_ends_with_ci(entry->d_name, ".wav") ||
+            entry->d_name[0] == ' ' || entry->d_name[0] == '\t' || entry->d_name[n - 5] == ' ' || entry->d_name[n - 5] == '\t')
+            continue;   /* a name the settings file couldn't keep as it is */
         char name[PC5_SOUND_NAME];
         memcpy(name, entry->d_name, n - 4);
         name[n - 4] = 0;

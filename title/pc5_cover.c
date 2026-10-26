@@ -367,6 +367,7 @@ static void steam_search(Pc5CoverSearch *search, const Pc5Http *http, const char
         return;
     if (!ask(http, url, &json, &answer)) {
         search->answered++;
+        search->answered_stores++;
         uint32_t items = pc5_json_get(&json, 0, "items");
         for (uint32_t i = 0; i < 8; i++) {
             uint32_t item = pc5_json_item(&json, items, i);
@@ -398,6 +399,7 @@ static void gog_search(Pc5CoverSearch *search, const Pc5Http *http, const char *
         return;
     if (!ask(http, url, &json, &answer)) {
         search->answered++;
+        search->answered_stores++;
         uint32_t products = pc5_json_get(&json, 0, "products");
         for (uint32_t i = 0; i < 5; i++) {
             uint32_t product = pc5_json_item(&json, products, i);

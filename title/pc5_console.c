@@ -237,7 +237,8 @@ static void sound_play(const char *name)
         plain_log(line);
         return;
     }
-    if (pc5_read_file(path, &file, 32u << 20) || pc5_sound_from_wav(file.data, file.len, &startup_sound)) {
+    /* 30 s of the biggest WAV PC5 reads (192 kHz, stereo, 32-bit float) and its header. */
+    if (pc5_read_file(path, &file, 48u << 20) || pc5_sound_from_wav(file.data, file.len, &startup_sound)) {
         snprintf(line, sizeof(line), "PC5 startup sound: can't read %s", path);
         plain_log(line);
         pc5_buf_free(&file);
@@ -294,8 +295,19 @@ static void restart(void *context)
     }
     plain_log("PC5 closing after its update");
     pw_diagnostics_close("pc5-update");
-    sceSystemServiceLoadExec("exit", NULL);
-    for (;;) usleep(100000);   /* the console ends the process */
+    int rc = sceSystemServiceLoadExec("exit", NULL);
+    pw_diagnostics_resume();
+    if (rc >= 0)
+        for (int i = 0; i < 50; i++) usleep(100000);   /* the console ends the process */
+    /* Refused, or still here: the screen and the pad back, and the player told (pc5_ui). */
+    snprintf(line, sizeof(line), "PC5 close refused rc=0x%08x", (unsigned)rc);
+    plain_log(line);
+    {
+        static const PwPadKeyMap open_map[] = { { PAD_CROSS, 0x20, 0, 0, "cross" } };
+        PwPadPs5Ops ops;
+        video_status = pw_videoout_ps5_open(&video);
+        if (pw_pad_ps5_platform_ops(&ops) == PW_OK) pad_status = pw_pad_ps5_open(&pad, &ops, open_map, 1);
+    }
 }
 
 /* The game gets the screen and the pad: PC5 lets go of them first, and

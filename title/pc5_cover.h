@@ -49,6 +49,7 @@ typedef struct Pc5CoverSearch {
     /* where the search is */
     char queries[3][PC5_NAME];
     int query_count, step, requests, answered;
+    int answered_stores;          /* of those, Steam's and GOG's (which have backgrounds) */
     Pc5CoverHint hint;
 } Pc5CoverSearch;
 

@@ -2106,8 +2106,8 @@ static void test_backgrounds(void)
         snprintf(games[i].prefix, sizeof(games[i].prefix), "game%d", i);
         pc5_copy(games[i].title, sizeof(games[i].title), titles[i]);
         pc5_copy(games[i].hint.folder, sizeof(games[i].hint.folder), titles[i]);
-        path(file, sizeof(file), "%s/prefixes/game%d/pc5", base, i);
-        pc5_mkdirs(file);
+        path(file, sizeof(file), "%s/prefixes/game%d/system.reg", base, i);
+        write_text(file, "registry");
     }
     path(own, sizeof(own), "%s/backgrounds/own picture.png", base);
     {
@@ -2146,6 +2146,23 @@ static void test_backgrounds(void)
     pc5_image_free(&background);
     path(file, sizeof(file), "%s/prefixes/game2/pc5/background-none.txt", base);
     CHECK(!pc5_exists(file), "its none note gone");
+    /* A game whose Windows went (uninstalled while the worker looked): nothing made for it. */
+    {
+        Pc5BackgroundGame *gone = pc5_alloc(sizeof(*gone));   /* games went with the worker */
+        pc5_copy(gone->title, sizeof(gone->title), "Neon Drift");
+        pc5_copy(gone->hint.folder, sizeof(gone->hint.folder), "Neon Drift");
+        snprintf(gone->prefix, sizeof(gone->prefix), "gone");
+        snprintf(gone->id, sizeof(gone->id), "gone");
+        memset(&b, 0, sizeof(b));
+        pc5_copy(b.root, sizeof(b.root), base);
+        b.http = http;
+        b.games = gone;
+        b.count = 1;
+        pc5_backgrounds_run(&b);
+        pc5_free(gone);
+        path(file, sizeof(file), "%s/prefixes/gone", base);
+        CHECK(!pc5_exists(file) && atomic_load(&b.generation) == 0, "no folder made for a game that is gone");
+    }
 }
 
 /* The library with the chosen game's background behind it. */
