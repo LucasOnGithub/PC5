@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SuperLeiyan <5438286+SuperLeiyan@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 11:55:40 +1030
+Subject: [PATCH] d3d9: A shared render target surface can be sampled
+
+Some games' movie players make the movie frame with
+IDirect3DDevice9::CreateRenderTarget and a shared handle, then open it
+on their Direct3D 11 device with OpenSharedResource as an
+ID3D11Texture2D. D3D9 makes render target surfaces attachment-only (no
+VK_IMAGE_USAGE_SAMPLED_BIT), while the texture D3D11 makes from the
+shared description (shader resource and render target) samples it, so
+the image shared within the process was refused: "The texture shared
+within the process does not match its description".
+
+A shared surface now gets the sampled usage, as a shared texture has
+it. The refusal also names each property of both images, so the next
+mismatch says which one it is.
+---
+ src/d3d11/d3d11_texture.cpp      | 15 +++++++++++++--
+ src/d3d9/d3d9_common_texture.cpp |  4 +++-
+ 2 files changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/src/d3d11/d3d11_texture.cpp b/src/d3d11/d3d11_texture.cpp
+index 08b8fad5..26a0b42c 100644
+--- a/src/d3d11/d3d11_texture.cpp
++++ b/src/d3d11/d3d11_texture.cpp
+@@ -256,8 +256,19 @@ namespace dxvk {
+        || shared.extent.width != imageInfo.extent.width || shared.extent.height != imageInfo.extent.height
+        || shared.extent.depth != imageInfo.extent.depth || shared.mipLevels != imageInfo.mipLevels
+        || shared.numLayers != imageInfo.numLayers || shared.sampleCount != imageInfo.sampleCount
+-       || (shared.usage & imageInfo.usage) != imageInfo.usage)
+-        throw DxvkError("D3D11: The texture shared within the process does not match its description");
++       || (shared.usage & imageInfo.usage) != imageInfo.usage) {
++        throw DxvkError(str::format(
++          "D3D11: The texture shared within the process does not match its description:",
++          "\n  Format:  ", shared.format, " (shared) / ", imageInfo.format, " (opened)", formatOk ? "" : " MISMATCH",
++          "\n  Type:    ", shared.type, " / ", imageInfo.type,
++          "\n  Extent:  ", shared.extent.width, "x", shared.extent.height, "x", shared.extent.depth,
++                    " / ", imageInfo.extent.width, "x", imageInfo.extent.height, "x", imageInfo.extent.depth,
++          "\n  Levels:  ", shared.mipLevels, " / ", imageInfo.mipLevels,
++          "\n  Layers:  ", shared.numLayers, " / ", imageInfo.numLayers,
++          "\n  Samples: ", shared.sampleCount, " / ", imageInfo.sampleCount,
++          "\n  Usage:   0x", std::hex, shared.usage, " / 0x", imageInfo.usage,
++          ", missing 0x", (imageInfo.usage & ~shared.usage), std::dec));
++      }
+ 
+       m_image = SharedImage;
+     } else if (!vkImage)
+diff --git a/src/d3d9/d3d9_common_texture.cpp b/src/d3d9/d3d9_common_texture.cpp
+index b0d02e7f..4b8fd814 100644
+--- a/src/d3d9/d3d9_common_texture.cpp
++++ b/src/d3d9/d3d9_common_texture.cpp
+@@ -391,7 +391,9 @@ namespace dxvk {
+ 
+     DecodeMultiSampleType(m_device->GetDXVKDevice(), m_desc.MultiSample, m_desc.MultisampleQuality, &imageInfo.sampleCount);
+ 
+-    if (!m_desc.IsAttachmentOnly)
++    // A shared render target surface is attachment-only in D3D9, but the
++    // D3D11 device that opens it reads it as a shader resource.
++    if (!m_desc.IsAttachmentOnly || LocalShare || pSharedHandle)
+       imageInfo.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+ 
+     // The image must be marked as mutable if it can be reinterpreted
