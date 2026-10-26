@@ -8,6 +8,12 @@ discussion but not edit one afterwards ("Resource not accessible by integration"
 Run by .github/workflows/compatibility.yml with GITHUB_TOKEN and GITHUB_REPOSITORY. Each
 report is a discussion made with .github/DISCUSSION_TEMPLATE/game-compatibility.yml, whose
 body GitHub writes as "### <label>" headings, each followed by its answer.
+
+A report that a game doesn't run lists only on the maintainer's word: it names an issue in this
+repository (with the game's log), and the game shows as being looked at while that issue is
+open, and as not running once the maintainer closes it as not planned or labels it wontfix. A
+report without such an issue gets one comment saying so and is closed; edited to name one, it
+opens again. The maintainer's own reports list as posted.
 """
 import json
 import os
@@ -26,15 +32,24 @@ RESULTS = {  # the form's answers, best first, with the mark the table shows
     "Starts but not playable": "🟠 Starts but not playable",
     "Doesn't start": "❌ Doesn't start",
 }
+NOT_RUNNING = ("Starts but not playable", "Doesn't start")
+LOOKED_AT = "🔍 Being looked at"   # a report whose issue is still open
+SHOWN = ["Works perfectly", "Playable with issues", LOOKED_AT, "Starts but not playable", "Doesn't start"]
+MARK = "<!-- pc5-compatibility: needs an issue -->"   # the Action's comment, so it is made once
+UNKNOWN = {}   # an issue that couldn't be looked up: the report waits for the next run
 
 
-def graphql(query: str, **variables) -> dict:
+def graphql(query: str, fatal: bool = True, **variables):
+    """The answer's data. An error stops the run, or, with fatal False, is a warning and None."""
     request = urllib.request.Request(
         "https://api.github.com/graphql",
         data=json.dumps({"query": query, "variables": variables}).encode(),
         headers={"Authorization": f"bearer {os.environ['GITHUB_TOKEN']}", "Content-Type": "application/json"})
     with urllib.request.urlopen(request, timeout=60) as response:
         answer = json.load(response)
+    if answer.get("errors") and not fatal:
+        print(f"::warning::compatibility list: {json.dumps(answer['errors'])[:900]}")
+        return None
     if answer.get("errors"):
         # As an annotation too, which the run's page shows without opening its log.
         print(f"::error::compatibility list: {json.dumps(answer['errors'])[:900]}")
@@ -83,7 +98,8 @@ def main() -> int:
               discussions(first: 100, after: $after, categoryId: $category,
                           orderBy: {field: CREATED_AT, direction: ASC}) {
                 pageInfo { hasNextPage endCursor }
-                nodes { id number title url body createdAt author { login } upvoteCount locked }
+                nodes { id number title url body createdAt author { login } upvoteCount locked closed
+                        comments(first: 50) { nodes { body author { login } } } }
               } } }""", owner=owner, name=name, category=category["id"], after=after)
         discussions = page["repository"]["discussions"]
         for discussion in discussions["nodes"]:
@@ -95,8 +111,28 @@ def main() -> int:
             result = fields.get("How it runs", "")
             if not game or result not in RESULTS:
                 continue   # not made with the form
+            author = (discussion["author"] or {}).get("login", "")
+            shown, issue = result, None
+            if result in NOT_RUNNING and author.casefold() != owner.casefold():
+                issue = linked_issue(owner, name, fields.get("Issue", ""))
+                asked = any(MARK in (c["body"] or "") for c in discussion["comments"]["nodes"])
+                if issue is UNKNOWN:
+                    continue   # not listed this time, and nothing said or closed on a failed lookup
+                if issue is None:
+                    needs_issue(discussion, owner, name, asked)
+                    continue
+                if asked and discussion["closed"] and graphql(
+                        """mutation($id: ID!) { reopenDiscussion(input: {discussionId: $id}) { discussion { id } } }""",
+                        fatal=False, id=discussion["id"]) is not None:
+                    print(f"compatibility list: #{discussion['number']} names issue #{issue['number']}: opened again")
+                if issue["state"] == "OPEN":
+                    shown = LOOKED_AT
+                elif not (issue["stateReason"] == "NOT_PLANNED" or "wontfix" in issue["labels"]):
+                    continue   # fixed: not a game that doesn't run any more
+            elif result in NOT_RUNNING:
+                issue = linked_issue(owner, name, fields.get("Issue", "")) or None
             reports.append({
-                "game": game, "result": result, "pc5": fields.get("PC5 version", ""),
+                "game": game, "result": result, "shown": shown, "issue": issue, "pc5": fields.get("PC5 version", ""),
                 "edition": fields.get("Store and version", ""), "controller": fields.get("Controller mode", ""),
                 "settings": fields.get("Settings that helped", ""), "notes": fields.get("Notes", ""),
                 "url": discussion["url"], "number": discussion["number"],
@@ -107,29 +143,31 @@ def main() -> int:
             break
         after = discussions["pageInfo"]["endCursor"]
 
-    order = list(RESULTS)
-    reports.sort(key=lambda r: (r["game"].casefold(), order.index(r["result"]), r["date"]))
+    reports.sort(key=lambda r: (r["game"].casefold(), SHOWN.index(r["shown"]), r["date"]))
     games = {r["game"].casefold() for r in reports}
-    counts = {result: sum(1 for r in reports if r["result"] == result) for result in RESULTS}
+    counts = {shown: sum(1 for r in reports if r["shown"] == shown) for shown in SHOWN}
     add = f"https://github.com/{owner}/{name}/discussions/new?category=game-compatibility"
     lines = [
         f"**[➕ Add a game]({add})**: the report form, which asks what this list needs.",
         "",
         f"**{len(games)} game{'s' * (len(games) != 1)}, {len(reports)} report{'s' * (len(reports) != 1)}:** "
-        + ", ".join(f"{RESULTS[result]} {counts[result]}" for result in RESULTS) + ".",
+        + ", ".join(f"{label(shown)} {counts[shown]}" for shown in SHOWN) + ".",
         "",
         "| Game | How it runs | PC5 | Store and version | Controller | Settings that helped | Notes | Report |",
         "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for r in reports:
-        lines.append(f"| {cell(r['game'], 60)} | {RESULTS[r['result']]} | {cell(r['pc5'], 12)} | {cell(r['edition'], 40)} | "
+        how = label(r["shown"]) + (f" ([#{r['issue']['number']}]({r['issue']['url']}))" if r["issue"] else "")
+        lines.append(f"| {cell(r['game'], 60)} | {how} | {cell(r['pc5'], 12)} | {cell(r['edition'], 40)} | "
                      f"{cell(r['controller'], 20)} | {cell(r['settings'])} | {cell(r['notes'], 200)} | "
                      f"[#{r['number']}]({r['url']}) by "
                      f"{cell(r['author'], 40)}, {r['date']} |")
     if not reports:
         lines.append("| *No reports yet* | | | | | | | |")
-    lines += ["", "A game that crashes or doesn't start: please also open an "
-              f"[issue](https://github.com/{owner}/{name}/issues) with its log, so it can be fixed."]
+    lines += ["", "A game that crashes or doesn't start: open an "
+              f"[issue](https://github.com/{owner}/{name}/issues/new/choose) with its log first, then report it here "
+              "with the issue's number. It shows as being looked at while the issue is open, and as not running "
+              "once the issue is closed as not planned."]
 
     page = "\n".join([
         "Which games run in PC5, as players found: every report of the [Game compatibility]"
@@ -155,6 +193,57 @@ def main() -> int:
               discussion { url } } }""", repo=repo["id"], category=category["id"], title=LIST_TITLE, body=pointer)
         print(f"compatibility list: made {made['createDiscussion']['discussion']['url']} (pin it)")
     return 0
+
+
+def label(shown: str) -> str:
+    """The table's mark for a result, or for one being looked at."""
+    return RESULTS.get(shown, shown)
+
+
+def linked_issue(owner: str, name: str, text: str):
+    """The issue (not a pull request) of this repository that text names, as #61, 61 or its
+    link: its number, url, state, stateReason and label names; None when there is none."""
+    found = re.search(rf"(?:github\.com/{re.escape(owner)}/{re.escape(name)}/issues/|#|^\s*)(\d+)\b", text, re.I)
+    if not found:
+        return None
+    data = graphql("""query($owner: String!, $name: String!, $number: Int!) {
+        repository(owner: $owner, name: $name) {
+          issueOrPullRequest(number: $number) {
+            __typename
+            ... on Issue { number url state stateReason labels(first: 20) { nodes { name } } }
+          } } }""", fatal=False, owner=owner, name=name, number=int(found.group(1)))
+    if data is None:
+        return UNKNOWN
+    node = data["repository"]["issueOrPullRequest"]
+    if not node or node["__typename"] != "Issue":
+        return None
+    return {"number": node["number"], "url": node["url"], "state": node["state"], "stateReason": node["stateReason"],
+            "labels": [label["name"].casefold() for label in node["labels"]["nodes"]]}
+
+
+def needs_issue(discussion: dict, owner: str, name: str, asked: bool) -> None:
+    """A report that a game doesn't run, without an issue: said once, and closed. A failure here
+    is a warning: the list is still made."""
+    if not asked and not discussion["locked"]:
+        body = "\n".join([
+            MARK,
+            "Thanks for the report! A game that doesn't start or isn't playable needs an issue with its log first, "
+            "so the cause can be found: it could be the game, its copy, a setting or PC5. Until then this report "
+            "isn't listed, and it's closed.",
+            "",
+            f"1. Open an [issue](https://github.com/{owner}/{name}/issues/new/choose) and attach the game's zip "
+            "from `/data/prospero-win/logs/`.",
+            "2. Edit this report and put the issue's number in **Issue**.",
+            "",
+            "It then opens again and is listed as being looked at.",
+        ])
+        if graphql("""mutation($id: ID!, $body: String!) { addDiscussionComment(input: {discussionId: $id, body: $body}) {
+                comment { id } } }""", fatal=False, id=discussion["id"], body=body) is not None:
+            print(f"compatibility list: #{discussion['number']} has no issue: asked for one")
+    if not discussion["closed"] and graphql(
+            """mutation($id: ID!) { closeDiscussion(input: {discussionId: $id, reason: OUTDATED}) { discussion { id } } }""",
+            fatal=False, id=discussion["id"]) is not None:
+        print(f"compatibility list: #{discussion['number']} has no issue: closed")
 
 
 def publish(owner: str, name: str, page: str) -> None:

@@ -13,6 +13,8 @@ on:
 permissions:
   discussions: write
   contents: write
+  issues: read          # a report that a game doesn't run names an issue
+  pull-requests: read   # a number that turns out to be a pull request
 
 concurrency:
   group: compatibility-list
