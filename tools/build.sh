@@ -353,7 +353,12 @@ step_dxvk() {
 
 step_cpu() {
     cd "$PW"
-    local build=$PW/.deps/wine-host/build sdk=$PW/.deps/ps5-native-app-boilerplate/.deps/native/ps5-payload-sdk
+    local build=$PW/.deps/wine-host/build sdk=$PW/.deps/ps5-native-app-boilerplate/.deps/native/ps5-payload-sdk tree
+    # The two Wine copies are made without .git, and both scripts check the Wine commit there:
+    # each copy points at the checkout it came from, which is at WINE_COMMIT.
+    for tree in "$PW/.deps/wine-host/source" "$PW/.deps/wine-ps5/source"; do
+        [[ -e $tree/.git ]] || echo "gitdir: $PW/.deps/wine/source/.git" > "$tree/.git"
+    done
     tools/build_wowprospero.sh --build "$build" --source "$PW/.deps/wine-host/source" --jobs "$jobs"
     # The title's import stubs, less the two WebKit libraries the native CPU must not import.
     local stubs=$B/title-stubs
