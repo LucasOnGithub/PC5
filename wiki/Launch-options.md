@@ -12,7 +12,7 @@ Many PC games accept launch options: words added after the program's name that c
    - `<folder>` is the game's folder as it was on the USB drive (for example `Neon Drift`).
    - If the `.exe` is in a subfolder of the game's folder (for example `bin/`), go into that subfolder too: `launch.txt` goes **beside the `.exe`**.
 
-   The game's menu (**△**) shows which program PC5 starts, under **Change program**.
+   The game's menu (**△**) shows which program PC5 starts, under **Manage › Change program**.
 2. Make a text file called `launch.txt` there.
 3. Write the options on one line, for example:
 

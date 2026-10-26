@@ -1,4 +1,4 @@
-PC5's Settings hold installing and uninstalling games, the settings that apply in every game (the controller's rumble, light bar and triggers, and the overlay), the startup sound, updates, the logs and the About screen. Settings that belong to one game (its controller, frame generation, program and home screen tile) are in that game's menu instead: see [Playing games](Playing-games#the-game-menu).
+PC5's Settings hold installing and uninstalling games, the settings that apply in every game (the controller's rumble, light bar and triggers, and the overlay), the startup sound, updates, the logs and the About screen. Settings that belong to one game (its controller, graphics, cover, background, home screen tile and program) are in that game's menu instead: see [Playing games](Playing-games#the-game-menu). The row chosen says what it does under its name.
 
 ## Opening Settings
 
@@ -41,7 +41,7 @@ Changes are saved at once, in `/data/prospero-win/pc5/settings.txt`. Settings fo
 | Adaptive triggers | **Off**, Rumble, Resistance, Rumble + resistance | Rumble: L2 and R2 vibrate with the game's rumble. Resistance: they push back as you press them. Rumble + resistance: they push back, and vibrate instead while the game rumbles (a trigger runs one effect at a time). |
 | Trigger rumble | 25, 50, 75, **100 %** | How strongly L2 and R2 vibrate. Shows with Rumble or Rumble + resistance. |
 | Trigger resistance | 25, **50**, 75, 100 % | How firmly L2 and R2 push back. Shows with Resistance or Rumble + resistance. |
-| Startup sound | Off, **PC5**, and the other sounds by name | The sound on the controller's speaker when you open PC5 from the home screen (not when you come back to it from a game). Choosing a sound plays it. See [Startup sound](#startup-sound). |
+| Startup sound | Off, **cheap chinese speaker** (the default), and the other sounds by name | The sound on the controller's speaker when you open PC5 from the home screen (not when you come back to it from a game). Choosing a sound plays it. See [Startup sound](#startup-sound). |
 
 Defaults are in **bold**.
 
@@ -51,7 +51,7 @@ These follow the settings in every game, whatever its [controller mode](Controll
 
 **Settings › In games › Startup sound** chooses the sound PC5 plays on the controller's speaker when you open it, or **Off**. Choosing a sound with **✕** or left and right plays it, so you can hear it.
 
-PC5 comes with **PC5** (the default), **Beeper - Push**, **Cha-Ching**, **cheap chinese speaker**, **fahh**, **funny message tone**, **rizz** and **System Activated**.
+PC5 comes with **Beeper - Push**, **Cha-Ching**, **cheap chinese speaker** (the default), **fahh**, **funny message tone**, **rizz** and **System Activated**.
 
 To add your own:
 
@@ -59,7 +59,7 @@ To add your own:
 2. Put a `.wav` file in it. Its name, without `.wav`, is how it shows in the list: `Chime.wav` shows as **Chime**. A sound of yours with the name of one of PC5's takes its place.
 3. Open Settings again: the sound is in the list.
 
-The file can be mono or stereo, 8, 16 or 24-bit or 32-bit float, at any sample rate; PC5 plays the first 30 seconds. The controller's speaker is small, so a short, loud sound works best. If the sound chosen is deleted, PC5 plays its own.
+The file can be mono or stereo, 8, 16 or 24-bit or 32-bit float, at any sample rate; PC5 plays the first 30 seconds. The controller's speaker is small, so a short, loud sound works best. If the sound chosen is deleted, PC5 plays cheap chinese speaker.
 
 ## Overlay
 

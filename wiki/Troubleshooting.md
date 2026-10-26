@@ -23,14 +23,14 @@ When something doesn't work, PC5 usually says why in a message. This page lists 
 
 | PC5 says | What to do |
 | --- | --- |
-| *Game* can't start: Its Windows folder is missing | The game's files are gone or incomplete. Uninstall it from its menu (**△**) and install it again. |
+| *Game* can't start: Its Windows folder is missing | The game's files are gone or incomplete. Uninstall it from its menu (**△ › Manage › Uninstall**) and install it again. |
 | *Game* can't start: Its profile has a mistake | The game's prospero-win profile can't be read. If PC5 installed the game, uninstall it and install it again. |
-| *Game* can't start: PC5's notes on this game are missing | Uninstall the game from its menu (**△**) and install it again. |
+| *Game* can't start: PC5's notes on this game are missing | Uninstall the game from its menu (**△ › Manage › Uninstall**) and install it again. |
 | *Game* can't start: PC5 can't copy the .NET runtime (or make its folders, or finish its copy): is the console full? | Setting up .NET the first time needs about 300 MB free. Free up space on the console, then start the game again to finish setting it up. |
 | *Game* can't start: PC5 can't read the app's .NET runtime | The app's folder is incomplete. Copy the `PPSA11018` folder to the console again. See [Updating PC5](Installing-and-updating#updating-pc5). |
 | *Game* can't start: The app's .NET runtime has no *file* | The app's folder is incomplete: that file didn't arrive. Copy the `PPSA11018` folder to the console again. PC5 1.6.1 and older said "is the console full?" here when the app had been unzipped on a Windows PC, however much space was free: update to 1.6.2 or newer. |
 | *Game* didn't start: The console refused to start it | Try again. If it happens again, close PC5 and open it again. |
-| *Game* closed before showing anything | PC5 may have started the wrong program: use **△ › Change program**. If you added [launch options](Launch-options), try without them. Otherwise, [report it](Reporting-a-problem). |
+| *Game* closed before showing anything | PC5 may have started the wrong program: use **△ › Manage › Change program**. If you added [launch options](Launch-options), try without them. Otherwise, [report it](Reporting-a-problem). |
 | *Game* stopped with an error | The game crashed. Try the newest PC5, then [report it](Reporting-a-problem): **△** on the message opens GitHub's issue form with a QR code; attach the zip PC5 names. |
 | *Game* had to be closed | The game didn't close when asked, so PC5 ended it. It may not have saved. |
 | PC5 ended unexpectedly last time | PC5 itself stopped. [Report it](Reporting-a-problem) with the log PC5 names. |
@@ -63,6 +63,6 @@ When something doesn't work, PC5 usually says why in a message. This page lists 
 | The wrong cover was found | When installing, press **L1** / **R1** on the review screen to choose another. For an installed game, use [your own picture](Covers#for-a-game-already-installed). |
 | My own cover isn't used | Check the folder (`/data/prospero-win/covers/`), the name (the game's folder name, its name in PC5 or its id) and the extension (`.jpg`, `.jpeg` or `.png`). The picture must be newer than the game's current cover. Then close PC5 and open it again. |
 | A game has a plain card as its cover | No source had the game, or the console was offline when it was installed. Use [your own picture](Covers#using-your-own-cover). |
-| The home screen tile shows the old cover | Turn the tile off and on again: **△ › Home screen tile**. |
+| The home screen tile shows the old cover | Turn the tile off and on again: **△ › Appearance › Home screen tile**. |
 
 See also [Home screen tiles](Home-screen-tiles#if-something-goes-wrong) for problems with tiles.

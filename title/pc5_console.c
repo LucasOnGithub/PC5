@@ -267,6 +267,40 @@ static void sound_try(void *context, const char *name)
     sound_play(name);
 }
 
+/* The console's on-screen keyboard over the screens (pc5_game_ps5.c), for a name to search for:
+ * its text and title in UTF-16, kept while it is up. */
+int pc5_screens_keyboard_open(uint16_t *buffer, uint32_t capacity, const uint16_t *title);
+int pc5_screens_keyboard_state(void);
+int pc5_screens_keyboard_close(void);
+static uint16_t keyboard_text[PC5_NAME], keyboard_title[96];
+
+static int keyboard_open(void *context, const char *title, const char *text)
+{
+    char line[96];
+    (void)context;
+    pc5_utf16_from_utf8(keyboard_title, sizeof(keyboard_title) / sizeof(keyboard_title[0]), title);
+    pc5_utf16_from_utf8(keyboard_text, sizeof(keyboard_text) / sizeof(keyboard_text[0]), text);
+    int rc = pc5_screens_keyboard_open(keyboard_text, sizeof(keyboard_text) / sizeof(keyboard_text[0]), keyboard_title);
+    snprintf(line, sizeof(line), "PC5 screens keyboard open rc=%#x", (unsigned)rc);
+    plain_log(line);
+    return rc < 0 ? rc : 0;
+}
+
+static int keyboard_state(void *context)
+{
+    (void)context;
+    return pc5_screens_keyboard_state();
+}
+
+static int keyboard_close(void *context, char *out, size_t size)
+{
+    (void)context;
+    int rc = pc5_screens_keyboard_close();
+    if (rc == 1) pc5_utf8_from_utf16(out, size, keyboard_text);
+    else if (size) out[0] = 0;
+    return rc;
+}
+
 /* PC5 updated itself: the new PC5 starts in its place, as a game does (the console's
  * LoadExec, the eboot as /app0 or the sandbox shows it), fresh as when it is opened. If
  * the console refuses, PC5 closes as an app does. Never exit(): the console takes that
@@ -422,7 +456,7 @@ void pc5_console_run(const Pc5Console *config)
 
     watch_for_crashes(config->root);
     platform = (Pc5Platform){ NULL, { NULL, pc5_net_get, pc5_net_download }, clock_text, play, log_line, notify_text,
-                              unix_time, enter == 0, restart, sound_try };
+                              unix_time, enter == 0, restart, sound_try, keyboard_open, keyboard_state, keyboard_close };
     {
         Pc5UiConfig ui_config = { config->root, template_prefix, fonts, usb_roots, PC5_HOME_ROOT, tile_template,
                                   config->start, pc5_upgrade_drives, "/user", finished, 1 };

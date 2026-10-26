@@ -43,7 +43,8 @@ typedef enum Screen {
     S_START, S_COVERS, S_LIBRARY, S_SETTINGS, S_ABOUT, S_SCAN, S_SOURCES, S_READING, S_SEARCH, S_REVIEW,
     S_PROGRAMS, S_INSTALL, S_STOP, S_UNINSTALL_LIST, S_UNINSTALL_CONFIRM, S_REMOVING, S_MESSAGE, S_LAUNCH,
     S_UPDATE, S_CHECKING, S_GAME_MENU, S_GAME_READING, S_QUEUE_READ, S_QUEUE, S_BUTTONS, S_KEYS, S_REPORT,
-    S_UPGRADE_ASK, S_UPGRADING, S_GAME_UPDATE_ASK, S_SAVES_ASK, S_SAVES_CONFIRM
+    S_UPGRADE_ASK, S_UPGRADING, S_GAME_UPDATE_ASK, S_SAVES_ASK, S_SAVES_CONFIRM, S_PICTURE_SEARCH, S_PICTURE,
+    S_PICTURE_TYPING
 } Screen;
 
 static const char *const screen_names[] = { "start", "covers", "library", "settings", "about", "scan", "sources",
@@ -51,7 +52,7 @@ static const char *const screen_names[] = { "start", "covers", "library", "setti
                                             "uninstall-list", "uninstall-confirm", "removing", "message", "launch",
                                             "update", "checking", "game-menu", "game-reading", "queue-read", "queue",
                                             "buttons", "keys", "report", "upgrade-ask", "upgrading", "game-update-ask",
-                                            "saves-ask", "saves-confirm" };
+                                            "saves-ask", "saves-confirm", "picture-search", "picture", "picture-typing" };
 
 /* One game of several being installed in a row. */
 typedef enum QueueState { Q_WAITING, Q_INSTALLED, Q_FAILED, Q_STOPPED, Q_SKIPPED } QueueState;
@@ -119,39 +120,67 @@ static int page_rows(const Pc5Settings *set, int page, int offer_update, Setting
     return n;
 }
 
-/* A game's menu: its rows; Button mapping only while it plays the keyboard and mouse. */
+/* A game's menu, on four pages: Play, Controller (and Button mapping while it plays the keyboard
+ * and mouse) and the three groups on the first; each group's rows on a page of its own. */
 typedef enum GameRow {
-    GR_PLAY, GR_CONTROLLER, GR_BUTTONS, GR_FRAMEGEN, GR_RESOLUTION, GR_ASPECT, GR_MEMORY, GR_PROGRAM, GR_HOME,
-    GR_UPDATE, GR_UNINSTALL
+    GR_PLAY, GR_CONTROLLER, GR_BUTTONS, GR_GRAPHICS, GR_APPEARANCE, GR_MANAGE,
+    GR_FRAMEGEN, GR_RESOLUTION, GR_ASPECT, GR_MEMORY,
+    GR_COVER, GR_BACKGROUND, GR_HOME,
+    GR_PROGRAM, GR_UPDATE, GR_UNINSTALL
 } GameRow;
-enum { GAME_ROWS = 11 };
+enum { GAME_ROWS = 6, GAME_PAGES = 4, GP_MAIN = 0, GP_GRAPHICS = 1, GP_APPEARANCE = 2, GP_MANAGE = 3 };
+static const char *const game_page_titles[GAME_PAGES] = { "", "Graphics", "Appearance", "Manage" };
+/* The first page's row that opens each page. */
+static const GameRow game_page_rows[GAME_PAGES] = { GR_PLAY, GR_GRAPHICS, GR_APPEARANCE, GR_MANAGE };
 /* What a game is, for its menu's rows. */
 enum { GAME_32BIT = 1, GAME_VULKAN = 2, GAME_PC5 = 4 };
 
 /* kind: GAME_32BIT for Memory, GAME_VULKAN for Resolution, GAME_PC5 (PC5 installed it) for Update. */
-static int game_rows(const Pc5Controls *controls, int kind, GameRow rows[GAME_ROWS])
+static int game_rows(const Pc5Controls *controls, int kind, int page, GameRow rows[GAME_ROWS])
 {
     int n = 0;
-    rows[n++] = GR_PLAY;
-    rows[n++] = GR_CONTROLLER;
-    if (controls->mode == PC5_PAD_KEYBOARD) rows[n++] = GR_BUTTONS;
-    rows[n++] = GR_FRAMEGEN;
-    if (kind & GAME_VULKAN) rows[n++] = GR_RESOLUTION;
-    rows[n++] = GR_ASPECT;
-    if (kind & GAME_32BIT) rows[n++] = GR_MEMORY;
-    rows[n++] = GR_PROGRAM;
-    rows[n++] = GR_HOME;
-    if (kind & GAME_PC5) rows[n++] = GR_UPDATE;
-    rows[n++] = GR_UNINSTALL;
+    switch (page) {
+    case GP_GRAPHICS:
+        rows[n++] = GR_FRAMEGEN;
+        if (kind & GAME_VULKAN) rows[n++] = GR_RESOLUTION;
+        rows[n++] = GR_ASPECT;
+        if (kind & GAME_32BIT) rows[n++] = GR_MEMORY;
+        break;
+    case GP_APPEARANCE:
+        rows[n++] = GR_COVER;
+        rows[n++] = GR_BACKGROUND;
+        rows[n++] = GR_HOME;
+        break;
+    case GP_MANAGE:
+        rows[n++] = GR_PROGRAM;
+        if (kind & GAME_PC5) rows[n++] = GR_UPDATE;
+        rows[n++] = GR_UNINSTALL;
+        break;
+    default:
+        rows[n++] = GR_PLAY;
+        rows[n++] = GR_CONTROLLER;
+        if (controls->mode == PC5_PAD_KEYBOARD) rows[n++] = GR_BUTTONS;
+        rows[n++] = GR_GRAPHICS;
+        rows[n++] = GR_APPEARANCE;
+        rows[n++] = GR_MANAGE;
+        break;
+    }
     return n;
 }
 
-static int game_row_at(const Pc5Controls *controls, int kind, GameRow row)
+/* Where row is: its index, and its page in *page (when not NULL). */
+static int game_row_find(const Pc5Controls *controls, int kind, GameRow row, int *page)
 {
     GameRow rows[GAME_ROWS];
-    int n = game_rows(controls, kind, rows);
-    for (int i = 0; i < n; i++)
-        if (rows[i] == row) return i;
+    for (int p = 0; p < GAME_PAGES; p++) {
+        int n = game_rows(controls, kind, p, rows);
+        for (int i = 0; i < n; i++)
+            if (rows[i] == row) {
+                if (page) *page = p;
+                return i;
+            }
+    }
+    if (page) *page = GP_MAIN;
     return 0;
 }
 
@@ -262,6 +291,7 @@ struct Pc5Ui {
     Pc5Settings settings;
     int page;                      /* Settings: 0 its first page, 1 In games, 2 Updates */
     Pc5Controls controls;          /* the controller of the game in launch_id (its menu) */
+    int game_page;                 /* its menu's page: GP_MAIN or a group's */
     int pad_row, pad_top;          /* Button mapping: the row chosen, the first one shown */
     int key_control, key_choice;   /* the key picker: for which control, the key chosen */
     Pc5UpdateMemory update;
@@ -294,6 +324,17 @@ struct Pc5Ui {
     int64_t bg_changed;            /* the shown background's file: its time and size */
     uint64_t bg_fade_at;
 
+    /* A game's cover or background chosen by hand (Appearance): the search, on the heap while
+     * the picker is open, and the picture shown, at of count (pick_entry says which it is). */
+    int pick_kind;                 /* PICK_COVER or PICK_BACKGROUND */
+    Pc5CoverSearch *pick;
+    int pick_at, pick_count, pick_now, pick_fetching, pick_step;
+    Pc5Image pick_image;           /* as it would be kept: a cover, or a background (960x540) */
+    Pc5Picture pick_picture;       /* a cover's, as drawn */
+    uint32_t pick_tint;
+    Pc5Buf pick_original;          /* a cover's downloaded picture */
+    char pick_query[PC5_NAME];     /* the name typed to search for, or "": the game's own names */
+
     uint8_t *falloff;              /* the glow's shape, 0-255 per pixel */
     uint32_t *backdrop;            /* the background without the glow */
     uint32_t *composed;            /* with the glow, for composed_glow */
@@ -308,6 +349,12 @@ static int ui_game_kind(const Pc5Ui *ui)
     if (index < 0) return 0;
     return (ui->library.games[index].bits == 32 ? GAME_32BIT : 0) | (ui->library.games[index].vulkan ? GAME_VULKAN : 0) |
            (ui->library.games[index].pc5 ? GAME_PC5 : 0);
+}
+
+/* The game menu on row's page, at row. */
+static void game_menu_at(Pc5Ui *ui, GameRow row)
+{
+    ui->menu = game_row_find(&ui->controls, ui_game_kind(ui), row, &ui->game_page);
 }
 
 const char *pc5_ui_screen(const Pc5Ui *ui)
@@ -338,7 +385,8 @@ static void go(Pc5Ui *ui, Screen screen)
                  screen == S_SCAN || screen == S_SOURCES || screen == S_READING || screen == S_SEARCH ||
                  screen == S_REVIEW || screen == S_PROGRAMS || screen == S_INSTALL || screen == S_STOP ||
                  screen == S_QUEUE_READ || screen == S_QUEUE || screen == S_CHECKING || screen == S_UPGRADE_ASK ||
-                 screen == S_UPGRADING || screen == S_GAME_UPDATE_ASK || screen == S_SAVES_ASK || screen == S_REPORT);
+                 screen == S_UPGRADING || screen == S_GAME_UPDATE_ASK || screen == S_SAVES_ASK || screen == S_REPORT ||
+                 screen == S_PICTURE_SEARCH || screen == S_PICTURE || screen == S_PICTURE_TYPING);
     ui->drawn = 0;
     ui->dirty = 1;
     say(ui, "PC5 screen=%s", screen_names[screen]);
@@ -611,6 +659,10 @@ void pc5_ui_destroy(Pc5Ui *ui)
     pc5_picture_free(&ui->review);
     pc5_image_free(&ui->review_image);
     pc5_buf_free(&ui->review_original);
+    pc5_picture_free(&ui->pick_picture);
+    pc5_image_free(&ui->pick_image);
+    pc5_buf_free(&ui->pick_original);
+    pc5_free(ui->pick);
     if (ui->installing) pc5_install_end(&ui->install);
     pc5_remove_end(&ui->remove);
     pc5_fonts_free(&ui->fonts);
@@ -948,6 +1000,201 @@ static void background_follow(Pc5Ui *ui)
         ui->dirty = 1;
     }
     pc5_image_free(&small);
+}
+
+/* ---- a game's cover or background, chosen by hand --------------------------------------------- */
+
+enum { PICK_COVER, PICK_BACKGROUND };
+
+/* What the picture at is: -1 the game's own now, 0 to count - 1 a choice found, count the
+ * last: the card made from the game's icon and name, or (a background) PC5's own backdrop. */
+static int pick_entry(const Pc5Ui *ui, int at)
+{
+    return ui->pick_now && at == 0 ? -1 : at - ui->pick_now;
+}
+
+static void pick_clear(Pc5Ui *ui)
+{
+    pc5_image_free(&ui->pick_image);
+    pc5_picture_free(&ui->pick_picture);
+    pc5_buf_free(&ui->pick_original);
+    ui->pick_tint = C_DEFAULT_TINT;
+}
+
+static void picture_close(Pc5Ui *ui)
+{
+    pick_clear(ui);
+    pc5_free(ui->pick);
+    ui->pick = NULL;
+}
+
+/* Back to the game's menu, on the picker's row. */
+static void picture_leave(Pc5Ui *ui)
+{
+    GameRow row = ui->pick_kind == PICK_COVER ? GR_COVER : GR_BACKGROUND;
+    picture_close(ui);
+    game_menu_at(ui, row);
+    go(ui, S_GAME_MENU);
+}
+
+/* Where the game keeps its picture of the kind. */
+static int pick_path(Pc5Ui *ui, const Pc5Game *game, char *out, size_t size)
+{
+    return ui->pick_kind == PICK_COVER ? cover_path(ui, game, out, size)
+                                       : pc5_background_path(ui->root, game->prefix, out, size);
+}
+
+/* A search for the game's own names (with the player's own picture among the covers), or for
+ * the name typed. */
+static void pick_search(Pc5Ui *ui, const Pc5Game *game)
+{
+    Pc5CoverHint hint;
+    if (ui->pick_query[0]) {
+        memset(&hint, 0, sizeof(hint));
+        pc5_copy(hint.folder, sizeof(hint.folder), ui->pick_query);
+    } else {
+        hint_for_game(ui, game, &hint);
+        hint.picture_only = 0;
+    }
+    pc5_cover_search_start(ui->pick, &hint);
+    go(ui, S_PICTURE_SEARCH);
+}
+
+/* Appearance › Cover or Background: what the game has, then what is found for it. */
+static void picture_open(Pc5Ui *ui, const Pc5Game *game, int kind)
+{
+    char path[PC5_PATH];
+    if (!game->pc5 || !game->prefix[0] || !strcmp(game->prefix, "default")) {
+        message(ui, 0, "PC5 didn't install this game",
+                kind == PICK_COVER ? "Its cover can only be changed as in Covers on the wiki: a picture of your own."
+                                   : "Its background can only be changed as in Covers on the wiki: a picture of your own.",
+                S_GAME_MENU);
+        return;
+    }
+    picture_close(ui);
+    if (!(ui->pick = pc5_alloc(sizeof(*ui->pick)))) {
+        message(ui, 0, "PC5 ran out of memory", "Close PC5 and open it again.", S_GAME_MENU);
+        return;
+    }
+    ui->pick_kind = kind;
+    ui->pick_query[0] = 0;
+    ui->pick_now = !pick_path(ui, game, path, sizeof(path)) && pc5_is_file(path);
+    say(ui, "PC5 picture kind=%s game=%s now=%d", kind == PICK_COVER ? "cover" : "background", game->id, ui->pick_now);
+    pick_search(ui, game);
+}
+
+/* The search is done: a background's choices are those with a background, the first shown is
+ * the game's own (or, for a name typed, the first found). */
+static void pick_searched(Pc5Ui *ui)
+{
+    Pc5CoverSearch *pick = ui->pick;
+    if (ui->pick_kind == PICK_BACKGROUND) {
+        int n = 0;
+        for (int i = 0; i < pick->count; i++)
+            if (pick->choices[i].background[0] || pick->choices[i].steam_appid) pick->choices[n++] = pick->choices[i];
+        pick->count = n;
+    }
+    ui->pick_count = ui->pick_now + pick->count + 1;
+    ui->pick_at = ui->pick_query[0] && pick->count ? ui->pick_now : 0;
+    ui->pick_fetching = 1;
+    say(ui, "PC5 picture choices=%d answered=%d query=%s", pick->count, pick->answered, ui->pick_query[0] ? ui->pick_query : "-");
+    go(ui, S_PICTURE);
+}
+
+/* The picture at pick_at, fetched or made; one that can't be had is taken out of the list. */
+static void pick_fetch(Pc5Ui *ui, const Pc5Game *game, int step)
+{
+    char path[PC5_PATH];
+    Pc5CoverSearch *pick = ui->pick;
+
+    ui->pick_fetching = 0;
+    pick_clear(ui);
+    for (;;) {
+        int entry = pick_entry(ui, ui->pick_at), failed;
+        if (entry < 0) {
+            failed = pick_path(ui, game, path, sizeof(path)) ||
+                     pc5_cover_load(path, &ui->pick_image, ui->pick_kind == PICK_COVER ? &ui->pick_tint : NULL);
+            if (!failed) break;
+            ui->pick_now = 0;
+        } else if (entry < pick->count) {
+            const Pc5CoverChoice *choice = &pick->choices[entry];
+            failed = ui->pick_kind == PICK_COVER
+                         ? pc5_cover_fetch(choice, &ui->platform.http, &ui->pick_image, &ui->pick_original)
+                         : pc5_background_fetch(choice->background, choice->steam_appid, &ui->platform.http, &ui->pick_image);
+            if (!failed) {
+                if (ui->pick_kind == PICK_COVER) ui->pick_tint = pc5_image_tint(&ui->pick_image);
+                break;
+            }
+            say(ui, "PC5 picture fetch failed source=%s title=%s", choice->source, choice->title);
+            memmove(&pick->choices[entry], &pick->choices[entry + 1], sizeof(pick->choices[0]) * (size_t)(pick->count - entry - 1));
+            pick->count--;
+        } else {
+            if (ui->pick_kind == PICK_COVER) card_for(ui, game, &ui->pick_image, &ui->pick_tint);
+            break;
+        }
+        /* Taken out: the list is one shorter, and the next one (going back, the one before) is tried. */
+        pick_clear(ui);
+        ui->pick_count--;
+        if (step < 0) ui->pick_at = ui->pick_at > 0 ? ui->pick_at - 1 : ui->pick_count - 1;
+        else if (ui->pick_at >= ui->pick_count) ui->pick_at = 0;
+    }
+    if (ui->pick_kind == PICK_COVER && ui->pick_image.px) {
+        Pc5Image copy;
+        if (!image_copy(&copy, &ui->pick_image)) pc5_picture_make(&ui->pick_picture, &copy);
+    }
+    ui->dirty = 1;
+}
+
+/* The picture shown becomes the game's: a cover (its downloaded picture kept beside it, as an
+ * install keeps it), a background, or none (PC5's own backdrop, not looked for again). */
+static void pick_use(Pc5Ui *ui, const Pc5Game *game)
+{
+    char path[PC5_PATH], dir[PC5_PATH], note[PC5_PATH];
+    int entry = pick_entry(ui, ui->pick_at), failed;
+
+    if (entry < 0) {   /* the one it has */
+        picture_leave(ui);
+        return;
+    }
+    failed = pick_path(ui, game, path, sizeof(path)) ||
+             pc5_format(dir, sizeof(dir), "%s/prefixes/%s/pc5", ui->root, game->prefix) || pc5_mkdirs(dir);
+    if (!failed && ui->pick_kind == PICK_COVER) {
+        failed = !ui->pick_image.px || pc5_cover_save(path, &ui->pick_image, ui->pick_tint);
+        if (!failed) {
+            static const char *const originals[] = { "cover-original.jpg", "cover-original.png" };
+            for (int i = 0; i < 2; i++)
+                if (!pc5_format(note, sizeof(note), "%s/%s", dir, originals[i])) unlink(note);
+            if (ui->pick_original.len && !pc5_format(note, sizeof(note), "%s/%s", dir, pc5_picture_name(&ui->pick_original)))
+                pc5_write_file(note, ui->pick_original.data, ui->pick_original.len);
+            int index = pc5_library_find(&ui->library, game->id);
+            if (index >= 0) {   /* drawn again from its file */
+                pc5_picture_free(&ui->covers[index].picture);
+                ui->covers[index].state = 0;
+            }
+        }
+    } else if (!failed) {
+        /* The worker, waiting while the picker is open, is stopped first: it doesn't save over
+         * this. It looks at the other games again when the library next shows. */
+        pc5_backgrounds_end(&ui->backgrounds, 1);
+        ui->backgrounds_for = -1;
+        if (entry >= ui->pick->count) {
+            unlink(path);
+            failed = pc5_format(note, sizeof(note), "%s/background-none.txt", dir) || pc5_write_file(note, "none\n", 5);
+        } else {
+            failed = !ui->pick_image.px || pc5_cover_save(path, &ui->pick_image, 0);
+            if (!failed && !pc5_format(note, sizeof(note), "%s/background-none.txt", dir)) unlink(note);
+        }
+        if (!pc5_format(note, sizeof(note), "%s/background-tries.txt", dir)) unlink(note);
+        ui->bg_id[0] = 0;   /* looked at again: the file changed */
+    }
+    say(ui, "PC5 picture saved kind=%s game=%s entry=%d of=%d failed=%d", ui->pick_kind == PICK_COVER ? "cover" : "background",
+        game->id, entry, ui->pick->count, failed);
+    if (failed) {
+        message(ui, 0, ui->pick_kind == PICK_COVER ? "The cover wasn't changed" : "The background wasn't changed",
+                "PC5 can't write to the game's folder in /data/prospero-win/prefixes.", S_PICTURE);
+        return;
+    }
+    picture_leave(ui);
 }
 
 static void speed_reset(Pc5Ui *ui)
@@ -1536,6 +1783,7 @@ static void game_menu_open(Pc5Ui *ui, const char *id)
     pc5_controls_load(ui->root, id, &ui->controls);
     if (!ui->config.tiles_root || !pc5_home_find(ui->config.tiles_root, id, ui->tile)) ui->tile[0] = 0;
     ui->menu = 0;
+    ui->game_page = GP_MAIN;
     go(ui, S_GAME_MENU);
 }
 
@@ -1940,7 +2188,7 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
             /* A newer copy of the game in launch_id: one folder, no ticks. */
             if (k & back) {
                 ui->update_for = 0;
-                ui->menu = game_row_at(&ui->controls, ui_game_kind(ui), GR_UPDATE);
+                game_menu_at(ui, GR_UPDATE);
                 go(ui, S_GAME_MENU);
             } else if (k & PC5_KEY_TRIANGLE) {
                 go(ui, S_SCAN);
@@ -2110,7 +2358,7 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
     case S_PROGRAMS:
         if (list_move(&ui->menu, ui->folder.exe_count, k)) ui->dirty = 1;
         if (k & back) {
-            if (ui->program_for) ui->menu = game_row_at(&ui->controls, ui_game_kind(ui), GR_PROGRAM);
+            if (ui->program_for) game_menu_at(ui, GR_PROGRAM);
             go(ui, ui->program_for ? S_GAME_MENU : S_REVIEW);
         }
         else if (k & accept) {
@@ -2139,14 +2387,25 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
     case S_GAME_MENU: {
         int index = pc5_library_find(&ui->library, ui->launch_id);
         GameRow rows[GAME_ROWS];
-        int count = game_rows(&ui->controls, ui_game_kind(ui), rows);
+        int count = game_rows(&ui->controls, ui_game_kind(ui), ui->game_page, rows);
         if (index < 0) { go(ui, S_LIBRARY); break; }
         const Pc5Game *game = &ui->library.games[index];
         if (ui->menu >= count) ui->menu = count - 1;
         if (list_move(&ui->menu, count, k)) ui->dirty = 1;
         GameRow row = rows[ui->menu];
-        if (k & (back | PC5_KEY_TRIANGLE)) go(ui, S_LIBRARY);
-        else if ((k & (PC5_KEY_LEFT | PC5_KEY_RIGHT | accept)) && row == GR_CONTROLLER) {
+        if (k & PC5_KEY_TRIANGLE) go(ui, S_LIBRARY);
+        else if (k & back) {
+            /* A group's page back to the first, on the group's row. */
+            if (ui->game_page == GP_MAIN) go(ui, S_LIBRARY);
+            else {
+                game_menu_at(ui, game_page_rows[ui->game_page]);
+                ui->dirty = 1;
+            }
+        } else if ((k & accept) && (row == GR_GRAPHICS || row == GR_APPEARANCE || row == GR_MANAGE)) {
+            ui->game_page = row == GR_GRAPHICS ? GP_GRAPHICS : row == GR_APPEARANCE ? GP_APPEARANCE : GP_MANAGE;
+            ui->menu = 0;
+            ui->dirty = 1;
+        } else if ((k & (PC5_KEY_LEFT | PC5_KEY_RIGHT | accept)) && row == GR_CONTROLLER) {
             int step = (k & PC5_KEY_LEFT) ? -1 : 1;
             ui->controls.mode = (Pc5PadMode)((ui->controls.mode + PC5_PAD_MODES + step) % PC5_PAD_MODES);
             controls_changed(ui);
@@ -2178,6 +2437,8 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
             } else if (row == GR_BUTTONS) {
                 ui->pad_row = ui->pad_top = 0;
                 go(ui, S_BUTTONS);
+            } else if (row == GR_COVER || row == GR_BACKGROUND) {
+                picture_open(ui, game, row == GR_COVER ? PICK_COVER : PICK_BACKGROUND);
             } else if (row == GR_PROGRAM) {
                 if (!game->pc5) message(ui, 0, "PC5 didn't install this game",
                                         "Its program is set in its prospero-win profile.", S_GAME_MENU);
@@ -2185,12 +2446,69 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
             } else if (row == GR_UPDATE) {
                 ui->update_for = 1;
                 go(ui, S_SCAN);
-            } else {
+            } else if (row == GR_UNINSTALL) {
                 ui->menu = index;
                 ui->button = 0;   /* Cancel first */
                 ui->uninstall_back = S_GAME_MENU;
                 go(ui, S_UNINSTALL_CONFIRM);
             }
+        }
+        break;
+    }
+    case S_PICTURE_SEARCH: {
+        int index = pc5_library_find(&ui->library, ui->launch_id);
+        if (index < 0 || !ui->pick) { picture_close(ui); go(ui, S_LIBRARY); break; }
+        if ((k & back) && ui->now - ui->entered > 300) { picture_leave(ui); break; }
+        if (!ui->drawn) break;
+        if (!pc5_cover_search_step(ui->pick, &ui->platform.http)) pick_searched(ui);
+        ui->dirty = 1;
+        break;
+    }
+    case S_PICTURE: {
+        int index = pc5_library_find(&ui->library, ui->launch_id);
+        if (index < 0 || !ui->pick) { picture_close(ui); go(ui, S_LIBRARY); break; }
+        const Pc5Game *game = &ui->library.games[index];
+        if (ui->pick_fetching) {
+            if (ui->drawn) pick_fetch(ui, game, ui->pick_step);
+            break;
+        }
+        if ((k & (PC5_KEY_L1 | PC5_KEY_R1 | PC5_KEY_LEFT | PC5_KEY_RIGHT)) && ui->pick_count > 1) {
+            ui->pick_step = (k & (PC5_KEY_R1 | PC5_KEY_RIGHT)) ? 1 : -1;
+            ui->pick_at = (ui->pick_at + ui->pick_step + ui->pick_count) % ui->pick_count;
+            ui->pick_fetching = 1;
+            ui->drawn = 0;
+            ui->dirty = 1;
+        } else if ((k & PC5_KEY_TRIANGLE) && ui->platform.keyboard_open) {
+            int rc = ui->platform.keyboard_open(ui->platform.context,
+                                                ui->pick_kind == PICK_COVER ? "Search for covers by name"
+                                                                            : "Search for backgrounds by name",
+                                                ui->pick_query[0] ? ui->pick_query : game->title);
+            say(ui, "PC5 keyboard open rc=%d", rc);
+            if (rc >= 0) go(ui, S_PICTURE_TYPING);
+            else message(ui, 0, "The keyboard didn't open", "The console's on-screen keyboard can't be used just now.", S_PICTURE);
+        } else if ((k & back) && ui->now - ui->entered > 300) {
+            picture_leave(ui);
+        } else if ((k & accept) && ui->now - ui->entered > 300) {
+            pick_use(ui, game);
+        }
+        break;
+    }
+    case S_PICTURE_TYPING: {
+        int state = ui->platform.keyboard_state ? ui->platform.keyboard_state(ui->platform.context) : -1;
+        if (state == 1) break;   /* still up */
+        char typed[PC5_NAME] = "";
+        int rc = ui->platform.keyboard_close ? ui->platform.keyboard_close(ui->platform.context, typed, sizeof(typed)) : -1;
+        char *start = typed;
+        while (*start == ' ' || *start == '\t') start++;
+        for (size_t n = strlen(start); n && (start[n - 1] == ' ' || start[n - 1] == '\t'); n--) start[n - 1] = 0;
+        int index = pc5_library_find(&ui->library, ui->launch_id);
+        say(ui, "PC5 keyboard closed rc=%d typed=%zu", rc, strlen(start));
+        if (index < 0 || !ui->pick) { picture_close(ui); go(ui, S_LIBRARY); break; }
+        if (rc == 1 && start[0]) {
+            pc5_copy(ui->pick_query, sizeof(ui->pick_query), start);
+            pick_search(ui, &ui->library.games[index]);
+        } else {
+            go(ui, S_PICTURE);   /* cancelled: as it was */
         }
         break;
     }
@@ -2202,7 +2520,7 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
         PadRow row = rows[ui->pad_row];
         int bindable = row.kind == PR_BUTTON || row.kind == PR_DIRECTION;
         if (k & back) {
-            ui->menu = game_row_at(&ui->controls, ui_game_kind(ui), GR_BUTTONS);
+            game_menu_at(ui, GR_BUTTONS);
             go(ui, S_GAME_MENU);
         } else if (k & (PC5_KEY_LEFT | PC5_KEY_RIGHT)) {
             changed = pad_change(ui, row, (k & PC5_KEY_LEFT) ? -1 : 1);
@@ -2342,11 +2660,11 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
         if ((k & PC5_KEY_LEFT) && ui->button > 0) { ui->button--; ui->dirty = 1; }
         if ((k & PC5_KEY_RIGHT) && ui->button < buttons - 1) { ui->button++; ui->dirty = 1; }
         if (k & back) {
-            if (ui->uninstall_back == S_GAME_MENU) ui->menu = game_row_at(&ui->controls, ui_game_kind(ui), GR_UNINSTALL);
+            if (ui->uninstall_back == S_GAME_MENU) game_menu_at(ui, GR_UNINSTALL);
             go(ui, ui->uninstall_back);
         } else if ((k & accept) && ui->now - ui->entered > 400) {
             if (!ui->button) {
-                if (ui->uninstall_back == S_GAME_MENU) ui->menu = game_row_at(&ui->controls, ui_game_kind(ui), GR_UNINSTALL);
+                if (ui->uninstall_back == S_GAME_MENU) game_menu_at(ui, GR_UNINSTALL);
                 go(ui, ui->uninstall_back);
             } else {
                 const Pc5Game *game = &ui->library.games[ui->menu];
@@ -2762,30 +3080,33 @@ static float drawer(Pc5Ui *ui, Pc5Canvas *c, const char *title)
     return x;
 }
 
+/* A row of Settings or a game's menu, pitch h apart: its label and value, and what it does
+ * (about) only on the chosen row, under its label. */
 static void drawer_row(Pc5Ui *ui, Pc5Canvas *c, float x, float y, float h, int chosen, const char *label,
                        const char *about, const char *value)
 {
     int value_w = value && value[0] ? pc5_text_width(&ui->fonts, PC5_FACE_LABEL, value) : 0;
-    /* Rows packed closer (a long game menu) keep both lines inside the row. */
-    int compact = h < 100 && about && about[0];
-    float label_y = compact ? 12 + 0.42f * h : 46, about_y = compact ? 0.92f * h + 1 : 82, high = compact ? h - 4 : h - 12;
-    float bar = high - 12 < 56 ? high - 12 : 56;
+    int two = chosen && about && about[0];
+    float high = h - 10, label_y = two ? 0.42f * high + 8 : 0.5f * high + 12, about_y = 0.82f * high + 4;
+    float bar = high - 24 < 56 ? high - 24 : 56;
     if (chosen) {
         pc5_round_rect(c, x + 36, y, 760 - 72, high, 16, C_ROW);
         pc5_round_rect(c, x + 36, y + high / 2 - bar / 2, 5, bar, 2.5f, C_TEXT);
     }
     pc5_text(c, &ui->fonts, PC5_FACE_LABEL, (int)x + 72, (int)(y + label_y), C_TEXT, label, 600 - value_w, 0);
-    if (about && about[0]) pc5_text(c, &ui->fonts, PC5_FACE_SMALL, (int)x + 72, (int)(y + about_y), C_DIM, about, 760 - 144, 0);
+    if (two) pc5_text(c, &ui->fonts, PC5_FACE_SMALL, (int)x + 72, (int)(y + about_y), C_DIM, about, 760 - 144, 0);
     if (value_w)
         pc5_text(c, &ui->fonts, PC5_FACE_LABEL, (int)x + 760 - 72, (int)(y + label_y), chosen ? C_TEXT : C_ACCENT, value, 0, 2);
 }
+
+enum { ROW_PITCH = 100 };   /* Settings' and the game menu's rows */
 
 static void settings_screen(Pc5Ui *ui, Pc5Canvas *c)
 {
     float x = drawer(ui, c, page_titles[ui->page]);
     SettingRow rows[PAGE_ROWS];
     int count = page_rows(&ui->settings, ui->page, offer_update(ui), rows);
-    float pitch = count > 6 ? 106 : 118;   /* seven rows fit above the hints */
+    float pitch = ROW_PITCH;
 
     for (int i = 0; i < count; i++) {
         const char *label = "";
@@ -2808,86 +3129,105 @@ static void settings_screen(Pc5Ui *ui, Pc5Canvas *c)
 
 static void game_menu_screen(Pc5Ui *ui, Pc5Canvas *c, int chosen)
 {
-    int index = pc5_library_find(&ui->library, ui->launch_id);
+    int index = pc5_library_find(&ui->library, ui->launch_id), kind = ui_game_kind(ui), page = ui->game_page;
     if (index < 0) return;
     const Pc5Game *game = &ui->library.games[index];
-    float x = drawer(ui, c, game->title);
+    float x = drawer(ui, c, page == GP_MAIN ? game->title : game_page_titles[page]);
     char about[200];
+    static const char *const more = "\xe2\x80\xba";
 
     GameRow rows[GAME_ROWS];
-    int count = game_rows(&ui->controls, ui_game_kind(ui), rows);
-
-    /* Up to eleven rows fit above the hints: the last one's second line ends near y 960. */
-    float pitch = count > 8 ? (float)(960 - 226 - 66) / (float)(count - 1) : count > 7 ? 92 : count > 6 ? 104 : 118;
-    pc5_text(c, &ui->fonts, PC5_FACE_SMALL, (int)x + 64, 182, C_DIM, game->playable ? game->detail : game->problem, 760 - 128, 0);
+    int count = game_rows(&ui->controls, kind, page, rows);
+    pc5_text(c, &ui->fonts, PC5_FACE_SMALL, (int)x + 64, 182, C_DIM,
+             page != GP_MAIN ? game->title : game->playable ? game->detail : game->problem, 760 - 128, 0);
     for (int i = 0; i < count; i++) {
-        float y = 226 + pitch * i;
+        float y = 226 + (float)ROW_PITCH * i;
+        int on = chosen == i;
         switch (rows[i]) {
         case GR_PLAY:
-            drawer_row(ui, c, x, y, pitch, chosen == i, "Play", "To leave it, hold the touchpad and OPTIONS for 2 s", "");
+            drawer_row(ui, c, x, y, ROW_PITCH, on, "Play", "To leave it, hold the touchpad and OPTIONS for 2 s", "");
             break;
         case GR_CONTROLLER:
-            drawer_row(ui, c, x, y, pitch, chosen == i, "Controller",
+            drawer_row(ui, c, x, y, ROW_PITCH, on, "Controller",
                        ui->controls.mode == PC5_PAD_DUALSENSE ? "The game sees a DualSense, as one plugged into a PC"
                        : ui->controls.mode == PC5_PAD_KEYBOARD ? "The buttons press keys, the sticks move the mouse"
                                                                : "Games with controller support see an Xbox controller",
                        pc5_pad_mode_name(ui->controls.mode));
             break;
         case GR_BUTTONS:
-            drawer_row(ui, c, x, y, pitch, chosen == i, "Button mapping", "The key or mouse button each one sends",
-                       "\xe2\x80\xba");
+            drawer_row(ui, c, x, y, ROW_PITCH, on, "Button mapping", "The key or mouse button each one sends", more);
+            break;
+        case GR_GRAPHICS:
+            drawer_row(ui, c, x, y, ROW_PITCH, on, "Graphics",
+                       kind & GAME_VULKAN ? (kind & GAME_32BIT ? "Frame generation, resolution, aspect ratio and memory"
+                                                               : "Frame generation, resolution and aspect ratio")
+                                          : (kind & GAME_32BIT ? "Frame generation, aspect ratio and memory"
+                                                               : "Frame generation and aspect ratio"),
+                       more);
+            break;
+        case GR_APPEARANCE:
+            drawer_row(ui, c, x, y, ROW_PITCH, on, "Appearance", "Its cover, its background and a home screen tile", more);
+            break;
+        case GR_MANAGE:
+            drawer_row(ui, c, x, y, ROW_PITCH, on, "Manage",
+                       kind & GAME_PC5 ? "Its program, updating it and uninstalling it" : "Its program and uninstalling it",
+                       more);
             break;
         case GR_FRAMEGEN:
-            drawer_row(ui, c, x, y, pitch, chosen == i, "Frame generation",
+            drawer_row(ui, c, x, y, ROW_PITCH, on, "Frame generation",
                        ui->controls.frame_generation ? "Held at 30 fps and shown at 60"
                                                      : "The game's frames as it makes them",
                        ui->controls.frame_generation ? "30 \xe2\x86\x92 60 fps" : "Off");
             break;
         case GR_RESOLUTION:
-            drawer_row(ui, c, x, y, pitch, chosen == i, "Resolution",
+            drawer_row(ui, c, x, y, ROW_PITCH, on, "Resolution",
                        ui->controls.resolution == 2   ? "Drawn at 4K, as the console shows it; four times the work of 1080p"
                        : ui->controls.resolution == 1 ? "Drawn at 1440p and shown at 4K; sharper than 1080p, slower"
                                                       : "Drawn at 1080p and shown at 4K by the console",
                        ui->controls.resolution == 2 ? "4K" : ui->controls.resolution == 1 ? "1440p" : "1080p");
             break;
         case GR_ASPECT:
-            drawer_row(ui, c, x, y, pitch, chosen == i, "Aspect ratio",
+            drawer_row(ui, c, x, y, ROW_PITCH, on, "Aspect ratio",
                        ui->controls.stretch ? "Stretched to fill the screen: a 4:3 picture gets wider"
                                             : "The picture's own shape, with bars beside a 4:3 one",
                        ui->controls.stretch ? "Stretch" : "Keep");
             break;
         case GR_MEMORY:
-            drawer_row(ui, c, x, y, pitch, chosen == i, "Memory",
+            drawer_row(ui, c, x, y, ROW_PITCH, on, "Memory",
                        ui->controls.memory_2gb ? "What Windows gives a 32-bit game that doesn't ask for more"
                                                : "Room for big textures and mods; 2 GB if the game misbehaves",
                        ui->controls.memory_2gb ? "2 GB" : "4 GB");
             break;
+        case GR_COVER:
+            drawer_row(ui, c, x, y, ROW_PITCH, on, "Cover", "Another of those found, or search by another name", more);
+            break;
+        case GR_BACKGROUND:
+            drawer_row(ui, c, x, y, ROW_PITCH, on, "Background", "Another of those found, search by another name, or none",
+                       more);
+            break;
+        case GR_HOME:
+            if (ui->tile[0]) snprintf(about, sizeof(about), "Its tile, %s, starts the game", ui->tile);
+            drawer_row(ui, c, x, y, ROW_PITCH, on, "Home screen tile",
+                       ui->tile[0] ? about : "A tile on the PS5's home screen that starts it", ui->tile[0] ? "On" : "Off");
+            break;
         case GR_PROGRAM: {
             const char *exe = strrchr(game->executable, '\\');
             snprintf(about, sizeof(about), "Now: %s", exe ? exe + 1 : game->executable);
-            drawer_row(ui, c, x, y, pitch, chosen == i, "Change program", about, "");
+            drawer_row(ui, c, x, y, ROW_PITCH, on, "Change program", about, "");
             break;
         }
-        case GR_HOME:
-            if (ui->tile[0]) snprintf(about, sizeof(about), "Its tile, %s, starts the game", ui->tile);
-            drawer_row(ui, c, x, y, pitch, chosen == i, "Home screen tile",
-                       ui->tile[0] ? about : "A tile on the PS5's home screen that starts it", ui->tile[0] ? "On" : "Off");
-            break;
         case GR_UPDATE:
-            drawer_row(ui, c, x, y, pitch, chosen == i, "Update", "A newer copy from USB; its saves and settings stay",
-                       "\xe2\x80\xba");
+            drawer_row(ui, c, x, y, ROW_PITCH, on, "Update", "A newer copy from USB; its saves and settings stay", more);
             break;
         case GR_UNINSTALL:
-            drawer_row(ui, c, x, y, pitch, chosen == i, "Uninstall", "Deletes the game, or keeps its saves for later", "");
+            drawer_row(ui, c, x, y, ROW_PITCH, on, "Uninstall", "Deletes the game, or keeps its saves for later", "");
             break;
         }
     }
-    Hint list[] = { { accept_glyph(ui), chosen < count && (rows[chosen] == GR_CONTROLLER || rows[chosen] == GR_FRAMEGEN ||
-                                                           rows[chosen] == GR_RESOLUTION || rows[chosen] == GR_ASPECT ||
-                                                           rows[chosen] == GR_MEMORY ||
-                                                           rows[chosen] == GR_HOME)
-                                            ? "Change" : "Choose" },
-                    { back_glyph(ui), "Back" } };
+    GameRow row = chosen >= 0 && chosen < count ? rows[chosen] : GR_PLAY;
+    int changes = row == GR_CONTROLLER || row == GR_FRAMEGEN || row == GR_RESOLUTION || row == GR_ASPECT ||
+                  row == GR_MEMORY || row == GR_HOME;
+    Hint list[] = { { accept_glyph(ui), changes ? "Change" : "Choose" }, { back_glyph(ui), "Back" } };
     hints(ui, c, (int)x + 64, 1012, list, 2);
 }
 
@@ -3488,6 +3828,75 @@ static void start_screen(Pc5Ui *ui, Pc5Canvas *c, const char *line, int can_skip
     }
 }
 
+/* Appearance › Cover or Background: the picture shown, what it is, and the keys. */
+static void picture_screen(Pc5Ui *ui, Pc5Canvas *c)
+{
+    int index = pc5_library_find(&ui->library, ui->launch_id);
+    if (index < 0 || !ui->pick) return;
+    const Pc5Game *game = &ui->library.games[index];
+    int cover = ui->pick_kind == PICK_COVER, entry = pick_entry(ui, ui->pick_at);
+    float w = 1600, h = 880, x = (W - w) / 2, y = (H - h) / 2;
+    float pw = cover ? 420 : 960, ph = cover ? 630 : 540, px = x + 72, py = y + 90;
+    char line[300];
+
+    dim(c, 160);
+    panel(c, x, y, w, h);
+    if (cover) {
+        pc5_shadow(c, px, py, pw, ph, 14, 50, pc5_mix(ui->pick_tint, 0xff000000u, 60) | 0xa0000000u);
+        if (ui->pick_picture.levels) pc5_draw_cover(c, &ui->pick_picture, px, py + ph / 2, pw, ph, ph, 14, 256, 256, 0);
+        else pc5_round_rect(c, px, py, pw, ph, 14, C_ROW);
+    } else if (ui->pick_image.px) {
+        pc5_draw_image(c, &ui->pick_image, px, py, pw, ph, 255);
+    } else {
+        /* PC5's own backdrop, as behind the library without a background */
+        pc5_round_rect(c, px, py, pw, ph, 14, 0xff0d0f14u);
+        pc5_round_frame(c, px, py, pw, ph, 14, 1.5f, C_EDGE);
+        if (!ui->pick_fetching)
+            pc5_text(c, &ui->fonts, PC5_FACE_BODY, (int)(px + pw / 2), (int)(py + ph / 2 + 12), C_FAINT, "PC5's own backdrop",
+                     (int)pw - 80, 1);
+    }
+    if (ui->pick_fetching) {
+        pc5_round_rect(c, px, py, pw, ph, 14, 0xa0000000u);
+        spinner(c, px + pw / 2, py + ph / 2, 34, ui->now, C_TEXT);
+    }
+    snprintf(line, sizeof(line), "%d of %d", ui->pick_at + 1, ui->pick_count);
+    pc5_text(c, &ui->fonts, PC5_FACE_SMALL, (int)(px + pw / 2), (int)(py + ph + 46), C_DIM, line, (int)pw, 1);
+
+    float tx = px + pw + 64, tw = x + w - 72 - tx, ty = y + 150;
+    ty += 64 * (float)pc5_text_wrap(c, &ui->fonts, PC5_FACE_TITLE, (int)tx, (int)ty, (int)tw, 2, 64, C_TEXT, game->title, 0);
+    pc5_text(c, &ui->fonts, PC5_FACE_BODY, (int)tx, (int)ty, C_DIM, cover ? "Its cover" : "Its background", (int)tw, 0);
+    ty += 90;
+    const char *what = "", *detail = "";
+    if (ui->pick_fetching) what = "";
+    else if (entry < 0) what = cover ? "The cover it has now" : "The background it has now";
+    else if (entry < ui->pick->count) {
+        snprintf(line, sizeof(line), "From %s", ui->pick->choices[entry].source);
+        what = line;
+        detail = ui->pick->choices[entry].title;
+    } else what = cover ? "Made from the game's icon and name" : "None: PC5's own backdrop";
+    ty += 50 * (float)pc5_text_wrap(c, &ui->fonts, PC5_FACE_LABEL, (int)tx, (int)ty, (int)tw, 2, 50, C_TEXT, what, 0);
+    if (detail[0]) ty += 42 * (float)pc5_text_wrap(c, &ui->fonts, PC5_FACE_BODY, (int)tx, (int)ty, (int)tw, 2, 42, C_DIM, detail, 0);
+    ty += 40;
+    if (!ui->pick->count) {
+        char none[200];
+        if (ui->pick_query[0])
+            snprintf(none, sizeof(none), "Nothing found for \xe2\x80\x9c%s\xe2\x80\x9d.", ui->pick_query);
+        else
+            snprintf(none, sizeof(none), "Nothing found for its name.");
+        ty += 40 * (float)pc5_text_wrap(c, &ui->fonts, PC5_FACE_BODY, (int)tx, (int)ty, (int)tw, 2, 40, C_WARN, none, 0);
+    } else if (ui->pick_query[0]) {
+        snprintf(line, sizeof(line), "Found for \xe2\x80\x9c%s\xe2\x80\x9d", ui->pick_query);
+        ty += 40 * (float)pc5_text_wrap(c, &ui->fonts, PC5_FACE_BODY, (int)tx, (int)ty, (int)tw, 2, 40, C_FAINT, line, 0);
+    }
+    Hint list[4];
+    int n = 0;
+    list[n++] = (Hint){ accept_glyph(ui), "Use this" };
+    if (ui->pick_count > 1) list[n++] = (Hint){ G_L1R1, cover ? "Other covers" : "Other backgrounds" };
+    if (ui->platform.keyboard_open) list[n++] = (Hint){ G_TRIANGLE, "Search by name" };
+    list[n++] = (Hint){ back_glyph(ui), "Back" };
+    hints(ui, c, (int)px, (int)(y + h - 48), list, n);
+}
+
 void pc5_ui_draw(Pc5Ui *ui, Pc5Canvas *c)
 {
     char line[300];
@@ -3606,10 +4015,19 @@ void pc5_ui_draw(Pc5Ui *ui, Pc5Canvas *c)
     case S_SEARCH:
         busy_dialog(ui, c, "Looking for the cover", "On Steam, GOG and Wikipedia", 1);
         break;
+    case S_PICTURE_SEARCH: {
+        const char *where = ui->pick_kind == PICK_COVER ? "on Steam, GOG and Wikipedia" : "on Steam and GOG";
+        if (ui->pick_query[0]) snprintf(line, sizeof(line), "\xe2\x80\x9c%s\xe2\x80\x9d, %s", ui->pick_query, where);
+        else snprintf(line, sizeof(line), "%c%s", where[0] - 32, where + 1);
+        busy_dialog(ui, c, ui->pick_kind == PICK_COVER ? "Looking for covers" : "Looking for backgrounds", line, 1);
+        break;
+    }
+    case S_PICTURE:
+    case S_PICTURE_TYPING: picture_screen(ui, c); break;
     case S_REVIEW: review_screen(ui, c); break;
     case S_PROGRAMS: {
         Hint list[] = { { accept_glyph(ui), "Choose" }, { back_glyph(ui), "Back" } };
-        if (ui->program_for) game_menu_screen(ui, c, 1);
+        if (ui->program_for) game_menu_screen(ui, c, game_row_find(&ui->controls, ui_game_kind(ui), GR_PROGRAM, NULL));
         list_panel(ui, c, "Which program is the game?", ui->folder.exe_count, program_row, "", "", list, 2, 104);
         break;
     }
@@ -3646,7 +4064,8 @@ void pc5_ui_draw(Pc5Ui *ui, Pc5Canvas *c)
     case S_UNINSTALL_CONFIRM: {
         const Pc5Game *game = &ui->library.games[ui->menu];
         const Pc5Picture *thumb = ui->covers[ui->menu].state ? &ui->covers[ui->menu].picture : NULL;
-        if (ui->uninstall_back == S_GAME_MENU) game_menu_screen(ui, c, game_row_at(&ui->controls, ui_game_kind(ui), GR_UNINSTALL));
+        if (ui->uninstall_back == S_GAME_MENU)
+            game_menu_screen(ui, c, game_row_find(&ui->controls, ui_game_kind(ui), GR_UNINSTALL, NULL));
         snprintf(line, sizeof(line), "Uninstall %s?", game->title);
         if (pc5_remove_can_keep(game, &ui->library))
             confirm3_dialog(ui, c, line,

@@ -430,6 +430,41 @@ static int index_update(const char *root, const char *file, int add)
     return status;
 }
 
+/* The player's Wine log channels for one game, for a report that needs more than PC5 logs:
+ * the first line of prefixes/<id>/pc5/winedebug.txt that isn't empty or a comment (# or ;),
+ * in place of the title's (err+all,+loaddll,+process). "" when there is none, or when it
+ * has more than prospero-win's [debug] winedebug takes: letters, digits and _ + - , = ., 127
+ * at most. */
+static void game_winedebug(const char *root, const char *id, char *out, size_t size)
+{
+    char path[PC5_PATH];
+    Pc5Buf text = { 0 };
+
+    out[0] = 0;
+    if (pc5_format(path, sizeof(path), "%s/prefixes/%s/pc5/winedebug.txt", root, id) ||
+        pc5_read_file(path, &text, 4096) || pc5_buf_terminate(&text)) {
+        pc5_buf_free(&text);
+        return;
+    }
+    for (char *line = (char *)text.data, *next; line; line = next) {
+        next = strchr(line, '\n');
+        if (next) *next++ = 0;
+        while (*line == ' ' || *line == '\t') line++;
+        size_t n = strlen(line);
+        while (n && (line[n - 1] == ' ' || line[n - 1] == '\t' || line[n - 1] == '\r')) line[--n] = 0;
+        if (!n || line[0] == '#' || line[0] == ';') continue;
+        int ok = n < 128 && n < size;
+        for (size_t i = 0; ok && i < n; i++) {
+            char c = line[i];
+            ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '+' ||
+                 c == '-' || c == ',' || c == '=' || c == '.';
+        }
+        if (ok) memcpy(out, line, n + 1);
+        break;
+    }
+    pc5_buf_free(&text);
+}
+
 int pc5_profile_refresh(const char *root, const char *id, char *error, size_t size)
 {
     Pc5Info info, program;
@@ -476,6 +511,12 @@ int pc5_profile_refresh(const char *root, const char *id, char *error, size_t si
         pc5_format(path, sizeof(path), "%s/profiles/%s", root, file)) {
         snprintf(error, size, "The game's path is too long for Windows.");
         return -1;
+    }
+    {
+        char channels[128];
+        size_t n = strlen(text);
+        game_winedebug(root, id, channels, sizeof(channels));
+        if (channels[0] && pc5_format(text + n, sizeof(text) - n, "\n[debug]\nwinedebug = %s\n", channels)) text[n] = 0;
     }
     if (pc5_read_file(path, &old, sizeof(text)) || old.len != strlen(text) || memcmp(old.data, text, old.len))
         status = pc5_write_file(path, text, strlen(text));

@@ -35,7 +35,7 @@ No. PC5 copies each game to the console. The USB drive is only read while instal
 No. Install the game on a PC first, then copy the installed folder to the USB drive.
 
 **PC5 picked the wrong .exe. What now?**
-Choose the game, press **△** and use **Change program**. See [Choosing the right program](Installing-games#choosing-the-right-program).
+Choose the game, press **△** and use **Manage › Change program**. See [Choosing the right program](Installing-games#choosing-the-right-program).
 
 **What happens if the console switches off during an install?**
 The unfinished copy is deleted the next time PC5 starts. Install the game again.
@@ -52,7 +52,7 @@ Yes. A USB keyboard and mouse work in every controller mode. For games without c
 Yes, up to four, in a game with local multiplayer: each player turns on their own controller and signs in with it on the console, as another user or a guest. See [More than one player](Controllers#more-than-one-player).
 
 **Can I make a game run at 60 fps?**
-For a game that keeps 30 fps, turn on **△ › Frame generation**. It shows the game at 60 fps with frames made in between. See [Frame generation](Playing-games#frame-generation).
+For a game that keeps 30 fps, turn on **△ › Graphics › Frame generation**. It shows the game at 60 fps with frames made in between. See [Frame generation](Playing-games#frame-generation).
 
 **Do .NET games run?**
 Since 1.5.0, yes: .NET Framework games and tools (XNA through FNA, MonoGame, WinForms) run with Wine Mono, the open-source stand-in for Microsoft's .NET that Wine itself uses. The first time a .NET game starts, PC5 sets it up once for every game. Programs that mix .NET and C++ (C++/CLI) don't run, and some WPF doesn't. See [.NET games](Playing-games#net-games).
@@ -61,13 +61,13 @@ Since 1.5.0, yes: .NET Framework games and tools (XNA through FNA, MonoGame, Win
 Click the touchpad with two fingers: the PS5's on-screen keyboard opens over the game, and what you type is typed into the game when you choose Done. See [Typing in a game](Controllers#typing-in-a-game).
 
 **Can I make a 4:3 game fill the screen?**
-Yes: **△ › Aspect ratio › Stretch**. The picture gets wider than it was drawn. See [Aspect ratio](Playing-games#aspect-ratio).
+Yes: **△ › Graphics › Aspect ratio › Stretch**. The picture gets wider than it was drawn. See [Aspect ratio](Playing-games#aspect-ratio).
 
 **My game has its own launcher. Does it work?**
 Since 1.6.0, usually: when the launcher starts the game, PC5 closes the launcher and starts the game in its place. A launcher that needs a store's client (Steam, Epic, EA, Ubisoft) still doesn't work. See [What runs and what doesn't](Installing-games#what-runs-and-what-doesnt).
 
 **Can a game run at 1440p or 4K?**
-Yes, a game drawn with Direct3D, Vulkan or OpenGL: **△ › Resolution**. 1080p is the default. 4K is four times the work of 1080p, so a game that is already slow gets slower. See [Resolution](Playing-games#resolution).
+Yes, a game drawn with Direct3D, Vulkan or OpenGL: **△ › Graphics › Resolution**. 1080p is the default. 4K is four times the work of 1080p, so a game that is already slow gets slower. See [Resolution](Playing-games#resolution).
 
 **A game shows empty boxes instead of Japanese, Chinese or Korean text.**
 Update PC5. Since 1.5.0, games find Windows' Chinese, Japanese and Korean fonts (Droid Sans Fallback stands in for them), and Arial, Times New Roman and Courier New (Liberation). A game that draws text with its own font isn't changed.
@@ -90,7 +90,7 @@ In the game's own Windows folder, `/data/prospero-win/prefixes/<game>/`. See [Fi
 You choose. **Keep saves** deletes the game and keeps its saves and settings for when you install it again; **Delete all** deletes everything, with no backup and no undo. See [Uninstalling a game](Installing-games#uninstalling-a-game).
 
 **How do I update a game to a newer version?**
-Put the newer copy's folder on the USB drive, then choose the game, press **△** and choose **Update**. Its saves, settings and options stay. See [Updating a game](Installing-games#updating-a-game).
+Put the newer copy's folder on the USB drive, then choose the game, press **△** and choose **Manage › Update**. Its saves, settings and options stay. See [Updating a game](Installing-games#updating-a-game).
 
 **Do I lose my games when I update PC5?**
 No. Games, saves and settings are in `/data/prospero-win`, not in the app's folder. Replace the app's folder and everything stays. See [Updating PC5](Installing-and-updating#updating-pc5).

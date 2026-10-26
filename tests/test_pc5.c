@@ -163,6 +163,27 @@ static void test_json(void)
 
 static void test_names(void)
 {
+    /* Text for and from the console's keyboard (UTF-16), every kind of character there and back. */
+    {
+        uint16_t wide[16];
+        char back[64];
+        const char *text = "A\xc3\xa9\xe2\x82\xac\xf0\x9f\x8e\xae";   /* A, e acute, the euro, a game controller */
+        CHECK(pc5_utf16_from_utf8(wide, 16, text) == 5 && wide[0] == 'A' && wide[1] == 0xe9 && wide[2] == 0x20ac &&
+                  wide[3] == 0xd83c && wide[4] == 0xdfae && !wide[5],
+              "UTF-16: %04x %04x %04x %04x %04x", wide[0], wide[1], wide[2], wide[3], wide[4]);
+        pc5_utf8_from_utf16(back, sizeof(back), wide);
+        CHECK(!strcmp(back, text), "and back");
+        CHECK(pc5_utf16_from_utf8(wide, 4, text) == 3 && wide[2] == 0x20ac && !wide[3], "cut to fit, not in a pair");
+        CHECK(pc5_utf16_from_utf8(wide, 16, "\xff\xc3x") == 3 && wide[0] == 0xfffd && wide[1] == 0xfffd && wide[2] == 'x',
+              "a broken byte is U+FFFD");
+        CHECK(pc5_utf16_from_utf8(wide, 16, "\xc0\xaf") == 1 && wide[0] == 0xfffd, "an overlong form too");
+        uint16_t lone[] = { 'a', 0xd800, 'b', 0 };
+        pc5_utf8_from_utf16(back, sizeof(back), lone);
+        CHECK(!strcmp(back, "a\xef\xbf\xbd" "b"), "a lone surrogate is U+FFFD");
+        uint16_t euro[] = { 'x', 0x20ac, 0 };
+        pc5_utf8_from_utf16(back, 4, euro);
+        CHECK(!strcmp(back, "x"), "cut before a character that doesn't fit: %s", back);
+    }
     char q[3][PC5_NAME];
     Pc5CoverHint hint = { .folder = "Neon.Drift.Complete.Edition.v1.2.0-GOG", .product = "Neon Drift: Complete Edition",
                           .program = "NeonDrift" };
@@ -884,6 +905,28 @@ static void test_install(void)
     profile = pw_wine_library_find(pw, "orbital-nine");
     CHECK(profile && strstr(profile->app.executable, "OrbitalNine-Win64-Shipping.exe"), "orbital: %s",
           profile ? profile->app.executable : "-");
+    CHECK(profile && !profile->winedebug[0], "the title's Wine log channels");
+    /* The player's channels for one game (winedebug.txt), for a report: in its profile while the file is there. */
+    {
+        char why[PC5_ERROR], debug[PC5_PATH];
+        path(debug, sizeof(debug), "%s/prefixes/orbital-nine/pc5/winedebug.txt", root);
+        write_text(debug, "# for issue 84\n\n  err+all,+loaddll,+process,+seh,+mmdevapi  \r\nwarn+all\n");
+        CHECK(!pc5_profile_refresh(root, "orbital-nine", why, sizeof(why)), "refreshed: %s", why);
+        pw_wine_library_load(pw, root);
+        profile = pw_wine_library_find(pw, "orbital-nine");
+        CHECK(profile && !strcmp(profile->winedebug, "err+all,+loaddll,+process,+seh,+mmdevapi"), "its channels: %s",
+              profile ? profile->winedebug : "-");
+        write_text(debug, "+seh; rm -rf /\n");
+        CHECK(!pc5_profile_refresh(root, "orbital-nine", why, sizeof(why)), "refreshed: %s", why);
+        pw_wine_library_load(pw, root);
+        profile = pw_wine_library_find(pw, "orbital-nine");
+        CHECK(profile && !profile->winedebug[0], "anything but channels is left out");
+        unlink(debug);
+        CHECK(!pc5_profile_refresh(root, "orbital-nine", why, sizeof(why)), "refreshed: %s", why);
+        pw_wine_library_load(pw, root);
+        profile = pw_wine_library_find(pw, "orbital-nine");
+        CHECK(profile && !profile->winedebug[0], "gone with the file");
+    }
     /* Installing the same folder again makes a second game, never a second copy over the first. */
     CHECK(install_folder("NeonDrift", 0, 0, id, sizeof(id)) == PC5_INSTALL_DONE && !strcmp(id, "neondrift-2"), "second: %s", id);
 
@@ -1303,7 +1346,30 @@ typedef struct FakeConsole {
     int restarts;
     char sound[64];
     int sounds;
+    /* the on-screen keyboard: opened how often, its title and starting text, and what is typed
+     * (cancelled when typed is NULL) */
+    int keyboards;
+    char keyboard_title[96], keyboard_start[PC5_NAME];
+    const char *typed;
 } FakeConsole;
+
+static int fake_keyboard_open_text(void *context, const char *title, const char *text)
+{
+    FakeConsole *console = context;
+    console->keyboards++;
+    pc5_copy(console->keyboard_title, sizeof(console->keyboard_title), title);
+    pc5_copy(console->keyboard_start, sizeof(console->keyboard_start), text);
+    return 0;
+}
+
+static int fake_keyboard_state_text(void *context) { (void)context; return 2; }
+
+static int fake_keyboard_close_text(void *context, char *out, size_t size)
+{
+    FakeConsole *console = context;
+    pc5_copy(out, size, console->typed ? console->typed : "");
+    return console->typed != NULL;
+}
 
 static void fake_sound(void *context, const char *name)
 {
@@ -1441,7 +1507,7 @@ static void test_settings(void)
     pc5_mkdirs(dir);
     CHECK(pc5_settings_load(dir, &set) == -1 && !set.fps && !set.frame_time && !set.cpu_usage && !set.cpu_temperature &&
           !set.soc_temperature && !set.memory && !pc5_game_overlay_lines(&set) && set.vibration == 100 &&
-          set.check_updates && !set.keep_logs && !strcmp(set.startup_sound, "PC5") &&
+          set.check_updates && !set.keep_logs && !strcmp(set.startup_sound, "cheap chinese speaker") &&
           set.fps_corner == PC5_CORNER_TOP_RIGHT && set.light_bar == PC5_LIGHT_GAME && set.triggers == PC5_TRIGGERS_OFF &&
           set.trigger_rumble == 100 && set.trigger_resistance == 50,
           "defaults without a file");
@@ -1467,6 +1533,11 @@ static void test_settings(void)
           back.triggers == PC5_TRIGGERS_BOTH, "what it doesn't know gives the default");
     write_text(file, "vibration = on\n");
     CHECK(!pc5_settings_load(dir, &back) && back.vibration == 100, "an earlier PC5's vibration = on is 100 %%");
+    write_text(file, "startup_sound = PC5\n");
+    CHECK(!pc5_settings_load(dir, &back) && !strcmp(back.startup_sound, "cheap chinese speaker"),
+          "1.8.0's own sound, gone, is the default: %s", back.startup_sound);
+    write_text(file, "startup_sound = on\n");
+    CHECK(!pc5_settings_load(dir, &back) && !strcmp(back.startup_sound, "cheap chinese speaker"), "1.7.0's on too");
     write_text(file, "vibration = 75\ntrigger_rumble = 50\n");
     CHECK(!pc5_settings_load(dir, &back) && back.vibration == 75 && back.trigger_rumble == 50, "strengths read");
     write_text(file, "frame_time = on\ncpu_usage = on\ncpu_temperature = on\nsoc_temperature = yes\nmemory = on\n");
@@ -2049,14 +2120,20 @@ static void test_sound(void)
         CHECK(pc5_sound_path(app, own, "Gone", file, sizeof(file)) && pc5_sound_path(app, own, "../x", file, sizeof(file)),
               "none of that name");
     }
-    /* The app's own. */
-    char file[PC5_PATH];
-    Pc5Buf data = { 0 };
-    path(file, sizeof(file), "%s/../../art/sounds/PC5.wav", fixtures);
-    CHECK(!pc5_read_file(file, &data, 16u << 20) && !pc5_sound_from_wav(data.data, data.len, &sound) &&
-          sound.frames > 48000 && sound.frames < 48000 * 10, "art/sounds/PC5.wav: %zu frames", sound.frames);
-    pc5_sound_free(&sound);
-    pc5_buf_free(&data);
+    /* The app's own, each read, the default among them. */
+    static const char *const own[] = { "Beeper - Push", "Cha-Ching", "System Activated", "cheap chinese speaker", "fahh",
+                                       "funny message tone", "rizz" };
+    for (size_t i = 0; i < sizeof(own) / sizeof(own[0]); i++) {
+        char file[PC5_PATH];
+        Pc5Buf data = { 0 };
+        path(file, sizeof(file), "%s/../../art/sounds/%s.wav", fixtures, own[i]);
+        CHECK(!pc5_read_file(file, &data, 64u << 20) && !pc5_sound_from_wav(data.data, data.len, &sound) &&
+              sound.frames > 4800 && sound.frames <= 48000 * PC5_SOUND_SECONDS, "art/sounds/%s.wav: %zu frames", own[i],
+              sound.frames);
+        pc5_sound_free(&sound);
+        pc5_buf_free(&data);
+    }
+    CHECK(!strcmp(PC5_SOUND_DEFAULT, "cheap chinese speaker"), "the default is one of them");
 }
 
 
@@ -2171,7 +2248,7 @@ static void test_background_screen(const char *fonts)
     FakeConsole console = { 0 };
     FakeNet net = { 0 };
     Pc5Platform platform = { &console, { &net, fake_get, NULL }, fake_clock, fake_play, NULL, fake_notify, fake_time, 0,
-                             NULL, NULL };
+                             NULL, NULL, NULL, NULL, NULL };
     const char *roots[] = { usb, NULL };
     Pc5Canvas canvas = { pc5_alloc(1920u * 1080u * 4u), 1920, 1080, 1920 };
     Pc5Library library;
@@ -3419,7 +3496,8 @@ static void test_tile_start(const char *fonts)
 {
     FakeConsole console = { 0 };
     FakeNet net = { 0 };
-    Pc5Platform platform = { &console, { &net, fake_get, NULL }, fake_clock, fake_play, NULL, fake_notify, fake_time, 0, NULL, NULL };
+    Pc5Platform platform = { &console, { &net, fake_get, NULL }, fake_clock, fake_play, NULL, fake_notify, fake_time, 0, NULL, NULL,
+                             NULL, NULL, NULL };
     const char *roots[] = { usb, NULL };
     Pc5Canvas canvas = { pc5_alloc(1920u * 1080u * 4u), 1920, 1080, 1920 };
     Pc5Library library;
@@ -3479,17 +3557,117 @@ static void test_tile_start(const char *fonts)
     pc5_free(canvas.px);
 }
 
+/* Two files with the same bytes. */
+static int same_bytes(const char *a, const char *b)
+{
+    Pc5Buf x = { 0 }, y = { 0 };
+    int same = !pc5_read_file(a, &x, 64u << 20) && !pc5_read_file(b, &y, 64u << 20) && x.len == y.len &&
+               !memcmp(x.data, y.data, x.len);
+    pc5_buf_free(&x);
+    pc5_buf_free(&y);
+    return same;
+}
+
+/* A game's cover and background chosen by hand (Appearance): what was found for its names, a
+ * name typed on the keyboard, the card, and none. The game menu is on Appearance's last row. */
+static void test_picture_screens(Pc5Ui *ui, Pc5Canvas *canvas, FakeConsole *console)
+{
+    char cover[PC5_PATH], background[PC5_PATH], note[PC5_PATH], jpg[PC5_PATH], png[PC5_PATH], expected[PC5_PATH];
+    char kept[PC5_PATH];
+    Pc5Image image = { 0 };
+
+    path(cover, sizeof(cover), "%s/prefixes/orbital-nine/pc5/cover.bin", root);
+    path(background, sizeof(background), "%s/prefixes/orbital-nine/pc5/background.bin", root);
+    path(note, sizeof(note), "%s/prefixes/orbital-nine/pc5/background-none.txt", root);
+    path(jpg, sizeof(jpg), "%s/prefixes/orbital-nine/pc5/cover-original.jpg", root);
+    path(png, sizeof(png), "%s/prefixes/orbital-nine/pc5/cover-original.png", root);
+    path(kept, sizeof(kept), "%s/cover-before.bin", work);
+    copy_file(cover, kept);
+
+    /* Cover: the one it has first; Back leaves it. */
+    press(ui, PC5_KEY_UP, canvas);
+    press(ui, PC5_KEY_UP, canvas);
+    press(ui, PC5_KEY_ACCEPT, canvas);
+    until_screen(ui, "picture", canvas);
+    frames(ui, 0, 0, 8, canvas);
+    CHECK(!strcmp(pc5_ui_screen(ui), "picture"), "the cover's picker: %s", pc5_ui_screen(ui));
+    save_shot(canvas, "cover-choose");
+    press(ui, PC5_KEY_BACK, canvas);   /* too soon after it opened: ignored */
+    frames(ui, 0, 0, 20, canvas);
+    press(ui, PC5_KEY_BACK, canvas);
+    CHECK(!strcmp(pc5_ui_screen(ui), "game-menu") && same_bytes(cover, kept), "Back: the menu, the cover as it was: %s",
+          pc5_ui_screen(ui));
+    /* A name typed, the first found shown and used: Steam's, its picture kept beside it. */
+    press(ui, PC5_KEY_ACCEPT, canvas);
+    until_screen(ui, "picture", canvas);
+    frames(ui, 0, 0, 20, canvas);
+    console->typed = NULL;   /* cancelled: nothing searched */
+    press(ui, PC5_KEY_TRIANGLE, canvas);
+    CHECK(console->keyboards == 1 && !strcmp(console->keyboard_start, "Orbital Nine") &&
+              strstr(console->keyboard_title, "covers") && !strcmp(pc5_ui_screen(ui), "picture"),
+          "the keyboard, with the game's name; cancelled: %d %s %s", console->keyboards, console->keyboard_start,
+          pc5_ui_screen(ui));
+    frames(ui, 0, 0, 20, canvas);
+    console->typed = "  Neon Drift ";
+    press(ui, PC5_KEY_TRIANGLE, canvas);
+    until_screen(ui, "picture", canvas);
+    frames(ui, 0, 0, 20, canvas);
+    save_shot(canvas, "cover-choose-search");
+    press(ui, PC5_KEY_ACCEPT, canvas);
+    path(expected, sizeof(expected), "%s/cover-00.png", covers);
+    CHECK(!strcmp(pc5_ui_screen(ui), "game-menu") && !same_bytes(cover, kept) && same_bytes(png, expected) &&
+              !pc5_exists(jpg),
+          "used: a new cover, Steam's picture beside it: %s", pc5_ui_screen(ui));
+    /* The card, the last one (one back from the first): no downloaded picture then. */
+    press(ui, PC5_KEY_ACCEPT, canvas);
+    until_screen(ui, "picture", canvas);
+    frames(ui, 0, 0, 20, canvas);
+    press(ui, PC5_KEY_L1, canvas);
+    frames(ui, 0, 0, 20, canvas);
+    press(ui, PC5_KEY_ACCEPT, canvas);
+    CHECK(!strcmp(pc5_ui_screen(ui), "game-menu") && !pc5_exists(png) && !pc5_exists(jpg) && pc5_cover_current(cover),
+          "the card: %s", pc5_ui_screen(ui));
+
+    /* Background: none to start with; a name typed gives Steam's library hero. */
+    unlink(background);
+    press(ui, PC5_KEY_DOWN, canvas);
+    press(ui, PC5_KEY_ACCEPT, canvas);
+    until_screen(ui, "picture", canvas);
+    frames(ui, 0, 0, 20, canvas);
+    console->typed = "Neon Drift";
+    press(ui, PC5_KEY_TRIANGLE, canvas);
+    CHECK(strstr(console->keyboard_title, "backgrounds") != NULL, "the keyboard's title: %s", console->keyboard_title);
+    until_screen(ui, "picture", canvas);
+    frames(ui, 0, 0, 20, canvas);
+    save_shot(canvas, "background-choose");
+    press(ui, PC5_KEY_ACCEPT, canvas);
+    CHECK(!strcmp(pc5_ui_screen(ui), "game-menu") && !pc5_cover_load(background, &image, NULL) &&
+              image.w == PC5_BACKGROUND_WIDTH && image.h == PC5_BACKGROUND_HEIGHT && !pc5_exists(note),
+          "a background: %s %dx%d", pc5_ui_screen(ui), image.w, image.h);
+    pc5_image_free(&image);
+    /* None, the last: PC5's own backdrop, and none looked for again. */
+    press(ui, PC5_KEY_ACCEPT, canvas);
+    until_screen(ui, "picture", canvas);
+    frames(ui, 0, 0, 20, canvas);
+    press(ui, PC5_KEY_L1, canvas);
+    frames(ui, 0, 0, 20, canvas);
+    save_shot(canvas, "background-none");
+    press(ui, PC5_KEY_ACCEPT, canvas);
+    CHECK(!strcmp(pc5_ui_screen(ui), "game-menu") && !pc5_exists(background) && pc5_exists(note), "none: %s",
+          pc5_ui_screen(ui));
+}
+
 static void test_screens(const char *fonts)
 {
     FakeConsole console = { 0 };
     FakeNet net = { 0 };
     Pc5Platform platform = { &console, { &net, fake_get, NULL }, fake_clock, fake_play, NULL, fake_notify, fake_time, 0, NULL,
-                             fake_sound };
+                             fake_sound, fake_keyboard_open_text, fake_keyboard_state_text, fake_keyboard_close_text };
     {
         /* The sounds to choose from: the app's, and one of the player's. */
         char from[PC5_PATH], to[PC5_PATH];
-        path(from, sizeof(from), "%s/../../art/sounds/PC5.wav", fixtures);
-        path(to, sizeof(to), "%s/app0/pc5/sounds/PC5.wav", work);
+        path(from, sizeof(from), "%s/../../art/sounds/cheap chinese speaker.wav", fixtures);
+        path(to, sizeof(to), "%s/app0/pc5/sounds/cheap chinese speaker.wav", work);
         copy_file(from, to);
         path(to, sizeof(to), "%s/sounds/Chime.wav", root);
         copy_file(from, to);
@@ -3555,8 +3733,9 @@ static void test_screens(const char *fonts)
         write_text(save, "progress");
         press(ui, PC5_KEY_TRIANGLE, &canvas);
         CHECK(!strcmp(pc5_ui_screen(ui), "game-menu"), "its menu: %s", pc5_ui_screen(ui));
-        for (int i = 0; i < 40; i++) press(ui, PC5_KEY_DOWN, &canvas);
-        press(ui, PC5_KEY_UP, &canvas);          /* Update, above Uninstall */
+        for (int i = 0; i < 40; i++) press(ui, PC5_KEY_DOWN, &canvas);   /* Manage, the last row */
+        press(ui, PC5_KEY_ACCEPT, &canvas);
+        press(ui, PC5_KEY_DOWN, &canvas);        /* Update, after Change program */
         save_shot(&canvas, "game-menu-update");
         press(ui, PC5_KEY_ACCEPT, &canvas);
         until_screen(ui, "sources", &canvas);
@@ -3689,14 +3868,15 @@ static void test_screens(const char *fonts)
     press(ui, PC5_KEY_DOWN, &canvas);
     press(ui, PC5_KEY_RIGHT, &canvas);       /* trigger resistance: 50 % -> 75 % */
     press(ui, PC5_KEY_DOWN, &canvas);
-    press(ui, PC5_KEY_ACCEPT, &canvas);      /* Startup sound: PC5, the last one, -> Off */
+    press(ui, PC5_KEY_ACCEPT, &canvas);      /* Startup sound: cheap chinese speaker, the first, -> Chime */
+    press(ui, PC5_KEY_ACCEPT, &canvas);      /* Chime, the last one, -> Off */
     press(ui, PC5_KEY_DOWN, &canvas);        /* the last row: still on it */
     {
         Pc5Settings set;
         pc5_settings_load(root, &set);
         CHECK(!set.fps && set.light_bar == PC5_LIGHT_CONSOLE && set.vibration == 75 && set.triggers == PC5_TRIGGERS_BOTH &&
               set.trigger_rumble == 75 && set.trigger_resistance == 75 && !strcmp(set.startup_sound, "off") &&
-              !console.sounds,
+              console.sounds == 1 && !strcmp(console.sound, "Chime"),
               "settings saved: fps=%d light=%d vibration=%d triggers=%d rumble=%d resistance=%d sound=%s", set.fps,
               (int)set.light_bar, set.vibration, (int)set.triggers, set.trigger_rumble, set.trigger_resistance,
               set.startup_sound);
@@ -3710,12 +3890,13 @@ static void test_screens(const char *fonts)
     press(ui, PC5_KEY_DOWN, &canvas);
     press(ui, PC5_KEY_RIGHT, &canvas);       /* trigger rumble: 75 % -> 100 % */
     press(ui, PC5_KEY_DOWN, &canvas);
-    press(ui, PC5_KEY_RIGHT, &canvas);       /* the next row is Startup sound's: Off -> Chime, the first */
+    press(ui, PC5_KEY_RIGHT, &canvas);       /* the next row is Startup sound's: Off -> cheap chinese speaker, the first */
     {
         Pc5Settings set;
         pc5_settings_load(root, &set);
         CHECK(set.triggers == PC5_TRIGGERS_RUMBLE && set.trigger_rumble == 100 && set.trigger_resistance == 75 &&
-              !strcmp(set.startup_sound, "Chime") && console.sounds == 1 && !strcmp(console.sound, "Chime"),
+              !strcmp(set.startup_sound, "cheap chinese speaker") && console.sounds == 2 &&
+              !strcmp(console.sound, "cheap chinese speaker"),
               "a strength row only while it is used: triggers=%d rumble=%d resistance=%d sound=%s",
               (int)set.triggers, set.trigger_rumble, set.trigger_resistance, set.startup_sound);
     }
@@ -3769,8 +3950,10 @@ static void test_screens(const char *fonts)
     press(ui, PC5_KEY_TRIANGLE, &canvas);
     CHECK(!strcmp(pc5_ui_screen(ui), "game-menu"), "game menu: %s", pc5_ui_screen(ui));
     press(ui, PC5_KEY_DOWN, &canvas);       /* past Controller (the Xbox controller: no Button mapping) */
-    press(ui, PC5_KEY_DOWN, &canvas);       /* Frame generation: on, then off again with right */
+    press(ui, PC5_KEY_DOWN, &canvas);       /* Graphics */
     press(ui, PC5_KEY_ACCEPT, &canvas);
+    save_shot(&canvas, "game-menu-graphics");
+    press(ui, PC5_KEY_ACCEPT, &canvas);     /* Frame generation, its first row: on, then off again with right */
     CHECK(!strcmp(pc5_ui_screen(ui), "game-menu") && controls_has("orbital-nine", "frame_generation = on\n"),
           "Frame generation on: %s", pc5_ui_screen(ui));
     press(ui, PC5_KEY_RIGHT, &canvas);
@@ -3787,10 +3970,18 @@ static void test_screens(const char *fonts)
     CHECK(controls_has("orbital-nine", "aspect_ratio = stretch\n"), "Aspect ratio: Stretch");
     press(ui, PC5_KEY_LEFT, &canvas);
     CHECK(controls_has("orbital-nine", "aspect_ratio = keep\n"), "then Keep");
-    press(ui, PC5_KEY_DOWN, &canvas);       /* Change program */
+    press(ui, PC5_KEY_DOWN, &canvas);       /* the last row of Graphics: still Aspect ratio (a 64-bit game: no Memory) */
+    press(ui, PC5_KEY_BACK, &canvas);       /* the first page again, on Graphics */
+    CHECK(!strcmp(pc5_ui_screen(ui), "game-menu"), "Back: the first page: %s", pc5_ui_screen(ui));
+    press(ui, PC5_KEY_DOWN, &canvas);
+    press(ui, PC5_KEY_DOWN, &canvas);       /* Manage */
     press(ui, PC5_KEY_ACCEPT, &canvas);
+    save_shot(&canvas, "game-menu-manage");
+    press(ui, PC5_KEY_ACCEPT, &canvas);     /* Change program, its first row */
     until_screen(ui, "programs", &canvas);
     CHECK(!strcmp(pc5_ui_screen(ui), "programs"), "its programs: %s", pc5_ui_screen(ui));
+    frames(ui, 0, 0, 30, &canvas);
+    save_shot(&canvas, "change-program");
     press(ui, PC5_KEY_DOWN, &canvas);
     press(ui, PC5_KEY_ACCEPT, &canvas);
     CHECK(!strcmp(pc5_ui_screen(ui), "message"), "changed: %s", pc5_ui_screen(ui));
@@ -3809,8 +4000,13 @@ static void test_screens(const char *fonts)
 
     /* A game's menu: Home screen tile, made, then taken away. */
     press(ui, PC5_KEY_TRIANGLE, &canvas);
-    for (int i = 0; i < 6; i++) press(ui, PC5_KEY_DOWN, &canvas);   /* Play, Controller, Frame generation, Resolution,
-                                                                       Aspect ratio, Change program */
+    press(ui, PC5_KEY_DOWN, &canvas);
+    press(ui, PC5_KEY_DOWN, &canvas);
+    press(ui, PC5_KEY_DOWN, &canvas);       /* Play, Controller, Graphics, Appearance */
+    press(ui, PC5_KEY_ACCEPT, &canvas);
+    save_shot(&canvas, "game-menu-appearance");
+    press(ui, PC5_KEY_DOWN, &canvas);
+    press(ui, PC5_KEY_DOWN, &canvas);       /* Cover, Background, Home screen tile */
     press(ui, PC5_KEY_ACCEPT, &canvas);
     CHECK(!strcmp(pc5_ui_screen(ui), "message") && pc5_home_find(tiles, "orbital-nine", tile), "tile made: %s %s",
           pc5_ui_screen(ui), tile);
@@ -3819,7 +4015,9 @@ static void test_screens(const char *fonts)
     press(ui, PC5_KEY_ACCEPT, &canvas);
     CHECK(!strcmp(pc5_ui_screen(ui), "message") && !pc5_home_find(tiles, "orbital-nine", tile), "taken away");
     press(ui, PC5_KEY_ACCEPT, &canvas);
-    press(ui, PC5_KEY_BACK, &canvas);
+    test_picture_screens(ui, &canvas, &console);
+    press(ui, PC5_KEY_TRIANGLE, &canvas);
+    CHECK(!strcmp(pc5_ui_screen(ui), "library"), "Triangle: the library from any page: %s", pc5_ui_screen(ui));
 
     /* Several games in a row: two ticked folders, read, then installed one after the other. */
     pc5_library_load(root, &library);
@@ -3907,7 +4105,8 @@ static void test_report(const char *fonts)
     /* The crash message after a game crashed: Triangle shows the code, Back goes back. */
     FakeConsole console = { 0 };
     FakeNet net = { 0 };
-    Pc5Platform platform = { &console, { &net, fake_get, NULL }, fake_clock, fake_play, NULL, fake_notify, fake_time, 0, NULL, NULL };
+    Pc5Platform platform = { &console, { &net, fake_get, NULL }, fake_clock, fake_play, NULL, fake_notify, fake_time, 0, NULL, NULL,
+                             NULL, NULL, NULL };
     const char *roots[] = { usb, NULL };
     Pc5Canvas canvas = { pc5_alloc(1920u * 1080u * 4u), 1920, 1080, 1920 };
     Pc5Library library;
@@ -3970,7 +4169,7 @@ static void test_upgrade_screens(const char *fonts)
     FakeConsole console = { 0 };
     static FakeNet net;
     Pc5Platform platform = { &console, { &net, fake_get, fake_download }, fake_clock, fake_play, NULL, fake_notify,
-                             fake_time, 0, fake_restart, NULL };
+                             fake_time, 0, fake_restart, NULL, NULL, NULL, NULL };
     const char *roots[] = { usb, NULL };
     char app[PC5_PATH], drive[PC5_PATH], folder[PC5_PATH], file[PC5_PATH], zip[PC5_PATH], digest[65];
     static char json[2048];

@@ -416,3 +416,59 @@ int pc5_ends_with_ci(const char *text, const char *suffix)
     size_t a = strlen(text), b = strlen(suffix);
     return a >= b && !pc5_casecmp(text + a - b, suffix);
 }
+
+size_t pc5_utf16_from_utf8(uint16_t *out, size_t size, const char *text)
+{
+    const unsigned char *at = (const unsigned char *)text;
+    size_t n = 0;
+
+    if (!size) return 0;
+    while (*at && n + 1 < size) {
+        uint32_t cp = *at, need = cp < 0x80 ? 0 : (cp & 0xe0) == 0xc0 ? 1 : (cp & 0xf0) == 0xe0 ? 2 : (cp & 0xf8) == 0xf0 ? 3 : 4;
+        size_t used = 1;
+        if (need == 4) cp = 0xfffd;
+        else if (need) {
+            cp &= 0x3fu >> need;
+            for (uint32_t i = 0; i < need; i++, used++) {
+                if ((at[used] & 0xc0) != 0x80) { cp = 0xfffd; break; }
+                cp = cp << 6 | (at[used] & 0x3fu);
+            }
+            /* overlong forms, surrogates and what is past Unicode are not characters */
+            if (cp != 0xfffd && ((need == 1 && cp < 0x80) || (need == 2 && cp < 0x800) || (need == 3 && cp < 0x10000) ||
+                                 (cp >= 0xd800 && cp < 0xe000) || cp > 0x10ffff))
+                cp = 0xfffd;
+        }
+        at += used;
+        if (cp >= 0x10000) {
+            if (n + 2 >= size) break;
+            out[n++] = (uint16_t)(0xd800 + ((cp - 0x10000) >> 10));
+            out[n++] = (uint16_t)(0xdc00 + ((cp - 0x10000) & 0x3ff));
+        } else {
+            out[n++] = (uint16_t)cp;
+        }
+    }
+    out[n] = 0;
+    return n;
+}
+
+void pc5_utf8_from_utf16(char *out, size_t size, const uint16_t *text)
+{
+    size_t n = 0;
+
+    if (!size) return;
+    for (size_t i = 0; text[i]; i++) {
+        uint32_t cp = text[i];
+        if (cp >= 0xd800 && cp < 0xdc00 && text[i + 1] >= 0xdc00 && text[i + 1] < 0xe000)
+            cp = 0x10000 + ((cp - 0xd800) << 10) + (text[++i] - 0xdc00u);
+        else if (cp >= 0xd800 && cp < 0xe000)
+            cp = 0xfffd;
+        size_t length = cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+        if (n + length >= size) break;
+        if (length == 1) out[n++] = (char)cp;
+        else {
+            out[n++] = (char)(length == 2 ? 0xc0 | cp >> 6 : length == 3 ? 0xe0 | cp >> 12 : 0xf0 | cp >> 18);
+            for (size_t k = length - 1; k > 0; k--) out[n++] = (char)(0x80 | ((cp >> (6 * (k - 1))) & 0x3f));
+        }
+    }
+    out[n] = 0;
+}

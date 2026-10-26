@@ -9,7 +9,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define PC5_VERSION "1.8.0"
+#define PC5_VERSION "1.8.1"
 #ifndef PC5_TITLE_ID
 #define PC5_TITLE_ID "PPSA11018"
 #endif
@@ -102,5 +102,11 @@ void pc5_size_text(uint64_t bytes, char *out, size_t size);
 static inline int pc5_lower(int c) { return c >= 'A' && c <= 'Z' ? c + 32 : c; }
 int pc5_casecmp(const char *a, const char *b);
 int pc5_ends_with_ci(const char *text, const char *suffix);
+/* UTF-8 text as UTF-16 units (surrogate pairs above U+FFFF) into out, at most size - 1 of
+ * them and a 0; a malformed byte becomes U+FFFD. The units written, without the 0. */
+size_t pc5_utf16_from_utf8(uint16_t *out, size_t size, const char *text);
+/* UTF-16 units up to a 0 as UTF-8 into out, cut before a character that doesn't fit
+ * (always 0-terminated); an unpaired surrogate becomes U+FFFD. */
+void pc5_utf8_from_utf16(char *out, size_t size, const uint16_t *text);
 
 #endif

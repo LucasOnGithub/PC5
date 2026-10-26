@@ -15,8 +15,8 @@ Please don't report problems in ProsperoStore comments. Comments can't hold a lo
 
 ## What to include
 
-1. **The PC5 version**, from **Settings › About PC5** (press **Options** in the library). For example `1.8.0`.
-2. **The game**: its name, and the program PC5 starts for it (shown in the game's menu under **Change program**).
+1. **The PC5 version**, from **Settings › About PC5** (press **Options** in the library). For example `1.8.1`.
+2. **The game**: its name, and the program PC5 starts for it (shown in the game's menu under **Manage › Change program**).
 3. **What happened**: what you did, where it stopped, what was on screen, and whether it happens every time.
 4. **How the game is set up**, if you changed anything: its controller mode, frame generation, and any [launch options](Launch-options).
 5. **The log** of that session: the zip PC5 kept, attached as a file (see below).
@@ -85,6 +85,22 @@ PC5 1.6.0 and older kept logs as `.log` files (with `-earlier` and `-start` part
 ## What a crash log contains
 
 From PC5 1.3.0, when a game crashes its log has a crash report: lines starting with `wine: crash report:`. They give the module and offset the crash happened at (such as `game.exe+0x1a2b3c`), the registers, and the code addresses on the stack. From 1.6.1 this is there too when the game's own crash handler catches the crash (the line before says `handed to the program's own crash handler`). The first lines of each log name the console's firmware and PC5's version.
+
+## A more detailed log, for one game
+
+Sometimes the log doesn't show why a game stops, and the issue's answer asks for a more detailed one. Wine, which runs the games, can write more into the log, for one game:
+
+1. On the console, open the game's folder of notes, `/data/prospero-win/prefixes/<game>/pc5/` (`<game>` is the game's id, as for [launch options](Launch-options)).
+2. Make a text file called `winedebug.txt` there, and write in it the line you were asked for, for example:
+
+   ```text
+   err+all,+loaddll,+process,+seh,+mmdevapi
+   ```
+
+3. Start the game, and attach its log as usual.
+4. Delete `winedebug.txt` afterwards: a detailed log can make the game slower.
+
+The line takes the place of PC5's own (`err+all,+loaddll,+process`), so keep those three at its start. It can only have letters, digits and `_ + - , = .`, 127 characters at most; PC5 leaves out a line with anything else. Lines starting with `#` or `;` are notes.
 
 ## Opening the issue
 

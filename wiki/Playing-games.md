@@ -61,7 +61,7 @@ If the game crashed or closed before showing anything, PC5 tells you when it ope
 
 ## The game menu
 
-Choose a game in the library and press **△**.
+Choose a game in the library and press **△**. Its menu has what you change most, and three groups: **Graphics**, **Appearance** and **Manage**. The row chosen says what it does under its name.
 
 ![A game's menu](images/game-menu.png)
 *The game menu. Its settings are kept for this game only.*
@@ -71,20 +71,49 @@ Choose a game in the library and press **△**.
 | Play | Starts the game. |
 | Controller | What the game sees: **Xbox controller** (the default), **DualSense**, or **Keyboard & mouse**. Press **✕** or left / right to change it. See [Controllers](Controllers). |
 | Button mapping | Only with Keyboard & mouse: what each button and stick sends. See [Controllers](Controllers#button-mapping). |
+| Graphics › | Frame generation, resolution, aspect ratio and memory. See [Graphics](#graphics). |
+| Appearance › | The game's cover, its background and its home screen tile. See [Appearance](#appearance). |
+| Manage › | The program PC5 starts, updating the game and uninstalling it. See [Manage](#manage). |
+
+**○** goes back from a group to the menu, and from the menu to the library. **△** closes the menu from anywhere in it.
+
+### Graphics
+
+![A game's Graphics](images/game-menu-graphics.png)
+*Graphics: what changes how the game is drawn.*
+
+| Row | What it does |
+| --- | --- |
 | Frame generation | **Off** (the default) or **30 → 60 fps**. See [Frame generation](#frame-generation) below. |
 | Resolution | Only for games drawn with Direct3D, Vulkan or OpenGL: **1080p** (the default), **1440p** or **4K**. See [Resolution](#resolution) below. |
 | Aspect ratio | **Keep** (the default) or **Stretch**. See [Aspect ratio](#aspect-ratio) below. |
 | Memory | Only for 32-bit games: **4 GB** (the default since 1.4.0) or **2 GB**. A 32-bit game gets 4 GB of address space, room for big textures and mods. Set 2 GB for a game that misbehaves with it. |
-| Change program | The program PC5 starts for this game ("Now: …"). Choose another one if PC5 picked the wrong one. See [Choosing the right program](Installing-games#choosing-the-right-program). |
+
+### Appearance
+
+![A game's Appearance](images/game-menu-appearance.png)
+*Appearance: how the game looks in PC5 and on the home screen.*
+
+| Row | What it does |
+| --- | --- |
+| Cover | Another of the covers found for the game, one found for a name you type, or the card made from its icon. See [Changing a cover or background](Covers#changing-a-cover-or-background). |
+| Background | Another of the backgrounds found, one found for a name you type, or none. See [Changing a cover or background](Covers#changing-a-cover-or-background). |
 | Home screen tile | **Off** or **On**: a tile on the PS5's home screen that starts this game. See [Home screen tiles](Home-screen-tiles). |
+
+### Manage
+
+![A game's Manage](images/game-menu-manage.png)
+*Manage: the game's program, a newer version, and uninstalling.*
+
+| Row | What it does |
+| --- | --- |
+| Change program | The program PC5 starts for this game ("Now: …"). Choose another one if PC5 picked the wrong one. See [Choosing the right program](Installing-games#choosing-the-right-program). |
 | Update | Only for games PC5 installed: copies a newer version from the USB drive over the game. Its saves, settings and options stay. See [Updating a game](Installing-games#updating-a-game). |
 | Uninstall | Deletes the game, keeping its saves or not, after asking. See [Uninstalling a game](Installing-games#uninstalling-a-game). |
 
-Press **○** or **△** to close the menu.
-
 ## Frame generation
 
-Frame generation shows a game at 60 fps when it runs at 30. It is set for each game: **△ › Frame generation**, **Off** by default.
+Frame generation shows a game at 60 fps when it runs at 30. It is set for each game: **△ › Graphics › Frame generation**, **Off** by default.
 
 ![Frame generation turned on in a game's menu](images/game-menu-frame-generation.png)
 *Frame generation on: the game is held at 30 fps and shown at 60.*
@@ -102,7 +131,7 @@ What to expect:
 
 ## Resolution
 
-A game drawn with Direct3D, Vulkan or OpenGL can be drawn at **1080p** (the default), **1440p** or **4K**: **△ › Resolution**, kept for that game.
+A game drawn with Direct3D, Vulkan or OpenGL can be drawn at **1080p** (the default), **1440p** or **4K**: **△ › Graphics › Resolution**, kept for that game.
 
 - The console shows 1080p and 4K pictures as they are, and a 1440p one scaled up to 4K.
 - A higher resolution is slower: 1440p is nearly twice the work of 1080p, and 4K four times. A game that is already slow at 1080p gets slower.
@@ -111,7 +140,7 @@ A game drawn with Direct3D, Vulkan or OpenGL can be drawn at **1080p** (the defa
 
 ## Aspect ratio
 
-A game whose picture has another shape than the screen's, such as a 4:3 game, is shown in its own shape with black bars beside it. **△ › Aspect ratio › Stretch** fills the screen with it instead, kept for that game.
+A game whose picture has another shape than the screen's, such as a 4:3 game, is shown in its own shape with black bars beside it. **△ › Graphics › Aspect ratio › Stretch** fills the screen with it instead, kept for that game.
 
 - A stretched picture is wider than it was drawn: round things look oval.
 - Set the game's own resolution in its options to the 4:3 one it was made for, such as 1024x768: a game that draws its own bars inside a 16:9 picture keeps them, as PC5 can't tell them from the picture.

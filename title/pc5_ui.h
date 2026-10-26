@@ -30,6 +30,14 @@ typedef struct Pc5Platform {
     void (*restart)(void *context);
     /* Plays a startup sound by name now, as Settings tries it; NULL where it can't. */
     void (*sound)(void *context, const char *name);
+    /* The console's on-screen keyboard over the screens, for typing a name to search for:
+     * opened with its title and the text to start from (UTF-8), 0 or negative when it can't
+     * be; its state, 1 while it is up and 2 once it is done; and closed, its text (UTF-8)
+     * into out: 1 when it was typed (Done), 0 when cancelled, negative on an error. NULL
+     * where there is none. */
+    int (*keyboard_open)(void *context, const char *title, const char *text);
+    int (*keyboard_state)(void *context);
+    int (*keyboard_close)(void *context, char *out, size_t size);
 } Pc5Platform;
 
 enum {

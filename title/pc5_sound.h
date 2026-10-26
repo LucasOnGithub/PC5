@@ -13,7 +13,7 @@ enum {
     PC5_SOUNDS = 32,             /* names in a list */
     PC5_SOUND_NAME = 64,
 };
-#define PC5_SOUND_DEFAULT "PC5"
+#define PC5_SOUND_DEFAULT "cheap chinese speaker"
 
 typedef struct Pc5Sound {
     int16_t *samples;        /* mono, at PC5_SOUND_RATE */

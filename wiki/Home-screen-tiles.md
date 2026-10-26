@@ -13,7 +13,7 @@ PC5 writes the tile in `/data/homebrew` in the [PS5 Forwarder Format](https://gi
 ## Adding a tile
 
 1. In the library, choose the game and press **△**.
-2. Choose **Home screen tile** and press **✕**.
+2. Choose **Appearance**, then **Home screen tile**, and press **✕**.
 3. PC5 says "Added to the home screen" and gives the tile's title ID (`PPSA99…`). The row now says **On**.
 4. Wait for ShadowMountPlus to find the tile in `/data/homebrew`. It then appears on the home screen.
 
@@ -34,7 +34,7 @@ The tile's picture is the game's cover, on a blurred copy of itself. It is made 
 
 Do one of these:
 
-- Turn the row off: **△ › Home screen tile** and **✕**. PC5 says "Taken off the home screen".
+- Turn the row off: **△ › Appearance › Home screen tile** and **✕**. PC5 says "Taken off the home screen".
 - [Uninstall the game](Installing-games#uninstalling-a-game). Its tile's folder is deleted with it.
 
 Either way, PC5 deletes the tile's folder in `/data/homebrew`. If the tile is still on the home screen after that, delete it there.

@@ -104,6 +104,10 @@ static void make_library(const char *root, int count, int with_covers)
 
 static void fake_clock(void *context, char *out, size_t size) { (void)context; pc5_copy(out, size, "14:32"); }
 static void fake_play(void *context, const char *id) { (void)context; (void)id; }
+/* The console's keyboard: "Neon Drift" typed at once. */
+static int keyboard_open(void *context, const char *title, const char *text) { (void)context; (void)title; (void)text; return 0; }
+static int keyboard_state(void *context) { (void)context; return 2; }
+static int keyboard_close(void *context, char *out, size_t size) { (void)context; pc5_copy(out, size, "Neon Drift"); return 1; }
 static int offline(void *context, const char *url, Pc5Buf *out, size_t max, int *status)
 {
     (void)context; (void)url; (void)out; (void)max; (void)status;
@@ -126,7 +130,12 @@ static int sample_net(void *context, const char *url, Pc5Buf *out, size_t max, i
     if (strstr(url, "api.github.com"))
         return pc5_buf_puts(out, "{\"tag_name\":\"v1.1.0\",\"name\":\"PC5 1.1.0\","
                                  "\"html_url\":\"https://github.com/bornaradusin/PC5/releases/tag/v1.1.0\"}");
-    if (strstr(url, "steam/apps/901001/library_600x900_2x.jpg")) fmt(file, sizeof(file), "%s/cover-00.png", covers);
+    if (strstr(url, "IStoreBrowseService"))   /* the asset list: its library hero, the background */
+        return pc5_buf_puts(out, "{\"response\":{\"store_items\":[{\"id\":901001,\"success\":1,\"appid\":901001,"
+                                 "\"assets\":{\"asset_url_format\":\"steam\\/apps\\/901001\\/${FILENAME}\","
+                                 "\"library_hero\":\"library_hero.jpg\"}}]}}");
+    if (strstr(url, "steam/apps/901001/library_hero.jpg")) fmt(file, sizeof(file), "%s/wide.png", covers);
+    else if (strstr(url, "steam/apps/901001/library_600x900_2x.jpg")) fmt(file, sizeof(file), "%s/cover-00.png", covers);
     else if (strstr(url, "gog-statics")) fmt(file, sizeof(file), "%s/box.jpg", covers);
     else { *status = 404; return 0; }
     return pc5_read_file(file, out, max) ? -1 : 0;
@@ -169,7 +178,8 @@ static Pc5Ui *open_ui(const char *root, int network)
     fmt(tile_template, sizeof(tile_template), "%s/app0/pc5/forwarder", work);
     fmt(file, sizeof(file), "%s/eboot.bin", tile_template);
     pc5_write_file(file, "eboot", 5);
-    platform = (Pc5Platform){ NULL, { NULL, network ? sample_net : offline, NULL }, fake_clock, fake_play, NULL, NULL, NULL, 0, NULL, NULL };
+    platform = (Pc5Platform){ NULL, { NULL, network ? sample_net : offline, NULL }, fake_clock, fake_play, NULL, NULL, NULL, 0, NULL,
+                              NULL, keyboard_open, keyboard_state, keyboard_close };
     config = (Pc5UiConfig){ root, template_prefix, fonts, roots, tiles, tile_template, NULL, NULL, NULL, NULL, 0 };
     Pc5Ui *ui = pc5_ui_create(&config, &platform);
     until(ui, "library");
@@ -192,7 +202,8 @@ static void crash_shots(const char *root)
     static char usb[PC5_PATH], template_prefix[PC5_PATH];
     char file[PC5_PATH], text[2048];
     Pc5Library library;
-    Pc5Platform platform = { NULL, { NULL, offline, NULL }, fake_clock, fake_play, NULL, NULL, shot_time, 0, NULL, NULL };
+    Pc5Platform platform = { NULL, { NULL, offline, NULL }, fake_clock, fake_play, NULL, NULL, shot_time, 0, NULL, NULL,
+                             NULL, NULL, NULL };
 
     make_library(root, 3, 1);
     pc5_library_load(root, &library);
@@ -294,11 +305,39 @@ int main(int argc, char **argv)
     step(ui, PC5_KEY_UP, 1);
     step(ui, PC5_KEY_RIGHT, 1);            /* back to the Xbox controller */
     step(ui, PC5_KEY_DOWN, 1);
+    step(ui, PC5_KEY_ACCEPT, 1);           /* Graphics */
+    settle(ui);
+    save("15i-game-menu-graphics");
     step(ui, PC5_KEY_ACCEPT, 1);           /* Frame generation on */
     settle(ui);
     save("15e-game-menu-frame-generation");
     step(ui, PC5_KEY_ACCEPT, 1);           /* and off again */
+    step(ui, PC5_KEY_BACK, 1);
     step(ui, PC5_KEY_DOWN, 1);
+    step(ui, PC5_KEY_ACCEPT, 1);           /* Appearance */
+    settle(ui);
+    save("15j-game-menu-appearance");
+    /* Its cover: what was found, then a name typed. */
+    step(ui, PC5_KEY_ACCEPT, 1);
+    until(ui, "picture");
+    settle(ui);
+    step(ui, PC5_KEY_TRIANGLE, 1);
+    until(ui, "picture");
+    settle(ui);
+    save("15k-cover-choose");
+    step(ui, PC5_KEY_BACK, 1);
+    settle(ui);
+    /* Its background, from Steam's library hero. */
+    step(ui, PC5_KEY_DOWN, 1);
+    step(ui, PC5_KEY_ACCEPT, 1);
+    until(ui, "picture");
+    settle(ui);
+    step(ui, PC5_KEY_TRIANGLE, 1);
+    until(ui, "picture");
+    settle(ui);
+    save("15l-background-choose");
+    step(ui, PC5_KEY_BACK, 1);
+    settle(ui);
     step(ui, PC5_KEY_DOWN, 1);
     step(ui, PC5_KEY_ACCEPT, 1);           /* Home screen tile on */
     settle(ui);
@@ -311,6 +350,11 @@ int main(int argc, char **argv)
     save("15h-home-tile-removed");
     step(ui, PC5_KEY_ACCEPT, 1);
     step(ui, PC5_KEY_BACK, 1);
+    step(ui, PC5_KEY_DOWN, 1);
+    step(ui, PC5_KEY_ACCEPT, 1);           /* Manage */
+    settle(ui);
+    save("15m-game-menu-manage");
+    step(ui, PC5_KEY_TRIANGLE, 1);
     step(ui, PC5_KEY_OPTIONS, 1);
     settle(ui);
     save("07-settings");

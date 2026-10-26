@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 /* PC5: its settings file (pc5_settings.h). */
 #include "pc5_settings.h"
+#include "pc5_sound.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -24,7 +25,7 @@ void pc5_settings_default(Pc5Settings *settings)
     settings->trigger_resistance = 50;
     settings->check_updates = 1;
     settings->keep_logs = 0;
-    pc5_copy(settings->startup_sound, sizeof(settings->startup_sound), "PC5");
+    pc5_copy(settings->startup_sound, sizeof(settings->startup_sound), PC5_SOUND_DEFAULT);
 }
 
 static int pick(const char *value, const char *const *keys, int count, int fallback)
@@ -85,7 +86,8 @@ int pc5_settings_load(const char *root, Pc5Settings *settings)
             pc5_copy(sound, sizeof(sound), v);
             for (size_t n = strlen(sound); n && (sound[n - 1] == ' ' || sound[n - 1] == '\r' || sound[n - 1] == '\t'); n--)
                 sound[n - 1] = 0;
-            if (!pc5_casecmp(sound, "on")) pc5_copy(sound, sizeof(sound), "PC5");   /* 1.7.0's */
+            /* 1.7.0's "on", and 1.8.0's own sound, which PC5 no longer has: the default now. */
+            if (!pc5_casecmp(sound, "on") || !pc5_casecmp(sound, "PC5")) pc5_copy(sound, sizeof(sound), PC5_SOUND_DEFAULT);
             if (!pc5_casecmp(sound, "off")) pc5_copy(sound, sizeof(sound), "off");
             if (sound[0] && !strchr(sound, '/')) pc5_copy(settings->startup_sound, sizeof(settings->startup_sound), sound);
             continue;

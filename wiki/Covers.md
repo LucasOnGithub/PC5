@@ -1,4 +1,4 @@
-Every game in PC5 has a cover. PC5 looks for it online on public sources, with no account and no key, or uses a picture you give it. A game no source has gets a cover made from its own icon and name. A game can have a background too, shown behind the library while it is chosen. This page explains where covers and backgrounds come from, how to choose a cover, and how to use your own.
+Every game in PC5 has a cover. PC5 looks for it online on public sources, with no account and no key, or uses a picture you give it. A game no source has gets a cover made from its own icon and name. A game can have a background too, shown behind the library while it is chosen. This page explains where covers and backgrounds come from, how to choose them, and how to use your own.
 
 ## Where covers come from
 
@@ -12,7 +12,7 @@ PC5 looks in this order:
 
 To search, PC5 uses the program's product name, the folder's name (without release tags and version numbers) and the program's name. It only offers results whose name is close to the game's.
 
-A source that doesn't answer is skipped. A game installed without internet gets your own picture or its card, and keeps it: to give it another cover later, use [your own picture](#for-a-game-already-installed).
+A source that doesn't answer is skipped. A game installed without internet gets your own picture or its card, and keeps it: to give it another cover later, use [Appearance › Cover](#changing-a-cover-or-background) or [your own picture](#for-a-game-already-installed).
 
 ## Choosing a cover when installing
 
@@ -26,6 +26,24 @@ The review screen shows the best cover PC5 found, where it comes from, and how m
 3. Press **✕** to install with the cover shown.
 
 When you install several games in a row, open a game's review screen from the list (**✕**) to change its cover.
+
+## Changing a cover or background
+
+For a game PC5 installed, its menu has both: **△ › Appearance › Cover** or **Background**.
+
+![Choosing a game's cover](images/cover-choose.png)
+*A cover found for a name typed. L1 / R1 go through the others.*
+
+1. In the library, choose the game, press **△**, choose **Appearance**, then **Cover** or **Background**.
+2. PC5 looks online for the game's names, as when it was installed. The first picture shown is the one the game has now.
+3. Press **L1** or **R1** (or left and right) to go through what PC5 found. The last one is the card made from the game's icon and name for a cover, or **None** (PC5's own backdrop) for a background.
+4. To look for another name, press **△**: the PS5's keyboard opens with the game's name in it. Type the name to look for and choose **Done**. PC5 shows what it found for that name, the best match first.
+5. Press **✕** to use the picture shown. **○** goes back without changing anything.
+
+![Choosing a game's background](images/background-choose.png)
+*A background found on Steam for a name typed.*
+
+A cover or background chosen here stays until you choose another. Your own picture (below) still takes its place when you put a newer one in the `covers` or `backgrounds` folder. A home screen tile keeps the picture it was made with: turn the tile off and on again to give it the new cover.
 
 ## Using your own cover
 
@@ -72,7 +90,7 @@ PC5 finds backgrounds by itself, in the background while the library shows, for 
 2. The background of the **cover chosen when the game was installed**: Steam's library background for a Steam cover, GOG's background for a GOG cover.
 3. A **search**, as for covers: Steam's library background or GOG's background of the best match. Wikipedia has none.
 
-A game no source has a background for keeps PC5's backdrop, and PC5 doesn't look online for it again; your own picture still works for it.
+A game no source has a background for keeps PC5's backdrop, and PC5 doesn't look online for it again; your own picture still works for it. To choose another background, or none, see [Changing a cover or background](#changing-a-cover-or-background).
 
 ### Using your own background
 

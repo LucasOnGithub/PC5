@@ -114,7 +114,7 @@ A game's folder often has several programs: the game, a launcher, a settings too
 If PC5 picked the wrong one (for example, the game closes at once, or a settings window opens instead of the game):
 
 1. In the library, choose the game and press **△**.
-2. Choose **Change program**. The row shows the program it starts now.
+2. Choose **Manage**, then **Change program**. The row shows the program it starts now.
 3. Choose the game's own program from the list and press **✕**.
 
 ![Choosing another program for a game](images/change-program.png)
@@ -137,7 +137,7 @@ Some games start from a batch file (`.bat` or `.cmd`) that starts the game's pro
 
 To move a game to a newer version (a patch, a new release, a fix), put the newer copy's folder on the USB drive, as for installing, then:
 
-1. In the library, choose the game, press **△** and choose **Update**.
+1. In the library, choose the game, press **△** and choose **Manage › Update**.
 2. Choose the newer copy's folder from the USB drive's list.
 3. PC5 shows what it will do. Choose **Update**.
 
@@ -150,7 +150,7 @@ PC5 copies the folder over the game's folder on the console:
 - The files only the game's folder has stay: saves and settings some games keep beside their program, `launch.txt`, and anything the old version had that the new one doesn't.
 - The game's Windows (its saves and settings in "Documents" and "AppData", its registry), its cover, its home screen tile and its options in the game menu stay as they were.
 
-The folder must have the game's program (the one in **Change program**), so PC5 can tell it is the same game; it says so when it doesn't. PC5 copies the folder and checks the copy against the USB drive before it changes anything, so stopping (**○**) or a failed copy leaves the game as it was. If the console is switched off while the new files are being put in place, PC5 finishes the update the next time it starts.
+The folder must have the game's program (the one in **Manage › Change program**), so PC5 can tell it is the same game; it says so when it doesn't. PC5 copies the folder and checks the copy against the USB drive before it changes anything, so stopping (**○**) or a failed copy leaves the game as it was. If the console is switched off while the new files are being put in place, PC5 finishes the update the next time it starts.
 
 PC5 needs the newer folder's size plus about 1 GB of free space. Update only works for games PC5 installed.
 
@@ -158,7 +158,7 @@ PC5 needs the newer folder's size plus about 1 GB of free space. Update only wor
 
 There are two ways:
 
-- In the library, choose the game, press **△** and choose **Uninstall**.
+- In the library, choose the game, press **△** and choose **Manage › Uninstall**.
 - Or press **Options**, choose **Uninstall game**, and choose the game from the list.
 
 PC5 asks first. **Cancel** is chosen by default. For a game PC5 installed there are two ways to go ahead:

@@ -248,10 +248,8 @@ static int ime_find(void)
     return ime.init && ime.get_status && ime.get_result && ime.term;
 }
 
-static int keyboard_open(uint16_t *buffer, uint32_t capacity)
+static int keyboard_open_titled(uint16_t *buffer, uint32_t capacity, const uint16_t *title)
 {
-    static const uint16_t title[] = u"Type into the game";
-
     if (!ime_find()) return ime.status < 0 ? ime.status : -1;
     if (ime.common_init) {
         int rc = ime.common_init();
@@ -272,6 +270,12 @@ static int keyboard_open(uint16_t *buffer, uint32_t capacity)
     param.vertical = IME_BOTTOM;
     param.title = title;
     return ime.init(&param, NULL);
+}
+
+static int keyboard_open(uint16_t *buffer, uint32_t capacity)
+{
+    static const uint16_t title[] = u"Type into the game";
+    return keyboard_open_titled(buffer, capacity, title);
 }
 
 static int keyboard_state(void)
@@ -322,6 +326,17 @@ void pc5_system_text(char *out, size_t size)
     snprintf(out, size, "PC5 system firmware=%s firmware_version=0x%08x data_free=%s version=%s", firmware,
              (unsigned)answer.sw.version, space, PC5_VERSION);
 }
+
+/* The same keyboard over PC5's own screens (pc5_console.c), with a title of their own. */
+int pc5_screens_keyboard_open(uint16_t *buffer, uint32_t capacity, const uint16_t *title);
+int pc5_screens_keyboard_state(void);
+int pc5_screens_keyboard_close(void);
+int pc5_screens_keyboard_open(uint16_t *buffer, uint32_t capacity, const uint16_t *title)
+{
+    return keyboard_open_titled(buffer, capacity, title);
+}
+int pc5_screens_keyboard_state(void) { return keyboard_state(); }
+int pc5_screens_keyboard_close(void) { return keyboard_close(); }
 
 void pc5_game_ps5_ops(Pc5GameOps *ops, void (*log)(const char *line));
 void pc5_game_ps5_ops(Pc5GameOps *ops, void (*log)(const char *line))
