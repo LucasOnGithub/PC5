@@ -58,8 +58,13 @@ def graphql(query: str, fatal: bool = True, **variables):
     return answer["data"]
 
 
+LABELS = ("Game", "Store and version", "How it runs", "Issue", "PC5 version", "Controller mode",
+          "Settings that helped", "Notes")
+
+
 def answers(body: str) -> dict:
-    """The form's answers by label; "" for one left empty."""
+    """The form's answers by label; "" for one left empty. A heading with its answer on the same
+    line, as a report edited by hand may have it ("### Issue #43"), counts too."""
     fields, label, lines = {}, None, []
     for line in body.replace("\r\n", "\n").split("\n"):
         heading = re.match(r"^###\s+(.+?)\s*$", line)
@@ -67,6 +72,11 @@ def answers(body: str) -> dict:
             if label is not None:
                 fields[label] = "\n".join(lines).strip()
             label, lines = heading.group(1), []
+            for known in LABELS:
+                rest = label[len(known):]
+                if label.casefold().startswith(known.casefold()) and rest[:1] in (" ", ":", "\t"):
+                    label, lines = known, [rest.lstrip(" :\t")]
+                    break
         elif label is not None:
             lines.append(line)
     if label is not None:
