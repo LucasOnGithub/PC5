@@ -122,6 +122,19 @@ static void windows_path(const char *folder, const char *relative, int keep_file
     char inside[PC5_PATH];
     char *slash;
 
+    /* A replacement started from this prefix's Local AppData has an absolute
+     * Windows path; never prepend C:\Games to that executable. */
+    if ((relative[0] == 'C' || relative[0] == 'c') && relative[1] == ':' &&
+        (relative[2] == '\\' || relative[2] == '/')) {
+        pc5_copy(inside, sizeof(inside), relative);
+        for (char *p = inside; *p; p++) if (*p == '/') *p = '\\';
+        if (!keep_file) {
+            slash = strrchr(inside, '\\');
+            if (slash && slash > inside + 2) *slash = 0;
+        }
+        pc5_copy(out, size, inside);
+        return;
+    }
     pc5_copy(inside, sizeof(inside), relative);
     if (!keep_file) {
         slash = strrchr(inside, '/');
@@ -282,6 +295,16 @@ static void program_folder(const char *root, const char *id, const Pc5Info *info
     char dir[PC5_PATH];
     char *slash;
 
+    /* A transient hand-off profile can point at C:\users\...\AppData. */
+    if ((info->exe[0] == 'C' || info->exe[0] == 'c') && info->exe[1] == ':' &&
+        (info->exe[2] == '\\' || info->exe[2] == '/')) {
+        pc5_copy(dir, sizeof(dir), info->exe + 3);
+        for (char *p = dir; *p; p++) if (*p == '\\') *p = '/';
+        slash = strrchr(dir, '/');
+        if (slash) *slash = 0; else dir[0] = 0;
+        if (pc5_format(out, size, "%s/prefixes/%s/drive_c/%s", root, id, dir)) out[0] = 0;
+        return;
+    }
     pc5_copy(dir, sizeof(dir), info->exe);
     slash = strrchr(dir, '/');
     if (slash) *slash = 0; else dir[0] = 0;
@@ -584,13 +607,22 @@ int pc5_handoff_take(const char *root, const char *id, char *error, size_t size)
         at = end;
     }
     pc5_info_read(root, id, &info);
-    /* Its program: in the game's folder, there, a Windows program. */
-    const char *inside = line[0] + strlen(dir), *dot = strrchr(line[0], '.');
-    int ok = starts_with_case(line[0], dir) && *inside && !strstr(inside, "..") && dot && !pc5_casecmp(dot, ".exe") &&
+    /* A replacement EXE is valid only within the installed game's folder
+     * or this SAME Wine prefix's Local AppData. Refuse Windows path traversal. */
+    int in_game = starts_with_case(line[0], dir);
+    int in_local = starts_with_case(line[0], PC5_HANDOFF_LOCALAPPDATA);
+    const char *inside = in_game ? line[0] + strlen(dir)
+                       : in_local ? line[0] + strlen(PC5_HANDOFF_LOCALAPPDATA) : line[0];
+    const char *dot = strrchr(inside, '.');
+    int ok = (in_game || in_local) && *inside && !strstr(inside, "..") && !strchr(inside, ':') &&
+             !strchr(inside, '/') && !strstr(inside, "\\\\") && dot && !pc5_casecmp(dot, ".exe") &&
              !pc5_format(relative, sizeof(relative), "%s", inside);
     for (char *p = relative; ok && *p; p++) if (*p == '\\') *p = '/';
-    ok = ok && !pc5_format(path, sizeof(path), "%s/prefixes/%s/drive_c/Games/%s/%s", root, id, info.folder, relative) &&
-         pc5_is_file(path);
+    if (ok && in_local)
+        ok = !pc5_format(path, sizeof(path), "%s/prefixes/%s/drive_c/users/prospero/AppData/Local/%s", root, id, relative);
+    else if (ok)
+        ok = !pc5_format(path, sizeof(path), "%s/prefixes/%s/drive_c/Games/%s/%s", root, id, info.folder, relative);
+    ok = ok && pc5_is_file(path);
     if (!ok) {
         snprintf(error, size, "The program its launcher started isn't one of the game's: %.200s", line[0]);
         pc5_buf_free(&handed);
@@ -611,14 +643,23 @@ int pc5_handoff_take(const char *root, const char *id, char *error, size_t size)
         return -1;
     }
     for (size_t n = strlen(arguments); n && (arguments[n - 1] == ' ' || arguments[n - 1] == '\t'); n--) arguments[n - 1] = 0;
-    /* Its working folder, when it is in the game's folder; the program's own otherwise. */
+    /* Preserve the request's working directory only inside allowed folders. */
     const char *work = NULL;
-    if (starts_with_case(line[2], dir) || (strlen(line[2]) + 1 == strlen(dir) && starts_with_case(dir, line[2]))) {
-        if (!pc5_format(cwd, sizeof(cwd), "%s", line[2]) && !strstr(cwd, "..")) {
+    if (starts_with_case(line[2], dir) || starts_with_case(line[2], PC5_HANDOFF_LOCALAPPDATA) ||
+        (strlen(line[2]) + 1 == strlen(dir) && starts_with_case(dir, line[2]))) {
+        if (!pc5_format(cwd, sizeof(cwd), "%s", line[2]) && !strstr(cwd, "..") &&
+            !strchr(cwd, '/') && !strchr(cwd + 2, ':')) {
             size_t n = strlen(cwd);
             if (n > 3 && cwd[n - 1] == '\\') cwd[n - 1] = 0;
             work = cwd;
         }
+    }
+    /* Keep the requested image: line[0] lives in handed, freed below. */
+    char selected[PC5_PATH];
+    if (pc5_format(selected, sizeof(selected), "%s", line[0])) {
+        pc5_buf_free(&handed);
+        snprintf(error, size, "The program's path is too long for Windows.");
+        return -1;
     }
     pc5_buf_free(&handed);
     /* Not a fourth in a row: a launcher and its game that keep starting each other. */
@@ -635,7 +676,16 @@ int pc5_handoff_take(const char *root, const char *id, char *error, size_t size)
     pc5_write_file(count_file, note, strlen(note));
     /* The profile for it, for this start. */
     Pc5Info program = info;
-    pc5_copy(program.exe, sizeof(program.exe), relative);
+    pc5_copy(program.exe, sizeof(program.exe), in_local ? selected : relative);
+    /* A launcher, bootstrapper and game can differ in architecture and graphics. */
+    Pc5PeInfo pe;
+    if (!pc5_pe_read(path, &pe) && !pe.dll) {
+        program.bits = pe.bits;
+        program.api = pc5_api_from_imports(pe.imports);
+    } else if (in_local) {
+        snprintf(error, size, "The downloaded program isn't a Windows executable: %.200s", selected);
+        return -1;
+    }
     pc5_controls_load(root, id, &controls);
     program_folder(root, id, &program, folder, sizeof(folder));
     pc5_own_dlls(folder, own, sizeof(own));
