@@ -1,0 +1,119 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SuperLeiyan <5438286+SuperLeiyan@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 00:41:48 +1030
+Subject: [PATCH] PC5: the media parser's read requests are answered once, at
+ their own offset (Wine patch 0491)
+
+The parser's read request stayed posted after the frontend's read thread
+answered it, so a read thread that came back before the demuxer took the
+data read the same offset again, and that data answered the demuxer's next
+request, at another offset. A WebM movie's demuxer then resynchronised and
+skipped seconds of packets at a time. Each request is now given out once.
+---
+ PUBLICATION_ALLOWLIST.txt                     |  1 +
+ docs/WINE_PS5_BUILD.md                        |  1 +
+ ...read-request-to-the-read-thread-once.patch | 75 +++++++++++++++++++
+ 3 files changed, 77 insertions(+)
+ create mode 100644 wine/patches/0491-winegstreamer-give-each-read-request-to-the-read-thread-once.patch
+
+diff --git a/PUBLICATION_ALLOWLIST.txt b/PUBLICATION_ALLOWLIST.txt
+index 487bcd2..b569eb6 100644
+--- a/PUBLICATION_ALLOWLIST.txt
++++ b/PUBLICATION_ALLOWLIST.txt
+@@ -222,4 +222,5 @@ wine/patches/0481-xaudio2-calls-on-a-destroyed-voice-do-nothing.patch
+ wine/patches/0486-kernelbase-the-computer-name-without-wineboot.patch
+ wine/patches/0490-winegstreamer-the-unix-side-on-ffmpeg.patch
++wine/patches/0491-winegstreamer-give-each-read-request-to-the-read-thread-once.patch
+ wine/patches/0560-ntdll-stderr-output-sink.patch
+ wine/patches/0570-ntdll-ps5-reserve-virtual-range.patch
+diff --git a/docs/WINE_PS5_BUILD.md b/docs/WINE_PS5_BUILD.md
+index d959433..dafaa1b 100644
+--- a/docs/WINE_PS5_BUILD.md
++++ b/docs/WINE_PS5_BUILD.md
+@@ -93,4 +93,5 @@ before evaluating a candidate built from that cache.
+ | 0486 | `kernelbase`: `GetComputerNameExW` reads the configured NetBIOS name when `ActiveComputerName` is missing; wineboot writes that volatile key at each start and never runs in a title, so `GetComputerNameW` failed (Unrailed 2: Back on Track) |
+ | 0490 | `winegstreamer`: the Unix side on FFmpeg in place of GStreamer (the decoders: H.264, WMV and VC-1, MPEG-1/2, AAC, WMA, MP3, Indeo; the parser behind DirectShow's splitters, the WM reader and the GStreamer byte stream handler), the PE side unchanged; see [Media](#media) |
++| 0491 | `winegstreamer`: the parser gives each of its demuxer's read requests to the frontend's read thread once, and `push_data` answers only the request it gave; a read thread that came back before the demuxer took its data read the same offset again, and that data answered the demuxer's next request, at another offset: Matroska resynchronised and skipped seconds of a movie at a time |
+ | 0500 | `ntdll`: signal context at `ucontext`+64 (measured); GS = TEB through `sysarch`; FS stays the libc TLS base, so the syscall dispatcher never switches it; no LDT for WoW64 threads |
+ | 0501 | `ntdll`: a signal's FP state is read at `ucontext`+320, where the PS5 kernel keeps its FXSAVE image (32 bytes past the SDK's `mc_fpstate`), with the XSAVE header and YMM upper halves after it (measured); a handled exception's `CONTEXT` used to carry MXCSR 0 and shifted XMM registers |
+diff --git a/wine/patches/0491-winegstreamer-give-each-read-request-to-the-read-thread-once.patch b/wine/patches/0491-winegstreamer-give-each-read-request-to-the-read-thread-once.patch
+new file mode 100644
+index 0000000..d630245
+--- /dev/null
++++ b/wine/patches/0491-winegstreamer-give-each-read-request-to-the-read-thread-once.patch
+@@ -0,0 +1,75 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: SuperLeiyan <5438286+SuperLeiyan@users.noreply.github.com>
++Date: Tue, 27 Oct 2026 00:30:00 +0100
++Subject: [PATCH] winegstreamer: Give each of the parser's read requests to the
++ read thread once.
++
++The demuxer's read request stayed posted after the frontend's read thread
++answered it, until the demuxer thread woke and cleared it. A read thread
++that came back in between got the same request again and read its offset
++again; when the demuxer had meanwhile posted its next request, at another
++offset, that data answered it. FFmpeg's Matroska demuxer then found
++garbage ("0x00 ... invalid as first byte of an EBML number", "Element ...
++exceeds containing master element"), resynchronised, and skipped up to
++4 s of a movie's packets at a time: the movie stuttered and showed decoding
++damage, and its sound ran ahead.
++
++A request is now given to the read thread once, and push_data answers only
++the request it gave.
++---
++diff --git a/dlls/winegstreamer/ffmpeg_parser.c b/dlls/winegstreamer/ffmpeg_parser.c
++index 13baa6a..ec3506f 100644
++--- a/dlls/winegstreamer/ffmpeg_parser.c
+++++ b/dlls/winegstreamer/ffmpeg_parser.c
++@@ -119,6 +119,9 @@ struct wg_parser
++         UINT32 size;            /* outstanding; 0 once answered */
++         UINT32 done_size;
++         bool done, error;
+++        /* Given to the frontend's read thread (get_next_read_offset): a request is
+++         * given once, and push_data answers only the request it was given. */
+++        bool taken;
++     } read;
++ 
++     AVFormatContext *format;
++@@ -170,7 +173,7 @@ static int io_read(void *opaque, uint8_t *data, int size)
++     parser->read.data = data;
++     parser->read.offset = parser->position;
++     parser->read.size = size;
++-    parser->read.done = parser->read.error = false;
+++    parser->read.done = parser->read.error = parser->read.taken = false;
++     parser->read.done_size = 0;
++     pthread_cond_broadcast(&parser->read_cond);
++ 
++@@ -219,7 +222,11 @@ NTSTATUS wg_parser_get_next_read_offset(void *args)
++     struct wg_parser *parser = get_parser(params->parser);
++ 
++     pthread_mutex_lock(&parser->mutex);
++-    while (parser->sink_connected && !parser->read.size)
+++    /* A request already given out is not given again: once answered, it stays
+++     * until the demuxer takes its data, and a read thread that came back for
+++     * another in between read the same offset again, and gave that data to the
+++     * demuxer's next request, at another offset. */
+++    while (parser->sink_connected && (!parser->read.size || parser->read.taken))
++         pthread_cond_wait(&parser->read_cond, &parser->mutex);
++     if (!parser->sink_connected)
++     {
++@@ -228,6 +235,7 @@ NTSTATUS wg_parser_get_next_read_offset(void *args)
++     }
++     params->offset = parser->read.offset;
++     params->size = parser->read.size;
+++    parser->read.taken = true;
++     pthread_mutex_unlock(&parser->mutex);
++     return S_OK;
++ }
++@@ -238,7 +246,7 @@ NTSTATUS wg_parser_push_data(void *args)
++     struct wg_parser *parser = get_parser(params->parser);
++ 
++     pthread_mutex_lock(&parser->mutex);
++-    if (parser->read.size && !parser->read.done)
+++    if (parser->read.size && parser->read.taken && !parser->read.done)
++     {
++         if (params->data)
++         {
++-- 
++2.43.0
++
