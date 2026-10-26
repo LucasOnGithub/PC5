@@ -123,6 +123,10 @@ typedef struct Pc5Install {
     Pc5Image cover;          /* owned once begun */
     uint32_t tint;
     Pc5Buf original;         /* the downloaded picture, kept with the game: set after begin */
+    /* Where the chosen cover's background is (its source's, pc5_cover.h), kept with the game
+     * for pc5_backgrounds.h: set after begin, "" and 0 for none. */
+    char background[PC5_PATH];
+    uint32_t background_appid;
     /* progress */
     uint64_t bytes_total, bytes_done;
     uint32_t files_total, files_done;
@@ -139,6 +143,14 @@ typedef struct Pc5Install {
     uint8_t *chunk;
     Pc5Remove *cleanup;
     int cancelled;
+    int tidying;                  /* done: deleting what is left over (CLEANUP, then DONE) */
+    /* pc5_install_use_saves: the kept saves the game's Windows is made from, or "" */
+    char kept[PC5_PATH];
+    /* pc5_update_begin: a newer copy over an installed game's folder (game_dir); files of
+     * the copy that couldn't be put in place (the first one's why in error) */
+    int update, moving;
+    char game_dir[PC5_PATH];
+    uint32_t skipped;
 } Pc5Install;
 
 /* Checks the space and starts. -1 (with error set) when it can't begin. The
@@ -151,6 +163,46 @@ void pc5_install_cancel(Pc5Install *install);
 void pc5_install_end(Pc5Install *install);
 /* Bytes an install of folder needs: the game, its Windows, some room. */
 uint64_t pc5_install_needs(const Pc5Folder *folder);
+
+/* ---- kept saves ----------------------------------------------------------------------
+ * Uninstalling a PC5 game can keep its saves: its own Windows (its saves and settings
+ * there, its registry, its options in pc5/controls.txt) without the game, as
+ * <root>/saves/<id>/, with the files the game made in its own folder (those not in
+ * pc5/files.txt, the list of the files PC5 copied) as pc5-game/. Installing the game
+ * again (the same folder name and program) can make its Windows from them instead of
+ * the template, and put pc5-game/ back in its folder; they are deleted once it has. */
+typedef struct Pc5Saves {
+    char name[PC5_ID];           /* saves/<name> */
+    char title[PC5_NAME], folder[PC5_NAME], exe[PC5_PATH];
+    int64_t kept;                /* when (Unix time), or 0 */
+} Pc5Saves;
+
+/* The kept saves, by title, the newest first; how many (up to max). */
+int pc5_saves_list(const char *root, Pc5Saves *saves, int max);
+/* The kept saves of a game with this folder name and program (any case; exe NULL: any):
+ * how many there are, and the newest one's path in out. 0 when there are none. */
+int pc5_saves_find(const char *root, const char *folder, const char *exe, char *out, size_t size);
+/* Deletes the kept saves saves/<name>: moved out of saves/ at once, then deleted step by step
+ * (pc5_remove_step). */
+int pc5_saves_delete_begin(Pc5Remove *remove, const char *root, const char *name);
+/* Right after pc5_install_begin: the game's Windows is made from the kept saves at path
+ * (pc5_saves_find) instead of the template. -1 (with install->error) when they can't be read. */
+int pc5_install_use_saves(Pc5Install *install, const char *path);
+
+/* ---- updating a game -----------------------------------------------------------------
+ * A newer copy of a PC5 game (folder, on the USB drive) over its folder on the console:
+ * the files the copy has replace the game's (in the case the game's have), the files only
+ * the game's folder has stay (saves and settings some games keep there, launch.txt), and
+ * its Windows, cover, tile and options are kept. The copy is made and checked in
+ * prefixes/.updating-<id>/files first, as an install is; its notes written there mark it
+ * whole, and its files are then moved into place. An update cut short before that is
+ * deleted at the next start, one cut short after it is finished then (a file that can't be
+ * put in place is left out, so it always finishes). The copy must have the game's program.
+ * pc5/files.txt gets the copy's files too. Progress and the steps are an install's
+ * (pc5_install_step). */
+int pc5_update_begin(Pc5Install *install, const char *root, const char *id, const Pc5Folder *folder);
+/* Bytes an update with folder needs: the copy and some room. */
+uint64_t pc5_update_needs(const Pc5Folder *folder);
 
 /* ---- uninstalling ------------------------------------------------------------------- */
 
@@ -169,6 +221,11 @@ struct Pc5Remove {
  * step by step. Saves are in that folder, so they go with it. A game whose
  * prefix another profile shares, or the shared default prefix, keeps it. */
 int pc5_remove_begin(Pc5Remove *remove, const char *root, const Pc5Game *game, const Pc5Library *library);
+/* The same, keeping the game's saves (pc5_saves_list): its Windows goes to saves/, the
+ * game's folder is deleted. Only for a PC5 game with a Windows of its own
+ * (pc5_remove_can_keep). */
+int pc5_remove_keep_saves(Pc5Remove *remove, const char *root, const Pc5Game *game, const Pc5Library *library);
+int pc5_remove_can_keep(const Pc5Game *game, const Pc5Library *library);
 /* Deletes for about budget_ms; 1 while there is more. */
 int pc5_remove_step(Pc5Remove *remove, int budget_ms);
 void pc5_remove_end(Pc5Remove *remove);

@@ -7,6 +7,7 @@
  * PROGRAMS holds tests/make-test-programs.py's Windows programs, COVERS
  * tests/make-sample-covers.py's pictures. */
 #include "pc5.h"
+#include "pc5_backgrounds.h"
 #include "pc5_cover.h"
 #include "pc5_game.h"
 #include "pc5_home.h"
@@ -78,6 +79,10 @@ static void copy_file(const char *from, const char *to)
     snprintf(command, sizeof(command), "cp '%s' '%s'", from, to);
     run(command);
 }
+
+static int file_is(const char *file, const char *text);
+static void write_png(const char *file, int w, int h, uint32_t color);
+static void save_shot(const Pc5Canvas *c, const char *name);
 
 static int same_files(const char *a, const char *b)
 {
@@ -223,6 +228,8 @@ static int fake_get(void *context, const char *url, Pc5Buf *out, size_t max, int
         path(file, sizeof(file), "%s/cover-00.png", covers);
     } else if (!strcmp(url, "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/901002/library_600x900_2x.jpg")) {
         path(file, sizeof(file), "%s/cover-01.png", covers);
+    } else if (!strcmp(url, "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/901001/library_hero.jpg?t=1700000000")) {
+        path(file, sizeof(file), "%s/wide.png", covers);   /* the hero, by the name the asset list gives */
     } else if (strstr(url, "upload.wikimedia.org")) {
         path(file, sizeof(file), "%s/wide.png", covers);
     } else if (strstr(url, "images.gog-statics.com")) {
@@ -556,6 +563,9 @@ static void make_template(void)
     pc5_buf_free(&list);
 }
 
+/* Kept saves the next install_folder makes the game's Windows from (pc5_install_use_saves), or NULL. */
+static const char *install_saves;
+
 static Pc5InstallPhase install_folder(const char *name, int cancel_after_copy_steps, int corrupt, char *id, size_t id_size)
 {
     Pc5Folder folder;
@@ -583,8 +593,11 @@ static Pc5InstallPhase install_folder(const char *name, int cancel_after_copy_st
         return PC5_INSTALL_FAILED;
     }
     /* Step 1 counts the template's files and bytes; steps 2 and 3 the game's. */
-    CHECK(install.files_total == 7 && install.bytes_total > 0, "step 1's progress: %u files", (unsigned)install.files_total);
+    if (install_saves) CHECK(!pc5_install_use_saves(&install, install_saves), "saves used: %s", install.error);
+    else CHECK(install.files_total == 7 && install.bytes_total > 0, "step 1's progress: %u files", (unsigned)install.files_total);
     pc5_buf_puts(&install.original, "\xff\xd8\xff picture");
+    pc5_copy(install.background, sizeof(install.background), "https://images.gog-statics.com/background.jpg");
+    install.background_appid = 901001;
     if (id) pc5_copy(id, id_size, install.id);
     do {
         phase = pc5_install_step(&install, 1);
@@ -652,6 +665,8 @@ static void test_install(void)
         CHECK(!pc5_cover_load(file, &cover, &tint) && cover.w == PC5_COVER_WIDTH && tint == 0xff336699u, "cover saved");
         CHECK(pc5_cover_current(file), "a cover that fills its frame");
         pc5_image_free(&cover);
+        path(file, sizeof(file), "%s/neondrift/pc5/background.txt", prefixes);
+        CHECK(file_is(file, "https://images.gog-statics.com/background.jpg\n901001\n"), "the cover's background kept");
         path(file, sizeof(file), "%s/neondrift/pc5/cover-original.jpg", prefixes);
         CHECK(pc5_is_file(file), "the downloaded picture kept");
     }
@@ -1011,6 +1026,273 @@ static void test_uninstall(void)
           "two games left: %d", library.count);
 }
 
+/* A newer copy of a game over its folder: its saves and settings stay. */
+static void test_game_update(void)
+{
+    char kept_root[PC5_PATH], id[PC5_ID], game[PC5_PATH], newer[PC5_PATH], file[PC5_PATH], other[PC5_PATH];
+    char prefixes[PC5_PATH];
+    Pc5Folder folder;
+    Pc5Install install;
+    Pc5InstallPhase phase;
+    Pc5Info info;
+    Pc5Remove remove;
+    int steps;
+
+    pc5_copy(kept_root, sizeof(kept_root), root);
+    path(root, sizeof(root), "%s/data-update/prospero-win", work);
+    path(prefixes, sizeof(prefixes), "%s/prefixes", root);
+    CHECK(install_folder("NeonDrift", 0, 0, id, sizeof(id)) == PC5_INSTALL_DONE, "update: installed");
+    path(game, sizeof(game), "%s/%s/drive_c/Games/NeonDrift", prefixes, id);
+    /* What the game made itself in its folder, and the player's settings there. */
+    path(file, sizeof(file), "%s/save/slot1.sav", game);
+    write_text(file, "my save");
+    path(file, sizeof(file), "%s/settings.ini", game);
+    write_text(file, "fov=90");
+    /* The newer copy: a level changed in a folder named in another case, one added, a new
+     * folder; the uninstaller and the redistributables gone. */
+    path(newer, sizeof(newer), "%s/NeonDrift v2", usb);
+    path(file, sizeof(file), "%s/NeonDrift/NeonDrift.exe", usb);
+    path(other, sizeof(other), "%s/NeonDrift.exe", newer);
+    copy_file(file, other);
+    path(file, sizeof(file), "%s/DATA/LEVEL1.pak", newer);
+    write_text(file, "LEVEL ONE v2\n");
+    path(file, sizeof(file), "%s/DATA/level2.pak", newer);
+    write_text(file, "LEVEL TWO\n");
+    path(file, sizeof(file), "%s/bonus/extra.txt", newer);
+    write_text(file, "new");
+    CHECK(!pc5_folder_inspect(newer, "NeonDrift v2", &folder), "newer copy read");
+    CHECK(!pc5_update_begin(&install, root, id, &folder), "update begins: %s", install.error);
+    steps = 0;
+    do phase = pc5_install_step(&install, 1);
+    while (phase < PC5_INSTALL_DONE && ++steps < 100000);
+    CHECK(phase == PC5_INSTALL_DONE, "updated: %d %s", (int)phase, install.error);
+    pc5_install_end(&install);
+    path(file, sizeof(file), "%s/data/level1.pak", game);
+    CHECK(file_is(file, "LEVEL ONE v2\n"), "a file replaced, in the case the game had");
+    path(file, sizeof(file), "%s/DATA", game);
+    CHECK(!pc5_exists(file), "no second folder in another case");
+    path(file, sizeof(file), "%s/data/level2.pak", game);
+    CHECK(file_is(file, "LEVEL TWO\n"), "a file added to the game's folder");
+    path(file, sizeof(file), "%s/bonus/extra.txt", game);
+    CHECK(file_is(file, "new"), "a new folder");
+    path(file, sizeof(file), "%s/save/slot1.sav", game);
+    CHECK(file_is(file, "my save"), "the game's own save stays");
+    path(file, sizeof(file), "%s/settings.ini", game);
+    CHECK(file_is(file, "fov=90"), "its settings stay");
+    path(file, sizeof(file), "%s/unins000.exe", game);
+    CHECK(pc5_is_file(file), "a file the copy doesn't have stays");
+    CHECK(count_entries(prefixes, ".updating-") == 0, "no copy left");
+    CHECK(!pc5_info_read(root, id, &info) && info.files == folder.files && info.bytes == folder.bytes &&
+          !strcmp(info.folder, "NeonDrift") && !strcmp(info.exe, "NeonDrift.exe"), "notes updated: %u files", (unsigned)info.files);
+    path(file, sizeof(file), "%s/profiles/%s.profile", root, id);
+    CHECK(pc5_is_file(file), "its profile");
+    {
+        Pc5Buf text = { 0 };
+        path(file, sizeof(file), "%s/%s/pc5/files.txt", prefixes, id);
+        pc5_read_file(file, &text, 1 << 20);
+        pc5_buf_terminate(&text);
+        CHECK(text.data && strstr((char *)text.data, "bonus/extra.txt\n") && strstr((char *)text.data, "unins000.exe\n") &&
+              strstr((char *)text.data, "data/level1.pak\n") && !strstr((char *)text.data, "DATA/LEVEL1.pak") &&
+              !strstr((char *)text.data, "save/slot1.sav"), "the game's files: the old and the copy's, once each");
+        pc5_buf_free(&text);
+    }
+    /* An unfinished update goes with the game; its id isn't given out while it is there. */
+    {
+        char ghost[PC5_ID];
+        path(file, sizeof(file), "%s/.updating-ghost/files/x.dat", prefixes);
+        write_text(file, "x");
+        CHECK(!pc5_new_id(root, "Ghost", ghost, sizeof(ghost)) && !strcmp(ghost, "ghost-2"), "id: %s", ghost);
+        path(file, sizeof(file), "%s/.updating-ghost", prefixes);
+        char command[2 * PC5_PATH];
+        snprintf(command, sizeof(command), "rm -rf '%s'", file);
+        run(command);
+    }
+
+    /* A folder without the game's program: refused, nothing made. */
+    {
+        Pc5Folder wrong;
+        path(file, sizeof(file), "%s/NeonDrift/NeonDrift.exe", usb);
+        path(other, sizeof(other), "%s/Not It/Other.exe", usb);
+        copy_file(file, other);
+        path(other, sizeof(other), "%s/Not It", usb);
+        CHECK(!pc5_folder_inspect(other, "Not It", &wrong), "other folder read");
+        CHECK(pc5_update_begin(&install, root, id, &wrong) && strstr(install.error, "NeonDrift.exe"),
+              "refused: %s", install.error);
+        pc5_install_end(&install);
+        CHECK(count_entries(prefixes, ".updating-") == 0, "nothing made");
+        char command[PC5_PATH + 32];
+        snprintf(command, sizeof(command), "rm -rf '%s/Not It'", usb);
+        run(command);
+    }
+
+    /* Stopped while copying: the game as it was. */
+    path(file, sizeof(file), "%s/DATA/LEVEL1.pak", newer);
+    write_text(file, "LEVEL ONE v3\n");
+    CHECK(!pc5_update_begin(&install, root, id, &folder), "second update begins");
+    steps = 0;
+    do {
+        phase = pc5_install_step(&install, 1);
+        if (phase == PC5_INSTALL_COPY) pc5_install_cancel(&install);
+    } while (phase < PC5_INSTALL_DONE && ++steps < 100000);
+    CHECK(phase == PC5_INSTALL_CANCELLED, "stopped: %d", (int)phase);
+    pc5_install_end(&install);
+    path(file, sizeof(file), "%s/data/level1.pak", game);
+    CHECK(file_is(file, "LEVEL ONE v2\n") && count_entries(prefixes, ".updating-") == 0, "unchanged, nothing left");
+
+    /* Cut short: a copy that wasn't whole is deleted at the next start; a whole one (its notes
+     * written) is put in place then. */
+    path(file, sizeof(file), "%s/.updating-%s/files/data/level1.pak", prefixes, id);
+    write_text(file, "HALF");
+    memset(&remove, 0, sizeof(remove));
+    steps = 0;
+    while (pc5_recover_step(root, &remove, 1) && ++steps < 100000) {}
+    pc5_remove_end(&remove);
+    path(file, sizeof(file), "%s/data/level1.pak", game);
+    CHECK(file_is(file, "LEVEL ONE v2\n") && count_entries(prefixes, ".updating-") == 0, "a half copy deleted");
+    {
+        char text[2048];
+        Pc5Info whole = info;
+        whole.files = 99;
+        path(file, sizeof(file), "%s/.updating-%s/files/Data/Level1.pak", prefixes, id);
+        write_text(file, "LEVEL ONE v3\n");
+        path(file, sizeof(file), "%s/.updating-%s/files/data/sub", prefixes, id);
+        pc5_mkdirs(file);
+        pc5_info_text(&whole, text, sizeof(text));
+        path(file, sizeof(file), "%s/.updating-%s/info.txt", prefixes, id);
+        write_text(file, text);
+    }
+    Pc5Library library;
+    pc5_library_load(root, &library);
+    CHECK(library.leftovers == 1, "a leftover: %d", library.leftovers);
+    memset(&remove, 0, sizeof(remove));
+    steps = 0;
+    while (pc5_recover_step(root, &remove, 1) && ++steps < 100000) {}
+    pc5_remove_end(&remove);
+    path(file, sizeof(file), "%s/data/level1.pak", game);
+    CHECK(file_is(file, "LEVEL ONE v3\n") && count_entries(prefixes, ".updating-") == 0, "a whole copy put in place");
+    CHECK(!pc5_info_read(root, id, &info) && info.files == 99, "its notes too: %u", (unsigned)info.files);
+    pc5_copy(root, sizeof(root), kept_root);
+}
+
+/* Uninstalling with the saves kept, and installing the game again with them. */
+static void test_keep_saves(void)
+{
+    char kept_root[PC5_PATH], id[PC5_ID], again[PC5_ID], prefixes[PC5_PATH], file[PC5_PATH], kept[PC5_PATH];
+    Pc5Library library;
+    Pc5Remove remove;
+    Pc5Saves saves[4];
+    int steps, i;
+
+    pc5_copy(kept_root, sizeof(kept_root), root);
+    path(root, sizeof(root), "%s/data-saves/prospero-win", work);
+    path(prefixes, sizeof(prefixes), "%s/prefixes", root);
+    CHECK(install_folder("NeonDrift", 0, 0, id, sizeof(id)) == PC5_INSTALL_DONE, "saves: installed");
+    path(file, sizeof(file), "%s/%s/drive_c/users/prospero/Saved Games/NeonDrift/slot1.sav", prefixes, id);
+    write_text(file, "my save");
+    path(file, sizeof(file), "%s/%s/user.reg", prefixes, id);
+    write_text(file, "the game's settings");
+    path(file, sizeof(file), "%s/%s/pc5/controls.txt", prefixes, id);
+    write_text(file, "mode = keyboard\n");
+    /* A save the game keeps beside its program, and an unfinished update of it. */
+    path(file, sizeof(file), "%s/%s/drive_c/Games/NeonDrift/save/slot2.sav", prefixes, id);
+    write_text(file, "in its folder");
+    path(file, sizeof(file), "%s/.updating-%s/files/x.dat", prefixes, id);
+    write_text(file, "x");
+    pc5_library_load(root, &library);
+    i = pc5_library_find(&library, id);
+    CHECK(i >= 0 && pc5_remove_can_keep(&library.games[i], &library), "its saves can be kept");
+    CHECK(i >= 0 && !pc5_remove_keep_saves(&remove, root, &library.games[i], &library), "keeping begins: %s", remove.error);
+    path(file, sizeof(file), "%s/profiles/%s.profile", root, id);
+    CHECK(!pc5_exists(file), "out of the library at once");
+    path(file, sizeof(file), "%s/%s", prefixes, id);
+    CHECK(!pc5_exists(file), "its folder moved");
+    path(file, sizeof(file), "%s/saves/%s/drive_c/users/prospero/Saved Games/NeonDrift/slot1.sav", root, id);
+    CHECK(file_is(file, "my save"), "the save kept");
+    path(file, sizeof(file), "%s/saves/%s/drive_c/Games", root, id);
+    CHECK(!pc5_exists(file), "without the game");
+    path(file, sizeof(file), "%s/saves/%s/pc5-game/save/slot2.sav", root, id);
+    CHECK(file_is(file, "in its folder"), "the save in the game's folder kept");
+    path(file, sizeof(file), "%s/saves/%s/pc5-game/NeonDrift.exe", root, id);
+    CHECK(!pc5_exists(file), "the game's own files not");
+    CHECK(count_entries(prefixes, ".updating-") == 0 && count_entries(prefixes, ".removing-update-") == 1,
+          "the unfinished update goes with the game");
+    while (pc5_remove_step(&remove, 1)) {}
+    CHECK(remove.done && !remove.failed, "the game deleted: %s", remove.error);
+    pc5_remove_end(&remove);
+    memset(&remove, 0, sizeof(remove));
+    steps = 0;
+    while (pc5_recover_step(root, &remove, 1) && ++steps < 100000) {}
+    pc5_remove_end(&remove);
+    CHECK(count_entries(prefixes, ".removing-") == 0, "nothing left");
+    CHECK(pc5_saves_list(root, saves, 4) == 1 && !strcmp(saves[0].title, "NeonDrift") && !strcmp(saves[0].name, id),
+          "listed: %s", saves[0].title);
+    pc5_library_load(root, &library);
+    CHECK(pc5_library_find(&library, id) < 0, "not a game any more");
+
+    /* Installed again: found by the folder's name in any case, and the Windows made from them. */
+    CHECK(pc5_saves_find(root, "neondrift", "neondrift.EXE", kept, sizeof(kept)) == 1 && strstr(kept, "/saves/"),
+          "found: %s", kept);
+    CHECK(pc5_saves_find(root, "Starfall", NULL, file, sizeof(file)) == 0, "not another game's");
+    CHECK(pc5_saves_find(root, "NeonDrift", "Other.exe", file, sizeof(file)) == 0, "not another program's");
+    install_saves = kept;
+    CHECK(install_folder("NeonDrift", 0, 0, again, sizeof(again)) == PC5_INSTALL_DONE, "installed with the saves");
+    install_saves = NULL;
+    path(file, sizeof(file), "%s/%s/drive_c/users/prospero/Saved Games/NeonDrift/slot1.sav", prefixes, again);
+    CHECK(file_is(file, "my save"), "the save is back");
+    path(file, sizeof(file), "%s/%s/user.reg", prefixes, again);
+    CHECK(file_is(file, "the game's settings"), "the registry is back");
+    path(file, sizeof(file), "%s/%s/pc5/controls.txt", prefixes, again);
+    CHECK(file_is(file, "mode = keyboard\n"), "the options are back");
+    path(file, sizeof(file), "%s/%s/drive_c/Games/NeonDrift/NeonDrift.exe", prefixes, again);
+    CHECK(pc5_is_file(file), "with the game");
+    path(file, sizeof(file), "%s/%s/drive_c/Games/NeonDrift/save/slot2.sav", prefixes, again);
+    CHECK(file_is(file, "in its folder"), "the save in its folder is back");
+    path(file, sizeof(file), "%s/%s/pc5-game", prefixes, again);
+    CHECK(!pc5_exists(file), "not left in its Windows");
+    CHECK(pc5_saves_list(root, saves, 4) == 0 && count_entries(prefixes, ".removing-") == 0, "the kept saves are used up");
+
+    /* Keeping cut short after the move: finished at the next start. */
+    path(file, sizeof(file), "%s/%s", prefixes, again);
+    path(kept, sizeof(kept), "%s/saves/.keeping-%s", root, again);
+    CHECK(!rename(file, kept), "moved as the uninstall does");
+    pc5_library_load(root, &library);
+    CHECK(library.leftovers == 1, "a leftover: %d", library.leftovers);
+    memset(&remove, 0, sizeof(remove));
+    steps = 0;
+    while (pc5_recover_step(root, &remove, 1) && ++steps < 100000) {}
+    pc5_remove_end(&remove);
+    path(file, sizeof(file), "%s/profiles/%s.profile", root, again);
+    CHECK(!pc5_exists(file) && count_entries(prefixes, ".removing-") == 0, "finished");
+    path(file, sizeof(file), "%s/saves", root);
+    CHECK(count_entries(file, ".keeping-") == 0 && pc5_saves_list(root, saves, 4) == 1, "kept");
+    path(file, sizeof(file), "%s/saves/%s/drive_c/Games", root, saves[0].name);
+    CHECK(!pc5_exists(file), "without the game");
+
+    /* Two sets of the same game's saves: the newest is the one put back, and listed first. */
+    {
+        char command[3 * PC5_PATH], newest[PC5_NAME];
+        pc5_copy(newest, sizeof(newest), saves[0].name);
+        snprintf(command, sizeof(command), "cp -a '%s/saves/%s' '%s/saves/older'", root, newest, root);
+        run(command);
+        path(file, sizeof(file), "%s/saves/older/pc5/kept.txt", root);
+        write_text(file, "1000\n");
+        CHECK(pc5_saves_find(root, "NeonDrift", "NeonDrift.exe", kept, sizeof(kept)) == 2 &&
+              !strcmp(strrchr(kept, '/') + 1, newest), "the newest of two: %s", kept);
+        CHECK(pc5_saves_list(root, saves, 4) == 2 && !strcmp(saves[0].name, newest) && !strcmp(saves[1].name, "older") &&
+              saves[1].kept == 1000, "listed newest first");
+    }
+
+    /* Kept saves deleted. */
+    for (int k = 0; k < 2; k++) {
+        CHECK(!pc5_saves_delete_begin(&remove, root, saves[k].name), "deleting begins: %s", remove.error);
+        while (pc5_remove_step(&remove, 1)) {}
+        CHECK(remove.done && !remove.failed, "deleted");
+        pc5_remove_end(&remove);
+    }
+    CHECK(pc5_saves_list(root, saves, 4) == 0 && count_entries(prefixes, ".removing-") == 0, "none left");
+    pc5_copy(root, sizeof(root), kept_root);
+}
+
 /* ---- the screens, driven like a pad ------------------------------------------------------------ */
 
 typedef struct FakeConsole {
@@ -1018,13 +1300,22 @@ typedef struct FakeConsole {
     int plays;
     char told[256];
     int notifications;
-    int quits;
+    int restarts;
+    char sound[64];
+    int sounds;
 } FakeConsole;
 
-static void fake_quit(void *context)
+static void fake_sound(void *context, const char *name)
 {
     FakeConsole *console = context;
-    console->quits++;
+    pc5_copy(console->sound, sizeof(console->sound), name);
+    console->sounds++;
+}
+
+static void fake_restart(void *context)
+{
+    FakeConsole *console = context;
+    console->restarts++;
 }
 
 static void fake_notify(void *context, const char *text)
@@ -1150,7 +1441,7 @@ static void test_settings(void)
     pc5_mkdirs(dir);
     CHECK(pc5_settings_load(dir, &set) == -1 && !set.fps && !set.frame_time && !set.cpu_usage && !set.cpu_temperature &&
           !set.soc_temperature && !set.memory && !pc5_game_overlay_lines(&set) && set.vibration == 100 &&
-          set.check_updates && !set.keep_logs && set.startup_sound &&
+          set.check_updates && !set.keep_logs && !strcmp(set.startup_sound, "PC5") &&
           set.fps_corner == PC5_CORNER_TOP_RIGHT && set.light_bar == PC5_LIGHT_GAME && set.triggers == PC5_TRIGGERS_OFF &&
           set.trigger_rumble == 100 && set.trigger_resistance == 50,
           "defaults without a file");
@@ -1165,7 +1456,7 @@ static void test_settings(void)
     set.trigger_resistance = 75;
     set.check_updates = 0;
     set.keep_logs = 1;
-    set.startup_sound = 0;
+    pc5_copy(set.startup_sound, sizeof(set.startup_sound), "Chime Two");
     CHECK(!pc5_settings_save(dir, &set), "saved");
     CHECK(!pc5_settings_load(dir, &back) && !memcmp(&set, &back, sizeof(set)), "read back the same");
     path(file, sizeof(file), "%s/pc5/settings.txt", dir);
@@ -1706,18 +1997,197 @@ static void test_sound(void)
           sound.frames > 1 ? sound.samples[1] : -1);
     pc5_sound_free(&sound);
     wav[22] = 1;
-    wav[24] = 0x44;   /* 44100 Hz */
-    wav[25] = 0xac;
-    CHECK(pc5_sound_from_wav(wav, sizeof(wav), &sound) && !sound.samples, "only 48 kHz");
+    wav[24] = 0xc0;   /* 24000 Hz: each sample twice, in between halfway */
+    wav[25] = 0x5d;
+    CHECK(!pc5_sound_from_wav(wav, sizeof(wav), &sound) && sound.frames == 8 && sound.samples[0] == 1000 &&
+          sound.samples[1] == 0 && sound.samples[2] == -1000, "made 48 kHz: %zu %d %d %d", sound.frames,
+          sound.frames ? sound.samples[0] : 0, sound.frames > 1 ? sound.samples[1] : 0, sound.frames > 2 ? sound.samples[2] : 0);
+    pc5_sound_free(&sound);
+    wav[24] = 0x80;   /* 48000 again */
+    wav[25] = 0xbb;
+    wav[34] = 24;     /* 24-bit: the first frame's bytes e8 03 18, its top 16 bits 0x1803 */
+    CHECK(!pc5_sound_from_wav(wav, sizeof(wav), &sound) && sound.frames == 2 && sound.samples[0] == 0x1803,
+          "24-bit: %d", sound.frames ? sound.samples[0] : 0);
+    pc5_sound_free(&sound);
+    {
+        /* 32-bit float, one frame of 0.5 */
+        uint8_t f[44 + 4];
+        float half = 0.5f;
+        memcpy(f, wav, 44);
+        f[20] = 3;
+        f[34] = 32;
+        f[40] = 4;
+        memcpy(f + 44, &half, 4);
+        CHECK(!pc5_sound_from_wav(f, sizeof(f), &sound) && sound.frames == 1 && sound.samples[0] == 16383, "float: %d",
+              sound.frames ? sound.samples[0] : 0);
+        pc5_sound_free(&sound);
+    }
+    wav[34] = 12;
+    CHECK(pc5_sound_from_wav(wav, sizeof(wav), &sound) && !sound.samples, "12-bit isn't read");
     CHECK(pc5_sound_from_wav((const uint8_t *)"RIFF", 4, &sound), "not a WAV");
+    /* The sounds to choose from, and their files: the player's of a name first. */
+    {
+        char app[PC5_PATH], own[PC5_PATH], file[PC5_PATH];
+        Pc5SoundList list;
+        path(app, sizeof(app), "%s/sounds-app", work);
+        path(own, sizeof(own), "%s/sounds-root", work);
+        path(file, sizeof(file), "%s/pc5/sounds/PC5.wav", app);
+        write_text(file, "app");
+        path(file, sizeof(file), "%s/pc5/sounds/Retro Beep.WAV", app);
+        write_text(file, "app");
+        path(file, sizeof(file), "%s/sounds/pc5.wav", own);
+        write_text(file, "own");
+        path(file, sizeof(file), "%s/sounds/Mine.wav", own);
+        write_text(file, "own");
+        path(file, sizeof(file), "%s/sounds/notes.txt", own);
+        write_text(file, "not a sound");
+        pc5_sound_list(app, own, &list);
+        CHECK(list.count == 3 && !strcmp(list.name[0], "Mine") && !strcmp(list.name[1], "PC5") &&
+              !strcmp(list.name[2], "Retro Beep"), "the list: %d %s", list.count, list.count ? list.name[0] : "");
+        CHECK(!pc5_sound_path(app, own, "PC5", file, sizeof(file)) && file_is(file, "own"), "the player's of a name first");
+        CHECK(!pc5_sound_path(app, own, "retro beep", file, sizeof(file)) && file_is(file, "app"), "any case");
+        CHECK(pc5_sound_path(app, own, "Gone", file, sizeof(file)) && pc5_sound_path(app, own, "../x", file, sizeof(file)),
+              "none of that name");
+    }
     /* The app's own. */
     char file[PC5_PATH];
     Pc5Buf data = { 0 };
-    path(file, sizeof(file), "%s/../../art/startup.wav", fixtures);
+    path(file, sizeof(file), "%s/../../art/sounds/PC5.wav", fixtures);
     CHECK(!pc5_read_file(file, &data, 16u << 20) && !pc5_sound_from_wav(data.data, data.len, &sound) &&
-          sound.frames > 48000 && sound.frames < 48000 * 10, "art/startup.wav: %zu frames", sound.frames);
+          sound.frames > 48000 && sound.frames < 48000 * 10, "art/sounds/PC5.wav: %zu frames", sound.frames);
     pc5_sound_free(&sound);
     pc5_buf_free(&data);
+}
+
+
+/* ---- the games' backgrounds --------------------------------------------------------------------- */
+
+static void test_backgrounds(void)
+{
+    char base[PC5_PATH], file[PC5_PATH], own[PC5_PATH];
+    FakeNet net = { 0 };
+    Pc5Http http = { &net, fake_get, NULL };
+    Pc5Image picture = { 0 }, background = { 0 };
+    static Pc5Backgrounds b;
+    uint32_t tint;
+
+    /* A wide picture made 16:9, filling it. */
+    CHECK(!pc5_image_new(&picture, 3840, 1240), "a hero picture");
+    for (int i = 0; i < 3840 * 1240; i++) picture.px[i] = 0xff204060u;
+    CHECK(!pc5_background_compose(&picture, &background) && background.w == PC5_BACKGROUND_WIDTH &&
+          background.h == PC5_BACKGROUND_HEIGHT && background.px[0] == 0xff204060u, "16:9 at 960x540");
+    pc5_image_free(&picture);
+    pc5_image_free(&background);
+    /* Steam's hero, by its plain name or (here) the asset list's; GOG's background. */
+    CHECK(!pc5_background_fetch(NULL, 901001, &http, &background) && background.w == 960, "Steam's hero from the asset list");
+    pc5_image_free(&background);
+    CHECK(!pc5_background_fetch("https://images.gog-statics.com/x.jpg", 0, &http, &background), "GOG's background");
+    pc5_image_free(&background);
+    CHECK(pc5_background_fetch("https://example.com/none.jpg", 0, &http, &background), "none there");
+    {
+        Pc5CoverSearch search;
+        Pc5CoverHint hint = { 0 };
+        pc5_copy(hint.folder, sizeof(hint.folder), "Neon Drift");
+        pc5_cover_search_start(&search, &hint);
+        while (pc5_cover_search_step(&search, &http)) {
+        }
+        int steam = 0;
+        for (int i = 0; i < search.count; i++)
+            if (!strcmp(search.choices[i].source, "Steam") && strstr(search.choices[i].background, "/library_hero.jpg")) steam = 1;
+        CHECK(steam, "a Steam choice comes with its hero");
+    }
+
+    /* The worker: three games, one with the player's own picture, one found on Steam, one nowhere. */
+    path(base, sizeof(base), "%s/backgrounds-root", work);
+    Pc5BackgroundGame *games = pc5_alloc(sizeof(*games) * 3);
+    const char *const titles[3] = { "Own Picture", "Neon Drift", "Zzzq Nothing" };
+    for (int i = 0; i < 3; i++) {
+        snprintf(games[i].id, sizeof(games[i].id), "game%d", i);
+        snprintf(games[i].prefix, sizeof(games[i].prefix), "game%d", i);
+        pc5_copy(games[i].title, sizeof(games[i].title), titles[i]);
+        pc5_copy(games[i].hint.folder, sizeof(games[i].hint.folder), titles[i]);
+        path(file, sizeof(file), "%s/prefixes/game%d/pc5", base, i);
+        pc5_mkdirs(file);
+    }
+    path(own, sizeof(own), "%s/backgrounds/own picture.png", base);
+    {
+        char dir[PC5_PATH];
+        path(dir, sizeof(dir), "%s/backgrounds", base);
+        pc5_mkdirs(dir);
+        write_png(own, 64, 36, 0xff11aa33u);
+    }
+    CHECK(pc5_background_needed(base, &games[0]) && pc5_background_needed(base, &games[1]), "all need one");
+    memset(&b, 0, sizeof(b));
+    pc5_copy(b.root, sizeof(b.root), base);
+    b.http = http;
+    b.games = games;
+    b.count = 3;
+    pc5_backgrounds_run(&b);
+    path(file, sizeof(file), "%s/prefixes/game0/pc5/background.bin", base);
+    CHECK(!pc5_cover_load(file, &background, &tint) && background.w == 960 && background.px[0] == 0xff11aa33u,
+          "the player's own picture");
+    pc5_image_free(&background);
+    path(file, sizeof(file), "%s/prefixes/game1/pc5/background.bin", base);
+    CHECK(!pc5_cover_load(file, &background, &tint) && background.w == 960, "found on Steam");
+    pc5_image_free(&background);
+    path(file, sizeof(file), "%s/prefixes/game2/pc5/background-none.txt", base);
+    CHECK(pc5_is_file(file) && !pc5_background_needed(base, &games[2]), "none anywhere: not asked again");
+    CHECK(atomic_load(&b.generation) == 2, "two saved: %u", atomic_load(&b.generation));
+    CHECK(!pc5_background_needed(base, &games[0]) && !pc5_background_needed(base, &games[1]), "done");
+    /* A picture of the player's for the game with none: used at the next look. */
+    path(own, sizeof(own), "%s/backgrounds/game2.jpg", base);
+    write_png(own, 32, 18, 0xff3344ffu);   /* a PNG named .jpg: read for what it is */
+    CHECK(pc5_background_needed(base, &games[2]), "the player's picture is looked at");
+    /* On a thread, as the screens start it. */
+    CHECK(!pc5_backgrounds_start(&b, games, 3), "the worker started");
+    pc5_backgrounds_end(&b, 0);
+    path(file, sizeof(file), "%s/prefixes/game2/pc5/background.bin", base);
+    CHECK(!pc5_cover_load(file, &background, &tint) && background.px[0] == 0xff3344ffu, "and used");
+    pc5_image_free(&background);
+    path(file, sizeof(file), "%s/prefixes/game2/pc5/background-none.txt", base);
+    CHECK(!pc5_exists(file), "its none note gone");
+}
+
+/* The library with the chosen game's background behind it. */
+static void test_background_screen(const char *fonts)
+{
+    FakeConsole console = { 0 };
+    FakeNet net = { 0 };
+    Pc5Platform platform = { &console, { &net, fake_get, NULL }, fake_clock, fake_play, NULL, fake_notify, fake_time, 0,
+                             NULL, NULL };
+    const char *roots[] = { usb, NULL };
+    Pc5Canvas canvas = { pc5_alloc(1920u * 1080u * 4u), 1920, 1080, 1920 };
+    Pc5Library library;
+    Pc5Image red = { 0 };
+    char file[PC5_PATH];
+
+    pc5_library_load(root, &library);
+    CHECK(library.count > 0, "a game for a background");
+    if (!library.count || !canvas.px) { pc5_free(canvas.px); return; }
+    pc5_image_new(&red, PC5_BACKGROUND_WIDTH, PC5_BACKGROUND_HEIGHT);
+    for (int i = 0; i < red.w * red.h; i++) red.px[i] = 0xffcc2222u;
+    pc5_background_path(root, library.games[0].prefix, file, sizeof(file));
+    pc5_cover_save(file, &red, 0);
+    pc5_image_free(&red);
+    {
+        Pc5UpdateMemory memory;
+        memset(&memory, 0, sizeof(memory));
+        memory.checked = 1792700000;   /* no update check now */
+        pc5_update_save(root, &memory);
+    }
+    Pc5UiConfig config = { root, template_prefix, fonts, roots, NULL, NULL, NULL, NULL, NULL, NULL, 0 };
+    Pc5Ui *ui = pc5_ui_create(&config, &platform);
+    until_screen(ui, "library", &canvas);
+    for (int i = 0; i < 12; i++) press(ui, PC5_KEY_LEFT, &canvas);   /* the first game */
+    frames(ui, 0, 0, 60, &canvas);
+    pc5_ui_draw(ui, &canvas);
+    save_shot(&canvas, "library-background");
+    uint32_t p = canvas.px[500 * 1920 + 100];
+    int r = (int)(p >> 16 & 255), g = (int)(p >> 8 & 255);
+    CHECK(r > 50 && r > g + 30, "the background behind the library: %08x", p);
+    pc5_ui_destroy(ui);
+    unlink(file);
+    pc5_free(canvas.px);
 }
 
 /* The names in a zip's directory, one per line (its central directory, read as unzip does). */
@@ -2932,7 +3402,7 @@ static void test_tile_start(const char *fonts)
 {
     FakeConsole console = { 0 };
     FakeNet net = { 0 };
-    Pc5Platform platform = { &console, { &net, fake_get, NULL }, fake_clock, fake_play, NULL, fake_notify, fake_time, 0, NULL };
+    Pc5Platform platform = { &console, { &net, fake_get, NULL }, fake_clock, fake_play, NULL, fake_notify, fake_time, 0, NULL, NULL };
     const char *roots[] = { usb, NULL };
     Pc5Canvas canvas = { pc5_alloc(1920u * 1080u * 4u), 1920, 1080, 1920 };
     Pc5Library library;
@@ -2944,7 +3414,7 @@ static void test_tile_start(const char *fonts)
     CHECK(library.count > 0, "games to start");
     if (!library.count) return;
     {
-        Pc5UiConfig config = { root, template_prefix, fonts, roots, tiles, tile_template, library.games[0].id, NULL, NULL, NULL };
+        Pc5UiConfig config = { root, template_prefix, fonts, roots, tiles, tile_template, library.games[0].id, NULL, NULL, NULL, 0 };
         Pc5Ui *ui = pc5_ui_create(&config, &platform);
         for (int i = 0; i < 2000 && !console.plays; i++) frames(ui, 0, 0, 1, &canvas);
         CHECK(console.plays == 1 && !strcmp(console.played, library.games[0].id), "the tile's game started: %d %s",
@@ -2952,7 +3422,7 @@ static void test_tile_start(const char *fonts)
         pc5_ui_destroy(ui);
     }
     {
-        Pc5UiConfig config = { root, template_prefix, fonts, roots, tiles, tile_template, "not-installed", NULL, NULL, NULL };
+        Pc5UiConfig config = { root, template_prefix, fonts, roots, tiles, tile_template, "not-installed", NULL, NULL, NULL, 0 };
         Pc5Ui *ui = pc5_ui_create(&config, &platform);
         until_screen(ui, "message", &canvas);
         CHECK(!strcmp(pc5_ui_screen(ui), "message") && console.plays == 1, "a game no longer there: %s",
@@ -2974,7 +3444,7 @@ static void test_tile_start(const char *fonts)
         later[0].tv_sec += 60;
         later[1] = later[0];
         utimes(file, later);
-        Pc5UiConfig config = { root, template_prefix, fonts, roots, tiles, tile_template, NULL, NULL, NULL, NULL };
+        Pc5UiConfig config = { root, template_prefix, fonts, roots, tiles, tile_template, NULL, NULL, NULL, NULL, 0 };
         Pc5Ui *ui = pc5_ui_create(&config, &platform);
         until_screen(ui, "library", &canvas);
         path(saved, sizeof(saved), "%s/prefixes/%s/pc5/cover.bin", root, library.games[0].prefix);
@@ -2996,12 +3466,22 @@ static void test_screens(const char *fonts)
 {
     FakeConsole console = { 0 };
     FakeNet net = { 0 };
-    Pc5Platform platform = { &console, { &net, fake_get, NULL }, fake_clock, fake_play, NULL, fake_notify, fake_time, 0, NULL };
+    Pc5Platform platform = { &console, { &net, fake_get, NULL }, fake_clock, fake_play, NULL, fake_notify, fake_time, 0, NULL,
+                             fake_sound };
+    {
+        /* The sounds to choose from: the app's, and one of the player's. */
+        char from[PC5_PATH], to[PC5_PATH];
+        path(from, sizeof(from), "%s/../../art/sounds/PC5.wav", fixtures);
+        path(to, sizeof(to), "%s/app0/pc5/sounds/PC5.wav", work);
+        copy_file(from, to);
+        path(to, sizeof(to), "%s/sounds/Chime.wav", root);
+        copy_file(from, to);
+    }
     const char *roots[] = { usb, NULL };
     char tiles[PC5_PATH], tile_template[PC5_PATH], tile[PC5_HOME_ID];
     path(tiles, sizeof(tiles), "%s/screens-homebrew", work);
     make_tile_template(tile_template, sizeof(tile_template));
-    Pc5UiConfig config = { root, template_prefix, fonts, roots, tiles, tile_template, NULL, NULL, NULL, NULL };
+    Pc5UiConfig config = { root, template_prefix, fonts, roots, tiles, tile_template, NULL, NULL, NULL, NULL, 0 };
     Pc5Canvas canvas = { pc5_alloc(1920u * 1080u * 4u), 1920, 1080, 1920 };
     Pc5Ui *ui = pc5_ui_create(&config, &platform);
     Pc5Library library;
@@ -3051,6 +3531,34 @@ static void test_screens(const char *fonts)
         pc5_buf_free(&text);
     }
 
+    /* Update, from the game's menu: the same folder again; what the game wrote stays. */
+    {
+        char save[PC5_PATH];
+        path(save, sizeof(save), "%s/prefixes/neondrift/drive_c/Games/NeonDrift/save.dat", root);
+        write_text(save, "progress");
+        press(ui, PC5_KEY_TRIANGLE, &canvas);
+        CHECK(!strcmp(pc5_ui_screen(ui), "game-menu"), "its menu: %s", pc5_ui_screen(ui));
+        for (int i = 0; i < 40; i++) press(ui, PC5_KEY_DOWN, &canvas);
+        press(ui, PC5_KEY_UP, &canvas);          /* Update, above Uninstall */
+        save_shot(&canvas, "game-menu-update");
+        press(ui, PC5_KEY_ACCEPT, &canvas);
+        until_screen(ui, "sources", &canvas);
+        CHECK(!strcmp(pc5_ui_screen(ui), "sources"), "the USB folders: %s", pc5_ui_screen(ui));
+        save_shot(&canvas, "update-sources");
+        press(ui, PC5_KEY_ACCEPT, &canvas);      /* NeonDrift */
+        until_screen(ui, "game-update-ask", &canvas);
+        CHECK(!strcmp(pc5_ui_screen(ui), "game-update-ask"), "asked: %s", pc5_ui_screen(ui));
+        save_shot(&canvas, "update-ask");
+        frames(ui, 0, 0, 30, &canvas);
+        press(ui, PC5_KEY_ACCEPT, &canvas);      /* Update, chosen first */
+        until_screen(ui, "message", &canvas);
+        CHECK(!strcmp(pc5_ui_screen(ui), "message"), "updated: %s", pc5_ui_screen(ui));
+        save_shot(&canvas, "update-done");
+        CHECK(file_is(save, "progress"), "the game's save stayed");
+        press(ui, PC5_KEY_ACCEPT, &canvas);
+        CHECK(!strcmp(pc5_ui_screen(ui), "library"), "back in the library: %s", pc5_ui_screen(ui));
+    }
+
     /* Uninstall: Cancel is chosen first, and a press that came too soon does nothing. */
     press(ui, PC5_KEY_OPTIONS, &canvas);
     press(ui, PC5_KEY_DOWN, &canvas);
@@ -3075,15 +3583,77 @@ static void test_screens(const char *fonts)
         CHECK(!pc5_home_add(tiles, tile_template, root, gone, library.games[0].prefix, library.games[0].title, tile,
                             error, sizeof(error)), "a tile for %s: %s", gone, error);
     }
+    /* Keep saves: the game goes, its saves stay. */
+    {
+        char save[PC5_PATH];
+        path(save, sizeof(save), "%s/prefixes/%s/drive_c/users/prospero/Saved Games/NeonDrift/slot1.sav", root, gone);
+        write_text(save, "kept");
+    }
     press(ui, PC5_KEY_ACCEPT, &canvas);
     frames(ui, 0, 0, 30, &canvas);
     press(ui, PC5_KEY_RIGHT, &canvas);
+    save_shot(&canvas, "uninstall-keep");
     press(ui, PC5_KEY_ACCEPT, &canvas);
     until_screen(ui, "message", &canvas);
     press(ui, PC5_KEY_ACCEPT, &canvas);
     pc5_library_load(root, &library);
     CHECK(library.count == 2, "one uninstalled: %d", library.count);
     CHECK(pc5_library_find(&library, gone) < 0 && !pc5_home_find(tiles, gone, tile), "%s and its tile gone", gone);
+    {
+        Pc5Saves saves[4];
+        CHECK(pc5_saves_list(root, saves, 4) == 1 && !strcmp(saves[0].name, gone), "its saves kept");
+    }
+    /* Settings › Uninstall game lists them after the games. */
+    press(ui, PC5_KEY_OPTIONS, &canvas);
+    press(ui, PC5_KEY_DOWN, &canvas);
+    press(ui, PC5_KEY_ACCEPT, &canvas);
+    for (int i = 0; i < 10; i++) press(ui, PC5_KEY_DOWN, &canvas);
+    save_shot(&canvas, "uninstall-list-saves");
+    press(ui, PC5_KEY_ACCEPT, &canvas);
+    CHECK(!strcmp(pc5_ui_screen(ui), "saves-confirm"), "kept saves chosen: %s", pc5_ui_screen(ui));
+    save_shot(&canvas, "saves-confirm");
+    press(ui, PC5_KEY_BACK, &canvas);
+    press(ui, PC5_KEY_BACK, &canvas);
+    press(ui, PC5_KEY_BACK, &canvas);
+    CHECK(!strcmp(pc5_ui_screen(ui), "library"), "back in the library: %s", pc5_ui_screen(ui));
+    /* Installed again: the saves are offered and put back. */
+    press(ui, PC5_KEY_OPTIONS, &canvas);
+    press(ui, PC5_KEY_ACCEPT, &canvas);
+    until_screen(ui, "sources", &canvas);
+    press(ui, PC5_KEY_ACCEPT, &canvas);      /* NeonDrift */
+    until_screen(ui, "review", &canvas);
+    press(ui, PC5_KEY_ACCEPT, &canvas);
+    CHECK(!strcmp(pc5_ui_screen(ui), "saves-ask"), "its saves offered: %s", pc5_ui_screen(ui));
+    save_shot(&canvas, "saves-ask");
+    frames(ui, 0, 0, 30, &canvas);
+    press(ui, PC5_KEY_ACCEPT, &canvas);      /* Put them back, chosen first */
+    until_screen(ui, "message", &canvas);
+    press(ui, PC5_KEY_ACCEPT, &canvas);
+    pc5_library_load(root, &library);
+    {
+        char save[PC5_PATH];
+        Pc5Saves saves[4];
+        path(save, sizeof(save), "%s/prefixes/%s/drive_c/users/prospero/Saved Games/NeonDrift/slot1.sav", root, gone);
+        CHECK(library.count == 3 && file_is(save, "kept") && pc5_saves_list(root, saves, 4) == 0,
+              "installed with its saves: %d", library.count);
+    }
+    /* And uninstalled for good: Delete all. */
+    press(ui, PC5_KEY_OPTIONS, &canvas);
+    press(ui, PC5_KEY_DOWN, &canvas);
+    press(ui, PC5_KEY_ACCEPT, &canvas);
+    press(ui, PC5_KEY_ACCEPT, &canvas);
+    frames(ui, 0, 0, 30, &canvas);
+    press(ui, PC5_KEY_RIGHT, &canvas);
+    press(ui, PC5_KEY_RIGHT, &canvas);
+    press(ui, PC5_KEY_ACCEPT, &canvas);
+    until_screen(ui, "message", &canvas);
+    press(ui, PC5_KEY_ACCEPT, &canvas);
+    pc5_library_load(root, &library);
+    {
+        Pc5Saves saves[4];
+        CHECK(library.count == 2 && pc5_library_find(&library, gone) < 0 && pc5_saves_list(root, saves, 4) == 0,
+              "deleted with its saves: %d", library.count);
+    }
 
     /* Settings: In games, a value changed with Cross and with right; saved. */
     press(ui, PC5_KEY_OPTIONS, &canvas);
@@ -3102,14 +3672,15 @@ static void test_screens(const char *fonts)
     press(ui, PC5_KEY_DOWN, &canvas);
     press(ui, PC5_KEY_RIGHT, &canvas);       /* trigger resistance: 50 % -> 75 % */
     press(ui, PC5_KEY_DOWN, &canvas);
-    press(ui, PC5_KEY_ACCEPT, &canvas);      /* Startup sound: on -> off */
+    press(ui, PC5_KEY_ACCEPT, &canvas);      /* Startup sound: PC5, the last one, -> Off */
     press(ui, PC5_KEY_DOWN, &canvas);        /* the last row: still on it */
     {
         Pc5Settings set;
         pc5_settings_load(root, &set);
         CHECK(!set.fps && set.light_bar == PC5_LIGHT_CONSOLE && set.vibration == 75 && set.triggers == PC5_TRIGGERS_BOTH &&
-              set.trigger_rumble == 75 && set.trigger_resistance == 75 && !set.startup_sound,
-              "settings saved: fps=%d light=%d vibration=%d triggers=%d rumble=%d resistance=%d sound=%d", set.fps,
+              set.trigger_rumble == 75 && set.trigger_resistance == 75 && !strcmp(set.startup_sound, "off") &&
+              !console.sounds,
+              "settings saved: fps=%d light=%d vibration=%d triggers=%d rumble=%d resistance=%d sound=%s", set.fps,
               (int)set.light_bar, set.vibration, (int)set.triggers, set.trigger_rumble, set.trigger_resistance,
               set.startup_sound);
     }
@@ -3122,12 +3693,13 @@ static void test_screens(const char *fonts)
     press(ui, PC5_KEY_DOWN, &canvas);
     press(ui, PC5_KEY_RIGHT, &canvas);       /* trigger rumble: 75 % -> 100 % */
     press(ui, PC5_KEY_DOWN, &canvas);
-    press(ui, PC5_KEY_RIGHT, &canvas);       /* the next row is Startup sound's: off -> on */
+    press(ui, PC5_KEY_RIGHT, &canvas);       /* the next row is Startup sound's: Off -> Chime, the first */
     {
         Pc5Settings set;
         pc5_settings_load(root, &set);
         CHECK(set.triggers == PC5_TRIGGERS_RUMBLE && set.trigger_rumble == 100 && set.trigger_resistance == 75 &&
-              set.startup_sound, "a strength row only while it is used: triggers=%d rumble=%d resistance=%d sound=%d",
+              !strcmp(set.startup_sound, "Chime") && console.sounds == 1 && !strcmp(console.sound, "Chime"),
+              "a strength row only while it is used: triggers=%d rumble=%d resistance=%d sound=%s",
               (int)set.triggers, set.trigger_rumble, set.trigger_resistance, set.startup_sound);
     }
     /* Overlay: its lines, each on its own, and the corner. */
@@ -3318,7 +3890,7 @@ static void test_report(const char *fonts)
     /* The crash message after a game crashed: Triangle shows the code, Back goes back. */
     FakeConsole console = { 0 };
     FakeNet net = { 0 };
-    Pc5Platform platform = { &console, { &net, fake_get, NULL }, fake_clock, fake_play, NULL, fake_notify, fake_time, 0, NULL };
+    Pc5Platform platform = { &console, { &net, fake_get, NULL }, fake_clock, fake_play, NULL, fake_notify, fake_time, 0, NULL, NULL };
     const char *roots[] = { usb, NULL };
     Pc5Canvas canvas = { pc5_alloc(1920u * 1080u * 4u), 1920, 1080, 1920 };
     Pc5Library library;
@@ -3336,7 +3908,7 @@ static void test_report(const char *fonts)
     path(file, sizeof(file), "%s/session-0.log", logs);
     write_text(file, text);
     {
-        Pc5UiConfig config = { root, template_prefix, fonts, roots, NULL, NULL, NULL, NULL, NULL, NULL };
+        Pc5UiConfig config = { root, template_prefix, fonts, roots, NULL, NULL, NULL, NULL, NULL, NULL, 0 };
         Pc5Ui *ui = pc5_ui_create(&config, &platform);
         until_screen(ui, "message", &canvas);
         CHECK(!strcmp(pc5_ui_screen(ui), "message"), "the crash told: %s", pc5_ui_screen(ui));
@@ -3381,7 +3953,7 @@ static void test_upgrade_screens(const char *fonts)
     FakeConsole console = { 0 };
     static FakeNet net;
     Pc5Platform platform = { &console, { &net, fake_get, fake_download }, fake_clock, fake_play, NULL, fake_notify,
-                             fake_time, 0, fake_quit };
+                             fake_time, 0, fake_restart, NULL };
     const char *roots[] = { usb, NULL };
     char app[PC5_PATH], drive[PC5_PATH], folder[PC5_PATH], file[PC5_PATH], zip[PC5_PATH], digest[65];
     static char json[2048];
@@ -3414,7 +3986,7 @@ static void test_upgrade_screens(const char *fonts)
         set.check_updates = 1;
         pc5_settings_save(root, &set);
     }
-    Pc5UiConfig config = { root, template_prefix, fonts, roots, NULL, NULL, NULL, drives, NULL, NULL };
+    Pc5UiConfig config = { root, template_prefix, fonts, roots, NULL, NULL, NULL, drives, NULL, NULL, 0 };
     Pc5Ui *ui = pc5_ui_create(&config, &platform);
     until_screen(ui, "upgrade-ask", &canvas);
     CHECK(!strcmp(pc5_ui_screen(ui), "upgrade-ask") && !console.notifications, "asked when PC5 opens: %s %d",
@@ -3442,9 +4014,9 @@ static void test_upgrade_screens(const char *fonts)
     pc5_ui_draw(ui, &canvas);
     save_shot(&canvas, "upgrading");
     press(ui, PC5_KEY_ACCEPT, &canvas);      /* nothing to choose while it works */
-    CHECK(!strcmp(pc5_ui_screen(ui), "upgrading") && !console.quits, "still updating");
+    CHECK(!strcmp(pc5_ui_screen(ui), "upgrading") && !console.restarts, "still updating");
     net.gate = 0;
-    /* Done once the new files are in place and the work folder is gone; then Close PC5. */
+    /* Done once the new files are in place and the work folder is gone; then Restart PC5. */
     path(zip, sizeof(zip), "%s/pc5-update", drive);
     path(file, sizeof(file), "%s/eboot.bin", folder);
     for (int i = 0; i < 20000 && (pc5_exists(zip) || !file_is(file, "PC5 NEW EBOOT\n")); i++) {
@@ -3452,7 +4024,7 @@ static void test_upgrade_screens(const char *fonts)
         usleep(1000);
     }
     CHECK(file_is(file, "PC5 NEW EBOOT\n") && !pc5_exists(zip), "installed from the screens");
-    for (int i = 0; i < 100 && !console.quits; i++) {
+    for (int i = 0; i < 100 && !console.restarts; i++) {
         usleep(2000);
         frames(ui, 0, 0, 1, &canvas);
         if (i == 50) {
@@ -3461,9 +4033,9 @@ static void test_upgrade_screens(const char *fonts)
         }
         if (i >= 50) press(ui, PC5_KEY_ACCEPT, &canvas);
     }
-    CHECK(console.quits == 1, "Close PC5: %d", console.quits);
+    CHECK(console.restarts == 1, "Restart PC5: %d", console.restarts);
     pc5_ui_destroy(ui);
-    /* An update finished as PC5 opened: this PC5 is the old one, and closes. */
+    /* An update finished as PC5 opened: this PC5 is the old one, and restarts into the new one. */
     config.finished = "98.0.0";
     ui = pc5_ui_create(&config, &platform);
     until_screen(ui, "upgrading", &canvas);
@@ -3471,7 +4043,7 @@ static void test_upgrade_screens(const char *fonts)
     pc5_ui_draw(ui, &canvas);
     save_shot(&canvas, "upgrade-finished");
     press(ui, PC5_KEY_ACCEPT, &canvas);
-    CHECK(console.quits == 2, "and it closes: %d", console.quits);
+    CHECK(console.restarts == 2, "and it restarts: %d", console.restarts);
     pc5_ui_destroy(ui);
     pc5_free(canvas.px);
 }
@@ -3495,11 +4067,14 @@ int main(int argc, char **argv)
     test_sources();
     test_install();
     test_uninstall();
+    test_game_update();
+    test_keep_saves();
     test_controls();
     test_settings();
     test_update();
     test_sound();
     test_upgrade();
+    test_backgrounds();
     test_zip();
     test_logs();
     test_cover_fill();
@@ -3516,6 +4091,7 @@ int main(int argc, char **argv)
     test_tile_start(fonts);
     test_report(fonts);
     test_upgrade_screens(fonts);
+    test_background_screen(fonts);
     printf("test_pc5: %d checks, %d failed\n", checks, failures);
     return failures ? 1 : 0;
 }

@@ -415,8 +415,9 @@ EOF_SOURCES
     mkdir -p "$app/LICENSES/qrcodegen"
     cp "$here/title/third_party/qrcodegen/LICENSE" "$app/LICENSES/qrcodegen/LICENSE"
     python3 "$here/tools/make-font.py" "$app/pc5/fonts.bin"
-    # The startup sound, on the controller's speaker when PC5 is opened (pc5_console.c).
-    cp "$here/art/startup.wav" "$app/pc5/startup.wav"
+    # The startup sounds to choose from, on the controller's speaker when PC5 is opened (pc5_sound.h).
+    mkdir -p "$app/pc5/sounds"
+    cp "$here"/art/sounds/*.wav "$app/pc5/sounds/"
     # Mozilla's roots as Debian ships them, for the covers' HTTPS (the console's own come first).
     for root in /usr/share/ca-certificates/mozilla/*.crt; do cat "$root"; echo; done > "$app/pc5/ca-certificates.crt"
     python3 "$here/tools/make-prefix.py" --pw "$PW" --wine "$PW/.deps/wine-host/install/usr/bin/wine" \

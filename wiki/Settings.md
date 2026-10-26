@@ -22,7 +22,7 @@ Changes are saved at once, in `/data/prospero-win/pc5/settings.txt`. Settings fo
 | Row | What it does |
 | --- | --- |
 | Install games from USB | Copies one game, or several in a row, from a USB drive to the console. See [Installing games](Installing-games). |
-| Uninstall game | Lists your games to uninstall one, with its saves and settings. See [Uninstalling a game](Installing-games#uninstalling-a-game). |
+| Uninstall game | Lists your games to uninstall one, keeping its saves or not, then the saves kept from games uninstalled before, to delete them. See [Uninstalling a game](Installing-games#uninstalling-a-game). |
 | In games › | Vibration, light bar, adaptive triggers and the startup sound. See [In games](#in-games). |
 | Overlay › | The overlay shown over every game. See [Overlay](#overlay). |
 | Updates › | Checking GitHub for a newer PC5, and installing it. The row shows the last answer. See [Updates](#updates). |
@@ -41,11 +41,25 @@ Changes are saved at once, in `/data/prospero-win/pc5/settings.txt`. Settings fo
 | Adaptive triggers | **Off**, Rumble, Resistance, Rumble + resistance | Rumble: L2 and R2 vibrate with the game's rumble. Resistance: they push back as you press them. Rumble + resistance: they push back, and vibrate instead while the game rumbles (a trigger runs one effect at a time). |
 | Trigger rumble | 25, 50, 75, **100 %** | How strongly L2 and R2 vibrate. Shows with Rumble or Rumble + resistance. |
 | Trigger resistance | 25, **50**, 75, 100 % | How firmly L2 and R2 push back. Shows with Resistance or Rumble + resistance. |
-| Startup sound | **On**, Off | PC5's sound on the controller's speaker when you open PC5 from the home screen (not when you come back to it from a game). |
+| Startup sound | Off, **PC5**, and the other sounds by name | The sound on the controller's speaker when you open PC5 from the home screen (not when you come back to it from a game). Choosing a sound plays it. See [Startup sound](#startup-sound). |
 
 Defaults are in **bold**.
 
 These follow the settings in every game, whatever its [controller mode](Controllers). With the **DualSense** mode, a game that sets its own light bar or trigger effects gets them instead, from the moment it sets them. When a game ends, PC5 gives the controller back as the console had it.
+
+## Startup sound
+
+**Settings › In games › Startup sound** chooses the sound PC5 plays on the controller's speaker when you open it, or **Off**. Choosing a sound with **✕** or left and right plays it, so you can hear it.
+
+PC5 comes with **PC5** (the default), **Beeper - Push**, **Cha-Ching**, **cheap chinese speaker**, **fahh**, **funny message tone**, **rizz** and **System Activated**.
+
+To add your own:
+
+1. On the console, make a folder `/data/prospero-win/sounds/` if there isn't one.
+2. Put a `.wav` file in it. Its name, without `.wav`, is how it shows in the list: `Chime.wav` shows as **Chime**. A sound of yours with the name of one of PC5's takes its place.
+3. Open Settings again: the sound is in the list.
+
+The file can be mono or stereo, 8, 16 or 24-bit or 32-bit float, at any sample rate; PC5 plays the first 30 seconds. The controller's speaker is small, so a short, loud sound works best. If the sound chosen is deleted, PC5 plays its own.
 
 ## Overlay
 

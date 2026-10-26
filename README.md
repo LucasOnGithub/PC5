@@ -3,9 +3,9 @@
 <p align="center"><img src="art/icon0.png" width="200" alt="PC5's icon"></p>
 
 A launcher for your own PC games on a PS5 that runs homebrew. PC5 shows your games as a row
-of covers, installs games from a USB drive in one copy each, and uninstalls them with their
-saves. It runs the games with [prospero-win](https://github.com/mpereiraesaa/prospero-win)
-(Wine on the PS5). The app is `PPSA11018`, its tile is called **PC5**. This is version 1.7.0.
+of covers, installs games from a USB drive in one copy each, updates them from a newer copy
+with their saves kept, and uninstalls them with or without their saves. It runs the games with [prospero-win](https://github.com/mpereiraesaa/prospero-win)
+(Wine on the PS5). The app is `PPSA11018`, its tile is called **PC5**. This is version 1.8.0.
 
 No game is part of PC5, and PC5 downloads none: you install the games you own.
 
@@ -28,7 +28,7 @@ No game is part of PC5, and PC5 downloads none: you install the games you own.
    **✕** to play. Hold the **touchpad** and **Options** for two seconds to leave a game.
 
 Each game has a menu (**△**) for its controller mode, frame generation, resolution, aspect
-ratio, memory, program, home screen tile and uninstalling. Up to four players can play a game
+ratio, memory, program, home screen tile, updating and uninstalling. Up to four players can play a game
 together: each turns on their own controller and signs in with it on the console.
 
 ## The wiki
@@ -44,7 +44,7 @@ Everything else is in the [wiki](https://github.com/bornaradusin/PC5/wiki):
 | [Settings](https://github.com/bornaradusin/PC5/wiki/Settings) | the overlay, vibration, light bar, adaptive triggers, updates |
 | [Launch options](https://github.com/bornaradusin/PC5/wiki/Launch-options) | a game's command line (`launch.txt`) |
 | [Home screen tiles](https://github.com/bornaradusin/PC5/wiki/Home-screen-tiles) | a game on the PS5's home screen |
-| [Covers](https://github.com/bornaradusin/PC5/wiki/Covers) | where covers come from, and your own |
+| [Covers](https://github.com/bornaradusin/PC5/wiki/Covers) | where covers and backgrounds come from, and your own |
 | [Files and folders](https://github.com/bornaradusin/PC5/wiki/Files-and-folders) | what PC5 keeps where on the console |
 | [Troubleshooting](https://github.com/bornaradusin/PC5/wiki/Troubleshooting) and [FAQ](https://github.com/bornaradusin/PC5/wiki/FAQ) | when something doesn't work |
 | [Game compatibility](https://github.com/bornaradusin/PC5/wiki/Game-compatibility) | games players have tried; [add one](https://github.com/bornaradusin/PC5/discussions/new?category=game-compatibility) |
@@ -88,7 +88,7 @@ itself in Docker (`tools/Dockerfile`). A first build takes a few hours, most of 
 `tests/test.sh` runs the host checks (after `tools/build.sh sources`), `tests/test.sh --shots`
 also draws every screen, and `tests/PS5-CHECKLIST.md` is what to try on a console.
 
-**Releasing**: the update check reads the newest release's tag (`v1.7.0`). Raise `PC5_VERSION`
+**Releasing**: the update check reads the newest release's tag (`v1.8.0`). Raise `PC5_VERSION`
 in `title/pc5.h` and `contentVersion` in `sce_sys/param.json`, and attach `PPSA11018.zip`,
 `PPSA11018-sources.tar.xz` and `wine-mono-11.3.0-src.tar.xz` to the release. PC5's own
 updater (`title/pc5_upgrade.c`) installs the release's asset named `PPSA11018.zip`, checked
@@ -118,7 +118,9 @@ It is built on prospero-win by mpereiraesaa and the projects it uses: Wine, DXVK
 (RADV, Zink; including mihawk-99's PS5 work), the PS5 payload SDK and boilerplate, and the
 Lapy helper. Also Wine patches from PS5_MihawkOS by mihawk-99 (LGPL 2.1 or later: thread
 alerts without a descriptor, mains power, a missing program, dnsapi, dxcore; the console's
-free memory), a logging patch from NFS Black Box by lavavex (LGPL 2.1 or later), Wine Mono
+free memory), a logging patch from NFS Black Box by lavavex (LGPL 2.1 or later), movie and
+controller fixes by SuperLeiyan (LGPL 2.1 or later, the DXVK one zlib), FAudio's resampler
+fix as Leo Lobato backported it to prospero-win (zlib, as FAudio), Wine Mono
 (MIT, its parts under their own licences, `LICENSES/wine-mono/COPYING`), FFmpeg (LGPL 2.1 or
 later), ps5-framegen by Swordpdf (GPL 3.0 or later, its shaders from AMD's FSR3 under MIT),
 VKD3D-Proton (LGPL 2.1 or later), Mbed TLS (Apache 2.0 or GPL 2.0 or later), Mozilla's root

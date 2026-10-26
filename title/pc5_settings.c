@@ -24,7 +24,7 @@ void pc5_settings_default(Pc5Settings *settings)
     settings->trigger_resistance = 50;
     settings->check_updates = 1;
     settings->keep_logs = 0;
-    settings->startup_sound = 1;
+    pc5_copy(settings->startup_sound, sizeof(settings->startup_sound), "PC5");
 }
 
 static int pick(const char *value, const char *const *keys, int count, int fallback)
@@ -74,7 +74,22 @@ int pc5_settings_load(const char *root, Pc5Settings *settings)
         char name[32], value[32];
         next = strchr(line, '\n');
         if (next) *next++ = 0;
-        if (line[0] == '#' || sscanf(line, " %31[a-z_] = %31[a-z0-9-]", name, value) != 2) continue;
+        if (line[0] == '#') continue;
+        /* The startup sound's name may have capitals and spaces: the rest of the line. */
+        if (!strncmp(line, "startup_sound", 13)) {
+            const char *v = strchr(line, '=');
+            char sound[64];
+            if (!v) continue;
+            for (v++; *v == ' ' || *v == '\t'; v++) {
+            }
+            pc5_copy(sound, sizeof(sound), v);
+            for (size_t n = strlen(sound); n && (sound[n - 1] == ' ' || sound[n - 1] == '\r' || sound[n - 1] == '\t'); n--)
+                sound[n - 1] = 0;
+            if (!strcmp(sound, "on")) pc5_copy(sound, sizeof(sound), "PC5");   /* 1.7.0's */
+            if (sound[0] && !strchr(sound, '/')) pc5_copy(settings->startup_sound, sizeof(settings->startup_sound), sound);
+            continue;
+        }
+        if (sscanf(line, " %31[a-z_] = %31[a-z0-9-]", name, value) != 2) continue;
         if (!strcmp(name, "fps")) settings->fps = on_off(value, settings->fps);
         else if (!strcmp(name, "frame_time")) settings->frame_time = on_off(value, settings->frame_time);
         else if (!strcmp(name, "cpu_usage")) settings->cpu_usage = on_off(value, settings->cpu_usage);
@@ -93,7 +108,6 @@ int pc5_settings_load(const char *root, Pc5Settings *settings)
             settings->triggers = (Pc5Triggers)pick(value, trigger_keys, PC5_TRIGGERS_COUNT, (int)settings->triggers);
         else if (!strcmp(name, "check_updates")) settings->check_updates = on_off(value, settings->check_updates);
         else if (!strcmp(name, "keep_logs")) settings->keep_logs = on_off(value, settings->keep_logs);
-        else if (!strcmp(name, "startup_sound")) settings->startup_sound = on_off(value, settings->startup_sound);
     }
     pc5_buf_free(&text);
     return 0;
@@ -118,7 +132,7 @@ int pc5_settings_save(const char *root, const Pc5Settings *settings)
                       corner_keys[settings->fps_corner % PC5_CORNERS], settings->vibration,
                       light_keys[settings->light_bar % PC5_LIGHTS], trigger_keys[settings->triggers % PC5_TRIGGERS_COUNT],
                       settings->trigger_rumble, settings->trigger_resistance, settings->check_updates ? "on" : "off",
-                      settings->keep_logs ? "on" : "off", settings->startup_sound ? "on" : "off");
+                      settings->keep_logs ? "on" : "off", settings->startup_sound);
     return pc5_write_file(path, text, (size_t)length);
 }
 

@@ -1,4 +1,4 @@
-PC5 installs games from a USB drive. You put each game's installed folder on the drive, choose it in PC5, and PC5 copies it to the console once, checks the copy against the drive and adds the game to your library. You can install one game at a time or several in a row. This page also covers choosing the right program for a game and uninstalling games.
+PC5 installs games from a USB drive. You put each game's installed folder on the drive, choose it in PC5, and PC5 copies it to the console once, checks the copy against the drive and adds the game to your library. You can install one game at a time or several in a row. This page also covers choosing the right program for a game, updating a game and uninstalling games.
 
 ## Preparing the USB drive
 
@@ -103,6 +103,8 @@ When it is done, PC5 says the game is installed, and it appears in the library, 
 
 If the console is switched off during an install, PC5 deletes the unfinished copy the next time it starts ("Finishing an install or uninstall that was cut short").
 
+If you uninstalled the game before and kept its saves, PC5 asks whether to put them back: see [Keeping a game's saves](#keeping-a-games-saves).
+
 PC5 needs the game's size plus about 1.5 GB of free space before it starts copying.
 
 ## Choosing the right program
@@ -131,6 +133,27 @@ Some games start from a batch file (`.bat` or `.cmd`) that starts the game's pro
 - PC5 reads the batch file each time the game starts, so a change to it takes effect at the next start.
 - Don't turn the batch file into an `.exe` with a converter: such a program starts the batch file as a second program, which the console can't run.
 
+## Updating a game
+
+To move a game to a newer version (a patch, a new release, a fix), put the newer copy's folder on the USB drive, as for installing, then:
+
+1. In the library, choose the game, press **△** and choose **Update**.
+2. Choose the newer copy's folder from the USB drive's list.
+3. PC5 shows what it will do. Choose **Update**.
+
+![Updating a game](images/game-update.png)
+*PC5 copies the newer folder over the game's own.*
+
+PC5 copies the folder over the game's folder on the console:
+
+- The files the newer copy has replace the game's, in the names the game's files already have (a folder named `DATA` on the USB drive goes into the game's `data`).
+- The files only the game's folder has stay: saves and settings some games keep beside their program, `launch.txt`, and anything the old version had that the new one doesn't.
+- The game's Windows (its saves and settings in "Documents" and "AppData", its registry), its cover, its home screen tile and its options in the game menu stay as they were.
+
+The folder must have the game's program (the one in **Change program**), so PC5 can tell it is the same game; it says so when it doesn't. PC5 copies the folder and checks the copy against the USB drive before it changes anything, so stopping (**○**) or a failed copy leaves the game as it was. If the console is switched off while the new files are being put in place, PC5 finishes the update the next time it starts.
+
+PC5 needs the newer folder's size plus about 1 GB of free space. Update only works for games PC5 installed.
+
 ## Uninstalling a game
 
 There are two ways:
@@ -138,12 +161,28 @@ There are two ways:
 - In the library, choose the game, press **△** and choose **Uninstall**.
 - Or press **Options**, choose **Uninstall game**, and choose the game from the list.
 
-PC5 asks first. **Cancel** is chosen by default: move to **Uninstall** and press **✕** to go ahead.
+PC5 asks first. **Cancel** is chosen by default. For a game PC5 installed there are two ways to go ahead:
+
+- **Keep saves**: the game is deleted, and its saves and settings are kept for when you install it again. See [Keeping a game's saves](#keeping-a-games-saves).
+- **Delete all**: the game and everything it made go: its saves, its settings, its shader cache, its cover. There is no backup and no undo.
 
 ![Confirming an uninstall](images/uninstall-confirm.png)
-*PC5 asks before it uninstalls. There is no backup and no undo.*
+*Keep saves, or delete everything.*
 
-Uninstalling deletes the game and everything it made: its saves, its settings, its shader cache, its cover and its [home screen tile's](Home-screen-tiles) folder. There is no backup and no undo. To keep a game's saves, copy its folder `/data/prospero-win/prefixes/<game>/` off the console first (see [Files and folders](Files-and-folders)).
+A game PC5 didn't install has **Uninstall** in place of the two. Either way, the game's [home screen tile's](Home-screen-tiles) folder is deleted with it.
+
+### Keeping a game's saves
+
+**Keep saves** keeps the game's own Windows: the saves and settings it wrote to "Documents", "AppData" or "Saved Games", its registry and its options in the game menu. It also keeps the files the game made in its own folder, beside its program (saves and settings some games keep there, `launch.txt`): PC5 lists the files it copied when it installs or updates a game, and keeps the others. All of it goes to `/data/prospero-win/saves/<game>/` (see [Files and folders](Files-and-folders)). A game installed with a PC5 older than 1.8.0 and not updated since has no such list, so the files in its own folder go with it: to keep those, use [Update](#updating-a-game) instead of uninstalling, or update it once first.
+
+When you install a game with the same folder name and program again, PC5 asks **Put back the saves of** *game*?:
+
+- **Put them back**: the game's Windows is made from the kept saves, and the files it made in its own folder go back there, so the game finds its saves, settings and options again. The kept copy is then used up. If the game's saves were kept more than once, the newest are put back.
+- **Start fresh**: the game gets a new Windows; the kept saves stay for later.
+
+When several games are installed in a row, kept saves are put back without asking when the game has one set of them.
+
+Kept saves are listed in **Options › Uninstall game**, after the games, as **Saves of** *game*. Choose one to delete it.
 
 ## What runs and what doesn't
 

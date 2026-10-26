@@ -25,9 +25,11 @@ typedef struct Pc5Platform {
     /* Seconds since 1970 (UTC), and the console's offset from UTC in *offset_s. */
     int64_t (*unix_time)(void *context, int *offset_s);
     int circle_accepts;     /* the console confirms with Circle (its setting) */
-    /* Closes PC5 (back to the console's home screen), after it updated itself; NULL
-     * where it can't. */
-    void (*quit)(void *context);
+    /* Starts the new PC5 in this one's place, after it updated itself; NULL where it
+     * can't. */
+    void (*restart)(void *context);
+    /* Plays a startup sound by name now, as Settings tries it; NULL where it can't. */
+    void (*sound)(void *context, const char *name);
 } Pc5Platform;
 
 enum {
@@ -58,8 +60,11 @@ typedef struct Pc5UiConfig {
     const char *const *drives;
     const char *user;
     /* The version an update finished installing as PC5 opened (pc5_upgrade_tidy): this
-     * PC5 is the old one, so the screens say so and close it. NULL or "" for none. */
+     * PC5 is the old one, so the screens say so and restart it. NULL or "" for none. */
     const char *finished;
+    /* 1: the games' backgrounds are looked for online and in the player's folders while
+     * the library shows (pc5_backgrounds.h); 0: only those already kept are shown. */
+    int fetch_backgrounds;
 } Pc5UiConfig;
 
 typedef struct Pc5Ui Pc5Ui;

@@ -1,4 +1,4 @@
-Every game in PC5 has a cover. PC5 looks for it online on public sources, with no account and no key, or uses a picture you give it. A game no source has gets a cover made from its own icon and name. This page explains where covers come from, how to choose one, and how to use your own.
+Every game in PC5 has a cover. PC5 looks for it online on public sources, with no account and no key, or uses a picture you give it. A game no source has gets a cover made from its own icon and name. A game can have a background too, shown behind the library while it is chosen. This page explains where covers and backgrounds come from, how to choose a cover, and how to use your own.
 
 ## Where covers come from
 
@@ -61,3 +61,24 @@ Until a cover is found, the library shows the game's card. Offline, PC5 looks ag
 - For the light bar, when **Settings › In games › Light bar** is **Game's colour**: the light bar shows the cover's main colour.
 
 The cover, and the picture as it was downloaded, are kept with the game in `/data/prospero-win/prefixes/<game>/pc5/`. Uninstalling the game deletes them.
+
+## Backgrounds
+
+While a game is chosen in the library, its background fills the screen behind the covers, darkened so the covers and text stay easy to read. A game without one keeps PC5's own dark backdrop with the glow in its cover's colour.
+
+PC5 finds backgrounds by itself, in the background while the library shows, for every game that has none yet, games installed with an earlier PC5 included. It looks in this order:
+
+1. **Your own picture**, if you gave one (see below).
+2. The background of the **cover chosen when the game was installed**: Steam's library background for a Steam cover, GOG's background for a GOG cover.
+3. A **search**, as for covers: Steam's library background or GOG's background of the best match. Wikipedia has none.
+
+A game no source has a background for keeps PC5's backdrop, and PC5 doesn't look online for it again; your own picture still works for it.
+
+### Using your own background
+
+Your picture can be a `.jpg`, `.jpeg` or `.png` file. PC5 cuts it to the screen's 16:9 shape, so a 16:9 picture (for example 1920 × 1080) fits without being cut. Backgrounds are kept at 960 × 540.
+
+- **When installing:** put `background.jpg`, `background.jpeg` or `background.png` at the top of the game's folder on the USB drive.
+- **For a game already installed:** make a folder `/data/prospero-win/backgrounds/` and put the picture in it, named as for [your own cover](#for-a-game-already-installed): the game's folder name, its name in PC5 or its id. For example: `/data/prospero-win/backgrounds/Neon Drift.jpg`.
+
+PC5 picks the picture up the next time it opens, when it is newer than the game's background. The background is kept in `/data/prospero-win/prefixes/<game>/pc5/background.bin`; uninstalling the game deletes it.

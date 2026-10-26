@@ -68,14 +68,13 @@ static void trim(char **begin, char **end)
     while (*end > *begin && ((*end)[-1] == ' ' || (*end)[-1] == '\t' || (*end)[-1] == '\r')) (*end)--;
 }
 
-int pc5_info_read(const char *root, const char *id, Pc5Info *info)
+static int info_read_file(const char *path, Pc5Info *info)
 {
-    char path[PC5_PATH];
     Pc5Buf text = { 0 };
     int fields = 0;
 
     memset(info, 0, sizeof(*info));
-    if (pc5_format(path, sizeof(path), "%s/prefixes/%s/pc5/info.txt", root, id) || pc5_read_file(path, &text, 16384)) {
+    if (pc5_read_file(path, &text, 16384)) {
         pc5_buf_free(&text);
         return -1;
     }
@@ -103,6 +102,17 @@ int pc5_info_read(const char *root, const char *id, Pc5Info *info)
     pc5_buf_free(&text);
     if (info->bits != 32 && info->bits != 64) info->bits = 32;
     return fields == 7 ? 0 : -1;
+}
+
+int pc5_info_read(const char *root, const char *id, Pc5Info *info)
+{
+    char path[PC5_PATH];
+
+    if (pc5_format(path, sizeof(path), "%s/prefixes/%s/pc5/info.txt", root, id)) {
+        memset(info, 0, sizeof(*info));
+        return -1;
+    }
+    return info_read_file(path, info);
 }
 
 /* ---- profiles ---------------------------------------------------------------------- */
@@ -620,8 +630,13 @@ static int count_leftovers(const char *root)
 
     if (pc5_format(path, sizeof(path), "%s/prefixes", root) || !(dir = opendir(path))) return 0;
     while ((entry = readdir(dir)))
-        count += !strncmp(entry->d_name, ".installing-", 12) || !strncmp(entry->d_name, ".removing-", 10);
+        count += !strncmp(entry->d_name, ".installing-", 12) || !strncmp(entry->d_name, ".removing-", 10) ||
+                 !strncmp(entry->d_name, ".updating-", 10);
     closedir(dir);
+    if (!pc5_format(path, sizeof(path), "%s/saves", root) && (dir = opendir(path))) {
+        while ((entry = readdir(dir))) count += !strncmp(entry->d_name, ".keeping-", 9);
+        closedir(dir);
+    }
     return count;
 }
 
@@ -712,8 +727,8 @@ int pc5_new_id(const char *root, const char *name, char *id, size_t size)
         if (k == 1) pc5_copy(candidate, sizeof(candidate), base);
         else snprintf(candidate, sizeof(candidate), "%s-%d", base, k);
         static const char *const places[] = { "profiles/%s.profile", "prefixes/%s", "prefixes/.installing-%s",
-                                              "prefixes/.removing-%s" };
-        for (size_t i = 0; i < 4 && !taken; i++) {
+                                              "prefixes/.removing-%s", "prefixes/.updating-%s", "saves/.keeping-%s" };
+        for (size_t i = 0; i < sizeof(places) / sizeof(places[0]) && !taken; i++) {
             char format[64];
             snprintf(format, sizeof(format), "%%s/%s", places[i]);
             if (!pc5_format(path, sizeof(path), format, root, candidate)) taken |= pc5_exists(path);
@@ -822,6 +837,21 @@ static void delete_logs(const char *root, const char *id)
     closedir(dir);
 }
 
+static int free_name(const char *dir, const char *base, char *out, size_t size);
+
+/* An unfinished update of the game (prefixes/.updating-<prefix>) goes with it: moved aside,
+ * deleted at the next start. */
+static void drop_update(const char *root, const char *prefix)
+{
+    char from[PC5_PATH], prefixes[PC5_PATH], base[PC5_ID + 24], leaf[PC5_ID + 40], to[PC5_PATH];
+
+    snprintf(base, sizeof(base), ".removing-update-%s", prefix);
+    if (!pc5_format(from, sizeof(from), "%s/prefixes/.updating-%s", root, prefix) && pc5_exists(from) &&
+        !pc5_format(prefixes, sizeof(prefixes), "%s/prefixes", root) && !free_name(prefixes, base, leaf, sizeof(leaf)) &&
+        !pc5_join(to, sizeof(to), prefixes, leaf))
+        rename(from, to);
+}
+
 int pc5_remove_begin(Pc5Remove *remove, const char *root, const Pc5Game *game, const Pc5Library *library)
 {
     char from[PC5_PATH], to[PC5_PATH], profile[PC5_PATH];
@@ -834,6 +864,7 @@ int pc5_remove_begin(Pc5Remove *remove, const char *root, const Pc5Game *game, c
     /* The folder first, out of the way: from here on the game is gone, and a
      * cut-short delete is finished at the next start. */
     if (game->prefix[0] && strcmp(game->prefix, "default") && !shared) {
+        drop_update(root, game->prefix);
         if (pc5_format(from, sizeof(from), "%s/prefixes/%s", root, game->prefix)) goto too_long;
         for (int k = 1; k < 100; k++) {
             if (k == 1 ? pc5_format(to, sizeof(to), "%s/prefixes/.removing-%s", root, game->prefix)
@@ -866,6 +897,534 @@ too_long:
     return -1;
 }
 
+/* ---- folders, a name at a time -------------------------------------------------------- */
+
+/* name in dir in any case: 0 and the name as the folder has it, -1 when there is none. */
+static int name_in(const char *dir, const char *name, char *out, size_t size)
+{
+    DIR *folder = opendir(dir);
+    struct dirent *entry;
+    int found = -1;
+
+    if (!folder) return -1;
+    while (found && (entry = readdir(folder)))
+        if (strcmp(entry->d_name, ".") && strcmp(entry->d_name, "..") && !pc5_casecmp(entry->d_name, name) &&
+            strlen(entry->d_name) < size) {
+            pc5_copy(out, size, entry->d_name);
+            found = 0;
+        }
+    closedir(folder);
+    return found;
+}
+
+/* relative (parts between '/') in base, a part at a time in any case: 0 and the path as
+ * the folders have it, -1 when a part isn't there. */
+static int resolve_ci(const char *base, const char *relative, char *out, size_t size)
+{
+    char rest[PC5_PATH], name[PC5_PATH], next[PC5_PATH];
+
+    pc5_copy(out, size, base);
+    pc5_copy(rest, sizeof(rest), relative);
+    for (char *part = rest, *slash; part && *part; part = slash) {
+        if ((slash = strchr(part, '/'))) *slash++ = 0;
+        if (!*part) continue;
+        if (pc5_join(next, sizeof(next), out, part)) return -1;
+        if (!pc5_exists(next) && (name_in(out, part, name, sizeof(name)) || pc5_join(next, sizeof(next), out, name)))
+            return -1;
+        pc5_copy(out, size, next);
+    }
+    return 0;
+}
+
+/* A name in dir that isn't taken: base, then base-2, base-3 and so on. */
+static int free_name(const char *dir, const char *base, char *out, size_t size)
+{
+    char path[PC5_PATH];
+
+    for (int k = 1; k < 100; k++) {
+        if (k == 1 ? pc5_format(out, size, "%s", base) : pc5_format(out, size, "%s-%d", base, k)) return -1;
+        if (pc5_join(path, sizeof(path), dir, out)) return -1;
+        if (!pc5_exists(path)) return 0;
+    }
+    return -1;
+}
+
+/* Everything in base (links left out) as relative paths, a folder ending in '/' and before
+ * what it holds, NUL after each, in list; keep(relative, is_folder) chooses (NULL: all). */
+static int walk_tree(const char *base, Pc5Buf *list, int (*keep)(const char *relative, int folder))
+{
+    enum { STACK = 4096 };
+    char (*stack)[PC5_PATH] = pc5_alloc(sizeof(*stack) * STACK);
+    int top = 0, status = 0;
+
+    if (!stack) return -1;
+    stack[top++][0] = 0;
+    while (top > 0 && !status) {
+        char relative[PC5_PATH], dir_path[PC5_PATH], child[PC5_PATH], full[PC5_PATH];
+        DIR *dir;
+        struct dirent *entry;
+        struct stat st;
+
+        memcpy(relative, stack[--top], PC5_PATH);
+        if (relative[0] ? pc5_join(dir_path, sizeof(dir_path), base, relative)
+                        : pc5_format(dir_path, sizeof(dir_path), "%s", base))
+            continue;
+        if (!(dir = opendir(dir_path))) { status = -1; break; }
+        while ((entry = readdir(dir))) {
+            if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+            if ((relative[0] ? pc5_format(child, sizeof(child), "%s/%s", relative, entry->d_name)
+                             : pc5_format(child, sizeof(child), "%s", entry->d_name)) ||
+                pc5_join(full, sizeof(full), base, child) || lstat(full, &st))
+                continue;
+            if (S_ISDIR(st.st_mode)) {
+                if (keep && !keep(child, 1)) continue;
+                if (top >= STACK) { status = -1; break; }
+                memcpy(stack[top++], child, PC5_PATH);
+                if (pc5_buf_puts(list, child) || pc5_buf_put(list, "/", 2)) status = -1;
+            } else if (S_ISREG(st.st_mode)) {
+                if (keep && !keep(child, 0)) continue;
+                if (pc5_buf_put(list, child, strlen(child) + 1)) status = -1;
+            }
+        }
+        closedir(dir);
+    }
+    pc5_free(stack);
+    return status;
+}
+
+/* ---- the game's files as PC5 copied them (pc5/files.txt, a relative path a line) ---------- */
+
+typedef struct Manifest {
+    Pc5Buf text;
+    char **names;                 /* into text, in any-case order */
+    size_t count;
+} Manifest;
+
+static int name_order_ci(const void *a, const void *b)
+{
+    return pc5_casecmp(*(char *const *)a, *(char *const *)b);
+}
+
+static void manifest_free(Manifest *m)
+{
+    pc5_buf_free(&m->text);
+    pc5_free(m->names);
+    memset(m, 0, sizeof(*m));
+}
+
+/* The lines of text (taken over) as a manifest. */
+static int manifest_from(Pc5Buf *text, Manifest *m)
+{
+    size_t lines = 0, at = 0;
+
+    memset(m, 0, sizeof(*m));
+    m->text = *text;
+    *text = (Pc5Buf){ 0 };
+    if (pc5_buf_terminate(&m->text)) return -1;
+    for (size_t i = 0; i < m->text.len; i++) lines += m->text.data[i] == '\n';
+    if (!(m->names = pc5_alloc(sizeof(*m->names) * (lines + 1)))) return -1;
+    for (char *line = (char *)m->text.data, *next; line && at < m->text.len; line = next) {
+        next = strchr(line, '\n');
+        if (next) *next++ = 0;
+        at = next ? (size_t)(next - (char *)m->text.data) : m->text.len;
+        size_t length = strlen(line);
+        if (length && line[length - 1] == '\r') line[--length] = 0;
+        if (length) m->names[m->count++] = line;
+    }
+    qsort(m->names, m->count, sizeof(*m->names), name_order_ci);
+    return 0;
+}
+
+static int manifest_load(const char *path, Manifest *m)
+{
+    Pc5Buf text = { 0 };
+    memset(m, 0, sizeof(*m));
+    if (pc5_read_file(path, &text, 256u * 1024 * 1024)) {
+        pc5_buf_free(&text);
+        return -1;
+    }
+    return manifest_from(&text, m);
+}
+
+static int manifest_has(const Manifest *m, const char *relative)
+{
+    return m->count && bsearch(&relative, m->names, m->count, sizeof(*m->names), name_order_ci) != NULL;
+}
+
+/* The files of list (NUL after each, folders ending in '/'), a line each, added to out. */
+static int manifest_add_list(Pc5Buf *out, const Pc5Buf *list)
+{
+    for (size_t at = 0; at < list->len; at += strlen((const char *)list->data + at) + 1) {
+        const char *line = (const char *)list->data + at;
+        size_t length = strlen(line);
+        if (!length || line[length - 1] == '/') continue;
+        if (pc5_buf_put(out, line, length) || pc5_buf_put(out, "\n", 1)) return -1;
+    }
+    return 0;
+}
+
+/* ---- kept saves ------------------------------------------------------------------------ */
+
+static int saves_dir(const char *root, char *out, size_t size)
+{
+    return pc5_format(out, size, "%s/saves", root);
+}
+
+int pc5_remove_can_keep(const Pc5Game *game, const Pc5Library *library)
+{
+    if (!game->pc5 || !game->prefix[0] || strcmp(game->prefix, game->id) || !strcmp(game->prefix, "default")) return 0;
+    for (int i = 0; library && i < library->count; i++)
+        if (&library->games[i] != game && !strcmp(library->games[i].prefix, game->prefix)) return 0;
+    return 1;
+}
+
+/* The files the game made in its own folder, which pc5/files.txt doesn't list (its saves and
+ * settings kept beside its program, launch.txt), moved from the kept Windows' game folder to
+ * its pc5-game/. Without the list (a game installed before PC5 1.8.0) nothing is. A file
+ * moved already is gone from the game's folder, so this can run again. */
+static int keep_game_files(const char *keeping, char *error, size_t error_size)
+{
+    char path[PC5_PATH], game[PC5_PATH], from[PC5_PATH], to[PC5_PATH];
+    Pc5Info info;
+    Manifest manifest;
+    Pc5Buf list = { 0 };
+    int status = 0;
+
+    if (pc5_format(path, sizeof(path), "%s/pc5/info.txt", keeping) || info_read_file(path, &info) ||
+        pc5_format(game, sizeof(game), "%s/drive_c/Games/%s", keeping, info.folder) || !pc5_is_dir(game) ||
+        pc5_format(path, sizeof(path), "%s/pc5/files.txt", keeping) || manifest_load(path, &manifest))
+        return 0;
+    if (walk_tree(game, &list, NULL)) {
+        snprintf(error, error_size, "PC5 can't read the game's folder.");
+        status = -1;
+    }
+    for (size_t at = 0; !status && at < list.len; at += strlen((char *)list.data + at) + 1) {
+        const char *relative = (const char *)list.data + at;
+        size_t length = strlen(relative);
+        if (relative[length - 1] == '/' || manifest_has(&manifest, relative)) continue;
+        if (pc5_join(from, sizeof(from), game, relative) || pc5_format(to, sizeof(to), "%s/pc5-game/%s", keeping, relative)) {
+            snprintf(error, error_size, "A path in the game is too long: %s.", relative);
+            status = -1;
+            break;
+        }
+        char *slash = strrchr(to, '/');
+        *slash = 0;
+        int made = pc5_mkdirs(to);
+        *slash = '/';
+        if (made || rename(from, to)) {
+            snprintf(error, error_size, "PC5 can't keep %s: %s.", relative, strerror(errno));
+            status = -1;
+        }
+    }
+    pc5_buf_free(&list);
+    manifest_free(&manifest);
+    return status;
+}
+
+/* The rest of keeping a game's saves, its Windows already moved to saves/.keeping-<id>: the
+ * game's folders (C:\Games) out of it to prefixes/.removing-<id> (removing, deleted after;
+ * "" when there were none), the game out of the library, the saves under their own name.
+ * Run again, it finishes one cut short. */
+static int keep_finish(const char *root, const char *id, const char *profile_file, char *removing, size_t removing_size,
+                       char *error, size_t error_size)
+{
+    char saves[PC5_PATH], keeping[PC5_PATH], games[PC5_PATH], prefixes[PC5_PATH], profile[PC5_PATH];
+    char leaf[PC5_ID + 32], base[PC5_ID + 16], name[PC5_ID];
+
+    removing[0] = 0;
+    if (saves_dir(root, saves, sizeof(saves)) || pc5_format(keeping, sizeof(keeping), "%s/.keeping-%s", saves, id) ||
+        pc5_format(games, sizeof(games), "%s/drive_c/Games", keeping) ||
+        pc5_format(prefixes, sizeof(prefixes), "%s/prefixes", root) ||
+        pc5_format(profile, sizeof(profile), "%s/profiles/%s", root, profile_file)) {
+        snprintf(error, error_size, "A path is too long.");
+        return -1;
+    }
+    snprintf(base, sizeof(base), ".removing-%s", id);
+    if (pc5_is_dir(games) && keep_game_files(keeping, error, error_size)) return -1;
+    if (pc5_is_dir(games) &&
+        (free_name(prefixes, base, leaf, sizeof(leaf)) || pc5_join(removing, removing_size, prefixes, leaf) ||
+         rename(games, removing))) {
+        snprintf(error, error_size, "PC5 can't move the game's folder: %s.", strerror(errno));
+        removing[0] = 0;
+        return -1;
+    }
+    if (unlink(profile) && errno != ENOENT) {
+        snprintf(error, error_size, "PC5 can't delete the game's profile: %s.", strerror(errno));
+        return -1;
+    }
+    index_update(root, profile_file, 0);
+    delete_logs(root, id);
+    {
+        /* When they were kept: the newest of a game's kept saves is the one put back. */
+        char when[PC5_PATH], text[32];
+        if (!pc5_format(when, sizeof(when), "%s/pc5/kept.txt", keeping) && !pc5_exists(when)) {
+            snprintf(text, sizeof(text), "%lld\n", (long long)time(NULL));
+            pc5_write_file(when, text, strlen(text));
+        }
+    }
+    if (free_name(saves, id, name, sizeof(name)) || pc5_join(games, sizeof(games), saves, name) || rename(keeping, games)) {
+        snprintf(error, error_size, "PC5 can't put the saves in place: %s.", strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+int pc5_remove_keep_saves(Pc5Remove *remove, const char *root, const Pc5Game *game, const Pc5Library *library)
+{
+    char saves[PC5_PATH], from[PC5_PATH], keeping[PC5_PATH], removing[PC5_PATH];
+
+    memset(remove, 0, sizeof(*remove));
+    pc5_copy(remove->root, sizeof(remove->root), root);
+    remove->failed = 1;
+    if (!pc5_remove_can_keep(game, library)) {
+        snprintf(remove->error, sizeof(remove->error), "This game's saves can't be kept apart from it.");
+        return -1;
+    }
+    if (saves_dir(root, saves, sizeof(saves)) || pc5_mkdirs(saves) ||
+        pc5_format(from, sizeof(from), "%s/prefixes/%s", root, game->prefix) ||
+        pc5_format(keeping, sizeof(keeping), "%s/.keeping-%s", saves, game->prefix)) {
+        snprintf(remove->error, sizeof(remove->error), "PC5 can't make its saves folder: %s.", strerror(errno));
+        return -1;
+    }
+    if (pc5_exists(keeping)) {
+        snprintf(remove->error, sizeof(remove->error), "PC5 is still keeping this game's saves from before: start PC5 again.");
+        return -1;
+    }
+    drop_update(root, game->prefix);
+    if (rename(from, keeping)) {
+        snprintf(remove->error, sizeof(remove->error), "PC5 can't move the game's folder: %s.", strerror(errno));
+        return -1;
+    }
+    /* From here on a cut-short uninstall is finished at the next start. */
+    if (keep_finish(root, game->prefix, game->file, removing, sizeof(removing), remove->error, sizeof(remove->error)))
+        return -1;
+    remove->failed = 0;
+    if (removing[0]) return pc5_tree_delete_begin(remove, removing);
+    remove->done = 1;
+    return 0;
+}
+
+int pc5_saves_delete_begin(Pc5Remove *remove, const char *root, const char *name)
+{
+    char saves[PC5_PATH], from[PC5_PATH], prefixes[PC5_PATH], base[PC5_ID + 16], leaf[PC5_ID + 32], to[PC5_PATH];
+
+    memset(remove, 0, sizeof(*remove));
+    pc5_copy(remove->root, sizeof(remove->root), root);
+    snprintf(base, sizeof(base), ".removing-saves-%s", name);
+    if (!name[0] || name[0] == '.' || strchr(name, '/') || saves_dir(root, saves, sizeof(saves)) ||
+        pc5_join(from, sizeof(from), saves, name) || pc5_format(prefixes, sizeof(prefixes), "%s/prefixes", root) ||
+        free_name(prefixes, base, leaf, sizeof(leaf)) || pc5_join(to, sizeof(to), prefixes, leaf) || rename(from, to)) {
+        snprintf(remove->error, sizeof(remove->error), "PC5 can't move the saves: %s.", strerror(errno));
+        remove->failed = 1;
+        return -1;
+    }
+    return pc5_tree_delete_begin(remove, to);
+}
+
+static int saves_by_title(const void *a, const void *b)
+{
+    const Pc5Saves *x = a, *y = b;
+    int order = pc5_casecmp(x->title, y->title);
+    if (order) return order;
+    if (x->kept != y->kept) return x->kept > y->kept ? -1 : 1;   /* the newest first */
+    return strcmp(x->name, y->name);
+}
+
+int pc5_saves_list(const char *root, Pc5Saves *saves, int max)
+{
+    char dir[PC5_PATH], path[PC5_PATH];
+    DIR *folder;
+    struct dirent *entry;
+    int count = 0;
+
+    if (saves_dir(root, dir, sizeof(dir)) || !(folder = opendir(dir))) return 0;
+    while (count < max && (entry = readdir(folder))) {
+        Pc5Info info;
+        if (entry->d_name[0] == '.' || strlen(entry->d_name) >= PC5_ID ||
+            pc5_format(path, sizeof(path), "%s/%s/pc5/info.txt", dir, entry->d_name) || info_read_file(path, &info))
+            continue;
+        Pc5Saves *one = &saves[count++];
+        pc5_copy(one->name, sizeof(one->name), entry->d_name);
+        pc5_copy(one->title, sizeof(one->title), info.title);
+        pc5_copy(one->folder, sizeof(one->folder), info.folder);
+        pc5_copy(one->exe, sizeof(one->exe), info.exe);
+        one->kept = 0;
+        {
+            Pc5Buf text = { 0 };
+            struct stat st;
+            if (!pc5_format(path, sizeof(path), "%s/%s/pc5/kept.txt", dir, entry->d_name) && !pc5_read_file(path, &text, 64) &&
+                !pc5_buf_terminate(&text))
+                one->kept = strtoll((char *)text.data, NULL, 10);
+            else if (!pc5_format(path, sizeof(path), "%s/%s", dir, entry->d_name) && !stat(path, &st))
+                one->kept = (int64_t)st.st_mtime;
+            pc5_buf_free(&text);
+        }
+    }
+    closedir(folder);
+    qsort(saves, (size_t)count, sizeof(saves[0]), saves_by_title);
+    return count;
+}
+
+int pc5_saves_find(const char *root, const char *folder, const char *exe, char *out, size_t size)
+{
+    enum { MAX = 256 };
+    Pc5Saves *saves = pc5_alloc(sizeof(*saves) * MAX);
+    char dir[PC5_PATH];
+    int found = 0, newest = -1;
+
+    if (!saves || !folder || !folder[0] || saves_dir(root, dir, sizeof(dir))) {
+        pc5_free(saves);
+        return 0;
+    }
+    int count = pc5_saves_list(root, saves, MAX);
+    for (int i = 0; i < count; i++)
+        if (!pc5_casecmp(saves[i].folder, folder) && (!exe || !pc5_casecmp(saves[i].exe, exe))) {
+            found++;
+            if (newest < 0 || saves[i].kept > saves[newest].kept) newest = i;
+        }
+    if (newest >= 0 && pc5_format(out, size, "%s/%s", dir, saves[newest].name)) found = 0;
+    pc5_free(saves);
+    return found;
+}
+
+/* ---- updates, put in place ---------------------------------------------------------------- */
+
+/* One path of an update's copy (staging/files/<relative>) put in the game's folder: its
+ * folders made, or the game's own used in whatever case they have; a file of the game's
+ * where the copy has a folder deleted, a folder of the game's where the copy has a file
+ * kept beside it as <name>.pc5-old; the file renamed over the game's own (in the case the
+ * game's has). A path already moved is left as it is, so this can run again. */
+static int update_place(const char *staging, const char *game_dir, const char *relative, char *error, size_t size)
+{
+    char from[PC5_PATH], at[PC5_PATH], part[PC5_PATH], name[PC5_PATH], next[PC5_PATH];
+    size_t length = strlen(relative);
+    int is_dir = length && relative[length - 1] == '/';
+
+    if (!length || pc5_format(from, sizeof(from), "%s/files/%s", staging, relative)) {
+        snprintf(error, size, "A path in the update is too long: %s.", relative);
+        return -1;
+    }
+    pc5_copy(at, sizeof(at), game_dir);
+    pc5_copy(part, sizeof(part), relative);
+    if (is_dir) part[length - 1] = 0;
+    for (char *piece = part, *slash; piece; piece = slash) {
+        struct stat st;
+        int exists, folder;
+        if ((slash = strchr(piece, '/'))) *slash++ = 0;
+        folder = slash || is_dir;
+        if (pc5_join(next, sizeof(next), at, piece)) goto too_long;
+        exists = !lstat(next, &st);
+        if (!exists && !name_in(at, piece, name, sizeof(name))) {
+            if (pc5_join(next, sizeof(next), at, name)) goto too_long;
+            exists = !lstat(next, &st);
+        }
+        if (folder) {
+            if (exists && !S_ISDIR(st.st_mode)) {
+                if (unlink(next)) goto failed;
+                exists = 0;
+            }
+            if (!exists && (pc5_join(next, sizeof(next), at, piece) || (mkdir(next, 0777) && errno != EEXIST)))
+                goto failed;
+            pc5_copy(at, sizeof(at), next);
+            continue;
+        }
+        if (!pc5_exists(from)) return 0;   /* moved already */
+        if (exists && S_ISDIR(st.st_mode)) {
+            char base[PC5_PATH], leaf[PC5_PATH], aside[PC5_PATH];
+            const char *own = strrchr(next, '/') + 1;
+            if (pc5_format(base, sizeof(base), "%s.pc5-old", own) || free_name(at, base, leaf, sizeof(leaf)) ||
+                pc5_join(aside, sizeof(aside), at, leaf) || rename(next, aside))
+                goto failed;
+            exists = 0;
+        }
+        if (!exists && pc5_join(next, sizeof(next), at, piece)) goto too_long;
+        if (rename(from, next)) goto failed;
+        return 0;
+    }
+    return 0;
+too_long:
+    snprintf(error, size, "A path in the game is too long: %s.", relative);
+    return -1;
+failed:
+    snprintf(error, size, "PC5 can't put %s in place: %s.", relative, strerror(errno));
+    return -1;
+}
+
+/* The update's notes (staging/info.txt) made the game's, the copy's files (staging/files.txt)
+ * added to the game's list, and its profile written again (or, when it can't be, at the
+ * game's next start). */
+static int update_complete(const char *root, const char *id, const char *staging, char *error, size_t size)
+{
+    char from[PC5_PATH], to[PC5_PATH], why[PC5_ERROR];
+    Pc5Buf text = { 0 };
+    int failed = pc5_format(from, sizeof(from), "%s/info.txt", staging) ||
+                 pc5_format(to, sizeof(to), "%s/prefixes/%s/pc5/info.txt", root, id) ||
+                 pc5_read_file(from, &text, 16384) || pc5_write_file(to, text.data, text.len);
+
+    pc5_buf_free(&text);
+    if (failed) {
+        snprintf(error, size, "PC5 can't write its notes: %s.", strerror(errno));
+        return -1;
+    }
+    /* The game's files: what it had and what the copy brought, once each. */
+    if (!pc5_format(from, sizeof(from), "%s/files.txt", staging) && pc5_is_file(from) &&
+        !pc5_format(to, sizeof(to), "%s/prefixes/%s/pc5/files.txt", root, id)) {
+        Manifest old = { 0 }, copy = { 0 };
+        Pc5Buf merged = { 0 };
+        manifest_load(to, &old);   /* none for a game installed before PC5 1.8.0 */
+        if (!manifest_load(from, &copy)) {
+            size_t i = 0, j = 0;
+            while (i < old.count || j < copy.count) {
+                int order = i >= old.count ? 1 : j >= copy.count ? -1 : pc5_casecmp(old.names[i], copy.names[j]);
+                const char *name = order <= 0 ? old.names[i] : copy.names[j];
+                if (order <= 0) i++;
+                if (order >= 0) j++;
+                pc5_buf_puts(&merged, name);
+                pc5_buf_put(&merged, "\n", 1);
+            }
+            if (pc5_write_file(to, merged.data, merged.len)) {
+                snprintf(error, size, "PC5 can't write the game's list of files: %s.", strerror(errno));
+                failed = 1;
+            }
+        }
+        manifest_free(&old);
+        manifest_free(&copy);
+        pc5_buf_free(&merged);
+        if (failed) return -1;
+    }
+    pc5_profile_refresh(root, id, why, sizeof(why));
+    return 0;
+}
+
+/* An update left at prefixes/<name> (".updating-<id>"): 1 when it is to be deleted (its copy
+ * wasn't whole, or it is now in place), -1 when it couldn't be put in place (it stays, for
+ * the next start). */
+static int update_recover(const char *root, const char *name)
+{
+    char staging[PC5_PATH], notes[PC5_PATH], files[PC5_PATH], game_dir[PC5_PATH], error[PC5_ERROR];
+    const char *id = name + 10;
+    Pc5Buf list = { 0 };
+    Pc5Info info;
+
+    if (pc5_format(staging, sizeof(staging), "%s/prefixes/%s", root, name) ||
+        pc5_format(notes, sizeof(notes), "%s/info.txt", staging) ||
+        pc5_format(files, sizeof(files), "%s/files", staging))
+        return -1;
+    if (info_read_file(notes, &info)) return 1;   /* not whole: the game wasn't changed */
+    if (pc5_format(game_dir, sizeof(game_dir), "%s/prefixes/%s/drive_c/Games/%s", root, id, info.folder) ||
+        !pc5_is_dir(game_dir))
+        return 1;   /* the game is gone */
+    if (pc5_is_dir(files) && walk_tree(files, &list, NULL)) {
+        pc5_buf_free(&list);
+        return -1;
+    }
+    /* A file that can't be put in place is left out, so the update always finishes. */
+    for (size_t at = 0; at < list.len; at += strlen((char *)list.data + at) + 1)
+        update_place(staging, game_dir, (char *)list.data + at, error, sizeof(error));
+    pc5_buf_free(&list);
+    return update_complete(root, id, staging, error, sizeof(error)) ? -1 : 1;
+}
+
 int pc5_recover_step(const char *root, Pc5Remove *remove, int budget_ms)
 {
     char path[PC5_PATH], leftover[PC5_PATH] = "";
@@ -874,11 +1433,34 @@ int pc5_recover_step(const char *root, Pc5Remove *remove, int budget_ms)
 
     if (remove->top > 0 && !remove->failed) return pc5_remove_step(remove, budget_ms) || 1;
     if (remove->failed) return 0;
+    /* Saves being kept when the uninstall stopped: kept, and the game's folder deleted. */
+    if (!saves_dir(root, path, sizeof(path)) && (dir = opendir(path))) {
+        char id[PC5_ID], profile[PC5_ID + 16], error[PC5_ERROR];
+        while ((entry = readdir(dir)) && !leftover[0]) {
+            if (strncmp(entry->d_name, ".keeping-", 9) || strlen(entry->d_name + 9) >= sizeof(id)) continue;
+            pc5_copy(id, sizeof(id), entry->d_name + 9);
+            snprintf(profile, sizeof(profile), "%s.profile", id);
+            keep_finish(root, id, profile, leftover, sizeof(leftover), error, sizeof(error));
+        }
+        closedir(dir);
+        if (leftover[0]) {
+            remove->failed = 0;
+            return pc5_tree_delete_begin(remove, leftover) ? 0 : 1;
+        }
+    }
     if (pc5_format(path, sizeof(path), "%s/prefixes", root) || !(dir = opendir(path))) return 0;
-    while ((entry = readdir(dir))) {
-        if (!strncmp(entry->d_name, ".installing-", 12) || !strncmp(entry->d_name, ".removing-", 10)) {
+    /* An update the console stopped, before anything is deleted: put in place when its copy
+     * was whole, else deleted. */
+    while (!leftover[0] && (entry = readdir(dir)))
+        if (!strncmp(entry->d_name, ".updating-", 10) && entry->d_name[10] && update_recover(root, entry->d_name) > 0)
             pc5_join(leftover, sizeof(leftover), path, entry->d_name);
-            break;
+    if (!leftover[0]) {
+        rewinddir(dir);
+        while ((entry = readdir(dir))) {
+            if (!strncmp(entry->d_name, ".installing-", 12) || !strncmp(entry->d_name, ".removing-", 10)) {
+                pc5_join(leftover, sizeof(leftover), path, entry->d_name);
+                break;
+            }
         }
     }
     if (!leftover[0]) {
@@ -1028,7 +1610,10 @@ static int prefix_entry(Pc5Install *install, const char *line)
     ssize_t got;
 
     if (pc5_join(source, sizeof(source), install->template_prefix, line) ||
-        pc5_join(target, sizeof(target), install->staging, line))
+        (!strncmp(line, "pc5-game/", 9)
+             /* kept saves: what the game made in its own folder goes back there */
+             ? pc5_format(target, sizeof(target), "%s/drive_c/Games/%s/%s", install->staging, install->info.folder, line + 9)
+             : pc5_join(target, sizeof(target), install->staging, line)))
         return fail(install, "A path in the Windows template is too long.");
     if (line[length - 1] == '/') {
         target[strlen(target) - 1] = 0;
@@ -1054,6 +1639,8 @@ static int prefix_entry(Pc5Install *install, const char *line)
         install->bytes_done += (uint64_t)got;
     }
     close(in);
+    /* Kept saves are deleted once the game is in place: their copy must be on the disk first. */
+    if (ok && install->kept[0] && fsync(out)) ok = 0;
     if (close(out)) ok = 0;
     install->files_done++;
     return ok ? 0 : fail(install, "PC5 can't copy %s: %s.", line, errno == ENOSPC ? "the console is full" : strerror(errno));
@@ -1109,6 +1696,7 @@ static int game_paths(Pc5Install *install)
 
 static int game_target(Pc5Install *install, const char *relative, char *out, size_t size)
 {
+    if (install->update) return pc5_format(out, size, "%s/files%s%s", install->staging, relative[0] ? "/" : "", relative);
     return pc5_format(out, size, "%s/drive_c/Games/%s%s%s", install->staging, install->info.folder,
                       relative[0] ? "/" : "", relative);
 }
@@ -1158,9 +1746,23 @@ static int finish(Pc5Install *install)
     if (pc5_info_text(&install->info, text, sizeof(text)) ||
         pc5_format(path, sizeof(path), "%s/pc5/info.txt", install->staging) || pc5_write_file(path, text, strlen(text)))
         return fail(install, "PC5 can't write its notes: %s.", strerror(errno));
+    /* The game's files as copied: what else is in its folder later, the game made (kept saves). */
+    {
+        Pc5Buf files = { 0 };
+        int failed = manifest_add_list(&files, &install->list) ||
+                     pc5_format(path, sizeof(path), "%s/pc5/files.txt", install->staging) ||
+                     pc5_write_file(path, files.data, files.len);
+        pc5_buf_free(&files);
+        if (failed) return fail(install, "PC5 can't write its notes: %s.", strerror(errno));
+    }
     if (install->cover.px && (pc5_format(path, sizeof(path), "%s/pc5/cover.bin", install->staging) ||
                               pc5_cover_save(path, &install->cover, install->tint)))
         return fail(install, "PC5 can't save the cover: %s.", strerror(errno));
+    /* Where the cover's background is, for the background fetched after the install. */
+    if ((install->background[0] || install->background_appid) &&
+        !pc5_format(path, sizeof(path), "%s/pc5/background.txt", install->staging) &&
+        !pc5_format(text, sizeof(text), "%s\n%u\n", install->background, (unsigned)install->background_appid))
+        pc5_write_file(path, text, strlen(text));
     /* The picture as it was downloaded, for a cover made again later without the network. */
     if (install->original.len && !pc5_format(path, sizeof(path), "%s/pc5/%s", install->staging,
                                               pc5_picture_name(&install->original)))
@@ -1172,6 +1774,178 @@ static int finish(Pc5Install *install)
         /* The folder is in place: the next start writes the profile again. */
         return fail(install, "%s", error);
     }
+    /* The kept saves are the game's now: out of saves/ at once, deleted step by step. */
+    if (install->kept[0]) {
+        char prefixes[PC5_PATH], base[PC5_ID + 16], leaf[PC5_ID + 32];
+        snprintf(base, sizeof(base), ".removing-saves-%s", install->id);
+        if (!pc5_format(prefixes, sizeof(prefixes), "%s/prefixes", install->root) &&
+            !free_name(prefixes, base, leaf, sizeof(leaf)) && !pc5_join(path, sizeof(path), prefixes, leaf) &&
+            !rename(install->kept, path)) {
+            if (!install->cleanup) install->cleanup = pc5_alloc(sizeof(Pc5Remove));
+            if (install->cleanup) {
+                memset(install->cleanup, 0, sizeof(*install->cleanup));
+                if (!pc5_tree_delete_begin(install->cleanup, path)) install->tidying = 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* ---- updates, the steps -------------------------------------------------------------------- */
+
+/* The update's next piece of putting the copy in place: its notes first, which mark the copy
+ * whole, then file after file until about until; 1 when everything is in place. */
+static int update_finish_step(Pc5Install *install, uint64_t until)
+{
+    char path[PC5_PATH], text[2048];
+
+    if (!install->moving) {
+        Pc5Buf files = { 0 };
+        int failed = manifest_add_list(&files, &install->list) ||
+                     pc5_format(path, sizeof(path), "%s/files.txt", install->staging) ||
+                     pc5_write_file(path, files.data, files.len);
+        pc5_buf_free(&files);
+        /* The notes last: they mark the copy whole. */
+        if (failed || pc5_info_text(&install->info, text, sizeof(text)) ||
+            pc5_format(path, sizeof(path), "%s/info.txt", install->staging) || pc5_write_file(path, text, strlen(text)))
+            return fail(install, "PC5 can't write its notes: %s.", strerror(errno));
+        install->moving = 1;
+        install->at = 0;
+        install->files_done = 0;
+    }
+    while (install->at < install->list.len) {
+        const char *relative = (const char *)install->list.data + install->at;
+        size_t length = strlen(relative);
+        char why[PC5_ERROR];
+        /* A file that can't be put in place is left out (the first one's why kept), so the
+         * update finishes either way. */
+        if (update_place(install->staging, install->game_dir, relative, why, sizeof(why)) && !install->skipped++)
+            pc5_copy(install->error, sizeof(install->error), why);
+        if (relative[length - 1] != '/') install->files_done++;
+        install->at += length + 1;
+        if (pc5_now_ms() >= until) return 0;
+    }
+    if (update_complete(install->root, install->id, install->staging, install->error, sizeof(install->error)))
+        return -1;
+    /* What is left of the copy (its emptied folders and its notes) goes. */
+    if (!install->cleanup) install->cleanup = pc5_alloc(sizeof(Pc5Remove));
+    if (install->cleanup) {
+        memset(install->cleanup, 0, sizeof(*install->cleanup));
+        if (!pc5_tree_delete_begin(install->cleanup, install->staging)) install->tidying = 1;
+    }
+    return 1;
+}
+
+uint64_t pc5_update_needs(const Pc5Folder *folder)
+{
+    return folder->bytes + SPARE_ROOM;
+}
+
+int pc5_update_begin(Pc5Install *install, const char *root, const char *id, const Pc5Folder *folder)
+{
+    char path[PC5_PATH], program[PC5_PATH];
+    uint64_t free_bytes = 0;
+    Pc5Info old;
+
+    memset(install, 0, sizeof(*install));
+    install->in_fd = install->out_fd = -1;
+    install->phase = PC5_INSTALL_FAILED;
+    install->update = 1;
+    pc5_copy(install->root, sizeof(install->root), root);
+    pc5_copy(install->id, sizeof(install->id), id);
+    pc5_copy(install->source, sizeof(install->source), folder->path);
+    if (pc5_info_read(root, id, &old)) return fail(install, "PC5 didn't install this game, so it can't update it.");
+    install->info = old;
+    if (pc5_format(install->game_dir, sizeof(install->game_dir), "%s/prefixes/%s/drive_c/Games/%s", root, id, old.folder) ||
+        !pc5_is_dir(install->game_dir))
+        return fail(install, "The game's folder is missing: uninstall it and install it again.");
+    /* The copy of the same game: it has the game's program. */
+    if (resolve_ci(folder->path, old.exe, program, sizeof(program)) || !pc5_is_file(program))
+        return fail(install, "This folder doesn't have %s, the program %s starts. Choose the folder of a newer copy of %s.",
+                    old.exe, old.title, old.title);
+    install->info.bytes = folder->bytes;
+    install->info.files = folder->files;
+    for (int i = 0; i < folder->exe_count; i++)
+        if (!pc5_casecmp(folder->exes[i].path, old.exe) && folder->exes[i].pe.bits) {
+            install->info.bits = folder->exes[i].pe.bits;
+            install->info.api = pc5_folder_api(folder, i);
+        }
+    if (pc5_format(path, sizeof(path), "%s/prefixes", root)) return fail(install, "A path is too long.");
+    if (pc5_free_bytes(path, &free_bytes) == 0 && free_bytes < pc5_update_needs(folder)) {
+        char need[32], have[32];
+        pc5_size_text(pc5_update_needs(folder), need, sizeof(need));
+        pc5_size_text(free_bytes, have, sizeof(have));
+        return fail(install, "Not enough space: the update needs %s and the console has %s free.", need, have);
+    }
+    if (pc5_format(install->staging, sizeof(install->staging), "%s/prefixes/.updating-%s", root, id))
+        return fail(install, "A path is too long.");
+    if (pc5_exists(install->staging)) {
+        install->staging[0] = 0;   /* not this update's: left alone */
+        return fail(install, "An earlier update of this game isn't finished: close PC5 and open it again to finish it.");
+    }
+    if (mkdir(install->staging, 0777)) return fail(install, "PC5 can't start the update: %s.", strerror(errno));
+    if (!(install->chunk = pc5_alloc(CHUNK))) {
+        rmdir(install->staging);
+        return fail(install, "Out of memory.");
+    }
+    install->bytes_total = install->info.bytes;
+    install->files_total = install->info.files;
+    install->phase = PC5_INSTALL_LIST;
+    return 0;
+}
+
+/* ---- kept saves, installed ------------------------------------------------------------------- */
+
+/* What of the kept saves makes the game's Windows: all but the game's folders and PC5's
+ * notes, of which the options and the marks of what the Windows has (its DXVK, its
+ * template's version) stay. */
+static int saves_keep(const char *relative, int folder)
+{
+    if (!pc5_casecmp(relative, "drive_c/Games")) return 0;
+    if (!strcmp(relative, "pc5")) return 1;
+    if (!strncmp(relative, "pc5/", 4))
+        return !folder && (!strcmp(relative, "pc5/controls.txt") || !strcmp(relative, "pc5/dxvk.txt") ||
+                           !strcmp(relative, "pc5/template.txt"));
+    return 1;
+}
+
+int pc5_install_use_saves(Pc5Install *install, const char *path)
+{
+    Pc5Buf found = { 0 }, ordered = { 0 };
+    int has_system = 0, failed;
+
+    if (install->phase != PC5_INSTALL_PREFIX || install->at) return fail(install, "The install has begun already.");
+    failed = walk_tree(path, &found, saves_keep);
+    /* As template_paths orders the template's: the registry after the rest, system.reg last. */
+    for (int pass = 0; pass < 3 && !failed; pass++)
+        for (size_t at = 0; at < found.len; at += strlen((char *)found.data + at) + 1) {
+            const char *line = (const char *)found.data + at;
+            size_t length = strlen(line);
+            int registry = length > 4 && !strchr(line, '/') && !strcmp(line + length - 4, ".reg");
+            int system = !strcmp(line, "system.reg");
+            has_system |= system;
+            if (pass == 0 ? registry : pass == 1 ? !registry || system : !system) continue;
+            if (pc5_buf_put(&ordered, line, length + 1)) failed = 1;
+        }
+    pc5_buf_free(&found);
+    if (failed || !has_system) {
+        pc5_buf_free(&ordered);
+        return fail(install, failed ? "PC5 can't read the kept saves." : "The kept saves are damaged: they have no registry.");
+    }
+    pc5_buf_free(&install->template_list);
+    install->template_list = ordered;
+    install->bytes_total = 0;
+    install->files_total = 0;
+    for (size_t at = 0; at < ordered.len; at += strlen((char *)ordered.data + at) + 1) {
+        const char *line = (const char *)ordered.data + at;
+        char source[PC5_PATH];
+        struct stat st;
+        if (line[strlen(line) - 1] == '/') continue;
+        if (!pc5_join(source, sizeof(source), path, line) && !stat(source, &st)) install->bytes_total += (uint64_t)st.st_size;
+        install->files_total++;
+    }
+    pc5_copy(install->template_prefix, sizeof(install->template_prefix), path);
+    pc5_copy(install->kept, sizeof(install->kept), path);
     return 0;
 }
 
@@ -1267,6 +2041,14 @@ Pc5InstallPhase pc5_install_step(Pc5Install *install, int budget_ms)
             if (ended) {
                 uint8_t digest[32];
                 pc5_sha256_final(&install->sha, digest);
+                /* An update's copy goes over the game's files: on the disk before it does. */
+                if (!verify && install->out_fd >= 0 && install->update && fsync(install->out_fd)) {
+                    close(install->out_fd);
+                    install->out_fd = -1;
+                    fail(install, "PC5 can't write %s: %s.", relative, strerror(errno));
+                    start_cleanup(install, 0);
+                    break;
+                }
                 if (!verify && install->out_fd >= 0 && close(install->out_fd)) {
                     install->out_fd = -1;
                     fail(install, "PC5 can't write %s: %s.", relative, strerror(errno));
@@ -1293,6 +2075,17 @@ Pc5InstallPhase pc5_install_step(Pc5Install *install, int budget_ms)
             break;
         }
         case PC5_INSTALL_FINISH:
+            if (install->update) {
+                int placed = update_finish_step(install, until);
+                if (placed < 0) {
+                    /* Not whole yet: deleted, the game unchanged. Whole: finished at the next start. */
+                    if (!install->moving) start_cleanup(install, 0);
+                    else install->phase = PC5_INSTALL_FAILED;
+                } else if (placed) {
+                    install->phase = install->tidying ? PC5_INSTALL_CLEANUP : PC5_INSTALL_DONE;
+                }
+                break;
+            }
             if (finish(install)) {
                 /* Before the rename the folder is deleted; after it the game
                  * is in place and only its profile is missing. */
@@ -1300,10 +2093,16 @@ Pc5InstallPhase pc5_install_step(Pc5Install *install, int budget_ms)
                 else install->phase = PC5_INSTALL_FAILED;
                 break;
             }
-            install->phase = PC5_INSTALL_DONE;
-            return install->phase;
+            install->phase = install->tidying ? PC5_INSTALL_CLEANUP : PC5_INSTALL_DONE;
+            if (!install->tidying) return install->phase;
+            break;
         case PC5_INSTALL_CLEANUP:
             if (!install->cleanup || !pc5_remove_step(install->cleanup, (int)(until - pc5_now_ms()) + 1)) {
+                /* Tidying after the game is in place: what is left is deleted at the next start. */
+                if (install->tidying) {
+                    install->phase = PC5_INSTALL_DONE;
+                    return install->phase;
+                }
                 if (install->cleanup && install->cleanup->failed && !install->error[0])
                     pc5_copy(install->error, sizeof(install->error), install->cleanup->error);
                 install->phase = install->cancelled ? PC5_INSTALL_CANCELLED : PC5_INSTALL_FAILED;

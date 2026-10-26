@@ -1,11 +1,14 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
-/* PC5: covers from Steam, GOG and Wikipedia (pc5_cover.h).
+/* PC5: covers from Steam, GOG and Wikipedia (pc5_cover.h), and the games'
+ * backgrounds from the first two.
  *
  *   Steam      store.steampowered.com/api/storesearch: the store's own search,
  *              then the app's 600x900 library picture on Steam's image server
  *              (its file name comes from IStoreBrowseService/GetItems when the
- *              plain one is not there, as for newer games)
- *   GOG        catalog.gog.com/v1/catalog: each product's coverVertical
+ *              plain one is not there, as for newer games); its background is
+ *              the library's hero picture, found the same way
+ *   GOG        catalog.gog.com/v1/catalog: each product's coverVertical, and its
+ *              galaxyBackgroundImage for the background
  *   Wikipedia  en.wikipedia.org/w/api.php: the article's lead picture
  *              (pageimages, which for a game is its box art)
  *
@@ -274,7 +277,7 @@ void pc5_cover_search_start(Pc5CoverSearch *search, const Pc5CoverHint *hint)
 }
 
 static void add_choice(Pc5CoverSearch *search, const char *source, const char *title, const char *url,
-                       uint32_t appid, int score)
+                       const char *background, uint32_t appid, int score)
 {
     Pc5CoverChoice *slot = NULL;
 
@@ -296,6 +299,13 @@ static void add_choice(Pc5CoverSearch *search, const char *source, const char *t
     pc5_copy(slot->source, sizeof(slot->source), source);
     pc5_copy(slot->title, sizeof(slot->title), title);
     pc5_copy(slot->url, sizeof(slot->url), url);
+    if (background && !strncmp(background, "https://", 8)) pc5_copy(slot->background, sizeof(slot->background), background);
+}
+
+/* Steam's library hero for an app, by its plain name (newer apps: the asset list's). */
+static void steam_hero(uint32_t appid, char *out, size_t size)
+{
+    snprintf(out, size, STEAM_IMAGES "steam/apps/%u/library_hero.jpg", (unsigned)appid);
 }
 
 /* Store entries that are not the game itself. */
@@ -348,7 +358,7 @@ static int ask(const Pc5Http *http, const char *url, Pc5Json *json, Pc5Buf *answ
 
 static void steam_search(Pc5CoverSearch *search, const Pc5Http *http, const char *query)
 {
-    char term[3 * PC5_NAME + 1], url[512], name[128], picture[256];
+    char term[3 * PC5_NAME + 1], url[512], name[128], picture[256], hero[256];
     Pc5Buf answer = { 0 };
     Pc5Json json;
 
@@ -369,7 +379,8 @@ static void steam_search(Pc5CoverSearch *search, const Pc5Http *http, const char
             int similarity = best_similarity(search, name);
             if (similarity < MIN_SIMILARITY) continue;
             snprintf(picture, sizeof(picture), STEAM_IMAGES "steam/apps/%u/library_600x900_2x.jpg", (unsigned)id);
-            add_choice(search, "Steam", name, picture, id, similarity + 30 - (int)i * 2);
+            steam_hero(id, hero, sizeof(hero));
+            add_choice(search, "Steam", name, picture, hero, id, similarity + 30 - (int)i * 2);
         }
         pc5_json_free(&json);
     }
@@ -378,7 +389,7 @@ static void steam_search(Pc5CoverSearch *search, const Pc5Http *http, const char
 
 static void gog_search(Pc5CoverSearch *search, const Pc5Http *http, const char *query)
 {
-    char term[3 * PC5_NAME + 1], url[512], name[128], picture[512];
+    char term[3 * PC5_NAME + 1], url[512], name[128], picture[512], background[512];
     Pc5Buf answer = { 0 };
     Pc5Json json;
 
@@ -396,7 +407,9 @@ static void gog_search(Pc5CoverSearch *search, const Pc5Http *http, const char *
                 continue;
             int similarity = best_similarity(search, name);
             if (similarity < MIN_SIMILARITY) continue;
-            add_choice(search, "GOG", name, picture, 0, similarity + 20 - (int)i * 2);
+            if (pc5_json_text(&json, pc5_json_get(&json, product, "galaxyBackgroundImage"), background, sizeof(background)))
+                background[0] = 0;
+            add_choice(search, "GOG", name, picture, background, 0, similarity + 20 - (int)i * 2);
         }
         pc5_json_free(&json);
     }
@@ -429,7 +442,7 @@ static void wikipedia_search(Pc5CoverSearch *search, const Pc5Http *http, const 
             int similarity = best_similarity(search, name);
             if (similarity < MIN_SIMILARITY) continue;
             int rank = (int)pc5_json_number(&json, pc5_json_get(&json, page, "index"), 3);
-            add_choice(search, "Wikipedia", name, picture, 0, similarity - rank * 2);
+            add_choice(search, "Wikipedia", name, picture, NULL, 0, similarity - rank * 2);
         }
         pc5_json_free(&json);
     }
@@ -455,9 +468,11 @@ int pc5_cover_search_step(Pc5CoverSearch *search, const Pc5Http *http)
     switch (what) {
     case PLAN_STEAM_APP: {
         char picture[256];
+        char hero[256];
         snprintf(picture, sizeof(picture), STEAM_IMAGES "steam/apps/%u/library_600x900_2x.jpg",
                  (unsigned)search->hint.steam_appid);
-        add_choice(search, "Steam", search->hint.folder, picture, search->hint.steam_appid, 1000);
+        steam_hero(search->hint.steam_appid, hero, sizeof(hero));
+        add_choice(search, "Steam", search->hint.folder, picture, hero, search->hint.steam_appid, 1000);
         search->requests--;   /* nothing was asked */
         break;
     }
@@ -476,7 +491,8 @@ int pc5_cover_search_step(Pc5CoverSearch *search, const Pc5Http *http)
 
 /* Newer Steam apps keep their library picture under a hashed name, which the
  * store's item list gives. */
-static int steam_asset_url(const Pc5Http *http, uint32_t appid, char *out, size_t size)
+/* An asset of the app (its first named field present in its asset list) on Steam's image server. */
+static int steam_asset_url(const Pc5Http *http, uint32_t appid, const char *const *fields, char *out, size_t size)
 {
     char input[256], encoded[768], url[1024], format[256], file[160];
     Pc5Buf answer = { 0 };
@@ -493,9 +509,10 @@ static int steam_asset_url(const Pc5Http *http, uint32_t appid, char *out, size_
     if (!ask(http, url, &json, &answer)) {
         uint32_t item = pc5_json_item(&json, pc5_json_get(&json, pc5_json_get(&json, 0, "response"), "store_items"), 0);
         uint32_t assets = pc5_json_get(&json, item, "assets");
-        if (!pc5_json_text(&json, pc5_json_get(&json, assets, "asset_url_format"), format, sizeof(format)) &&
-            (!pc5_json_text(&json, pc5_json_get(&json, assets, "library_capsule_2x"), file, sizeof(file)) ||
-             !pc5_json_text(&json, pc5_json_get(&json, assets, "library_capsule"), file, sizeof(file)))) {
+        int found = 0;
+        for (int f = 0; fields[f] && !found; f++)
+            found = !pc5_json_text(&json, pc5_json_get(&json, assets, fields[f]), file, sizeof(file));
+        if (!pc5_json_text(&json, pc5_json_get(&json, assets, "asset_url_format"), format, sizeof(format)) && found) {
             char *slot = strstr(format, "${FILENAME}");
             if (slot) {
                 *slot = 0;
@@ -549,12 +566,42 @@ int pc5_cover_fetch(const Pc5CoverChoice *choice, const Pc5Http *http, Pc5Image 
     if (choice->url[0] == '/') {
         if (read_picture(choice->url, &picture, original)) return -1;
     } else if (download_picture(http, choice->url, &picture, original)) {
+        static const char *const capsule[] = { "library_capsule_2x", "library_capsule", NULL };
         char other[512];
-        if (!choice->steam_appid || steam_asset_url(http, choice->steam_appid, other, sizeof(other)) ||
+        if (!choice->steam_appid || steam_asset_url(http, choice->steam_appid, capsule, other, sizeof(other)) ||
             download_picture(http, other, &picture, original))
             return -1;
     }
     status = pc5_cover_compose(&picture, cover);
+    pc5_image_free(&picture);
+    return status;
+}
+
+int pc5_background_fetch(const char *url, uint32_t steam_appid, const Pc5Http *http, Pc5Image *background)
+{
+    static const char *const hero[] = { "library_hero_2x", "library_hero", NULL };
+    Pc5Image picture = { 0 };
+    char other[512];
+    int status;
+
+    *background = (Pc5Image){ 0 };
+    if ((!url || !url[0] || download_picture(http, url, &picture, NULL)) &&
+        (!steam_appid || steam_asset_url(http, steam_appid, hero, other, sizeof(other)) ||
+         download_picture(http, other, &picture, NULL)))
+        return -1;
+    status = pc5_background_compose(&picture, background);
+    pc5_image_free(&picture);
+    return status;
+}
+
+int pc5_background_read(const char *path, Pc5Image *background)
+{
+    Pc5Image picture = { 0 };
+    int status;
+
+    *background = (Pc5Image){ 0 };
+    if (read_picture(path, &picture, NULL)) return -1;
+    status = pc5_background_compose(&picture, background);
     pc5_image_free(&picture);
     return status;
 }

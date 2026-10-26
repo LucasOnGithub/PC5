@@ -38,6 +38,7 @@ typedef struct Pc5CoverChoice {
     char source[16];            /* "Steam", "GOG", "Wikipedia", or "your picture" */
     char title[128];            /* the game's name there */
     char url[PC5_PATH];         /* its cover picture: https://..., or the player's file */
+    char background[PC5_PATH];  /* the game's wide background picture there (https://...), or "" */
     uint32_t steam_appid;       /* Steam: the app, for its asset list */
     int score;
 } Pc5CoverChoice;
@@ -65,6 +66,11 @@ int pc5_cover_search_step(Pc5CoverSearch *search, const Pc5Http *http);
 /* A choice's picture, fetched and made a cover (pc5_cover_compose). original,
  * when not NULL, gets the picture's file as it was downloaded (JPEG or PNG). */
 int pc5_cover_fetch(const Pc5CoverChoice *choice, const Pc5Http *http, Pc5Image *cover, Pc5Buf *original);
+/* A game's background from a choice (its background, or Steam's from the app's asset
+ * list), or from url alone with appid 0, made 16:9 (pc5_background_compose). */
+int pc5_background_fetch(const char *url, uint32_t steam_appid, const Pc5Http *http, Pc5Image *background);
+/* The player's own background, from its file. */
+int pc5_background_read(const char *path, Pc5Image *background);
 /* Where a game's downloaded picture is kept, by its kind: "cover-original.jpg" or ".png". */
 const char *pc5_picture_name(const Pc5Buf *original);
 

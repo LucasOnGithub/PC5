@@ -39,7 +39,7 @@ def main() -> int:
     if param.get("titleId") != TITLE:
         problems.append(f"sce_sys/param.json is {param.get('titleId')}, not {TITLE}")
     for needed in ("eboot.bin", "lapy.elf", "sce_sys/icon0.png", "sce_sys/pic0.png", "sce_module/libc.prx",
-                   "pc5/fonts.bin", "pc5/startup.wav", "pc5/ca-certificates.crt", "pc5/prefix.list", "pc5/prefix/system.reg",
+                   "pc5/fonts.bin", "pc5/sounds/PC5.wav", "pc5/ca-certificates.crt", "pc5/prefix.list", "pc5/prefix/system.reg",
                    "pc5/prefix-media.reg", "win/wine/lib/wine/x86_64-unix/winedmo.prx",
                    "win/wine/lib/wine/x86_64-unix/winegstreamer.prx", "LICENSES/ps5-framegen/COPYING",
                    "win/wine/lib/wine/x86_64-windows/winegstreamer.dll",
@@ -120,9 +120,10 @@ Built from <https://github.com/bornaradusin/PC5> at commit {repo_commit}:
   the Lapy helper, built for {TITLE}.
 - `pc5/prefix`: an empty Wine prefix made by prospero-win's `pw_install.py`, with DXVK
   2.6.2-prospero2 (<https://github.com/mpereiraesaa/dxvk>, zlib licence) built with that
-  repository's `patches/dxvk` (textures shared within the game's process; `pc5/dxvk.txt`
-  names the build) and VKD3D-Proton 3.0.1 (<https://github.com/HansKristian-Work/vkd3d-proton>,
-  LGPL 2.1 or later, its release's DLLs unchanged). Each game PC5 installs gets its own
+  repository's `patches/dxvk` (textures shared within the game's process, including a
+  shared render target a game samples; `pc5/dxvk.txt` names the build) and VKD3D-Proton
+  3.0.1 (<https://github.com/HansKristian-Work/vkd3d-proton>, LGPL 2.1 or later, its
+  release's DLLs unchanged). Each game PC5 installs gets its own
   copy, and a game installed with an earlier DXVK gets this one's DLLs when it next starts.
   `pc5/prefix-media.reg` is what registering Wine's media decoders adds to it, which PC5
   adds to the prefix of a game installed before they were part of the app.
@@ -157,8 +158,8 @@ Built from <https://github.com/bornaradusin/PC5> at commit {repo_commit}:
   or later), unchanged, which PC5 copies into each home screen tile it makes; its library,
   psfwd, is built into the eboot.
 - The icon and the Home background are drawn by `art/make-art.py` in that repository.
-- `pc5/startup.wav`: PC5's startup sound (`art/startup.wav` in that repository), played on
-  the controller's speaker when PC5 is opened.
+- `pc5/sounds`: the startup sounds to choose from (`art/sounds` in that repository), played
+  on the controller's speaker when PC5 is opened.
 
 Covers are looked up on Steam's store, GOG's catalogue and Wikipedia, which need no
 account; they are saved with each game on the console.

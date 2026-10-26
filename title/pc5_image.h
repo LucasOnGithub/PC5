@@ -7,6 +7,8 @@
 #include "pc5.h"
 
 enum { PC5_COVER_WIDTH = 480, PC5_COVER_HEIGHT = 720 };
+/* A game's background, behind the library when it is chosen: 16:9, drawn at twice its size. */
+enum { PC5_BACKGROUND_WIDTH = 960, PC5_BACKGROUND_HEIGHT = 540 };
 
 /* A JPEG or PNG file's pixels; -1 if it is neither or is damaged. */
 int pc5_image_decode(const void *bytes, size_t size, Pc5Image *out);
@@ -15,6 +17,8 @@ int pc5_image_resize(const Pc5Image *src, int w, int h, Pc5Image *out);
 /* A 2:3 cover from any picture, never stretched: it fills the frame, what
  * sticks out of the 2:3 shape cut off evenly on both sides. */
 int pc5_cover_compose(const Pc5Image *src, Pc5Image *cover);
+/* A 16:9 background from any picture, filling it as a cover fills its frame. */
+int pc5_background_compose(const Pc5Image *src, Pc5Image *background);
 /* The colour a cover glows with behind it: its strongest colour, kept dark
  * enough for white text. */
 uint32_t pc5_image_tint(const Pc5Image *image);

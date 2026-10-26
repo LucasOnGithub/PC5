@@ -19,10 +19,12 @@ The first time, the library is empty. Press **Options** and choose **Install gam
 When PC5 opens and a newer release is out on GitHub, it asks: **Update now** or **Later**. Later leaves it for **Settings › Updates › Update now**.
 
 1. Choose **Update now**. PC5 downloads the new `PPSA11018.zip` from the release, unpacks it and checks every file, then puts the new files in place of its own. A progress bar shows the download and the unpacking; **○** stops it until the files are put in place, and PC5 is then as it was.
-2. When it says the new version is installed, press **✕** (**Close PC5**). PC5 closes.
-3. Open PC5 again from the home screen and check the version in **Settings › About PC5**. If the old version still opens, restart the console.
+2. When it says the new version is installed, press **✕** (**Restart PC5**). PC5 starts again as the new version.
+3. Check the version in **Settings › About PC5**.
 
-PC5 needs room for the download and its unpacked files on the drive it is installed on: about four times the size of the zip, freed again when it is done. It finds its own folder on the console's drives (in `homebrew`, `etaHEN/games` or at the top of a USB or extended drive). The folder stays where it is and only PC5's own files in it change; files you added at the top of the folder stay. If PC5 is on the console more than once, it asks you to delete the copy you don't use first. If something goes wrong before the new files are put in place, PC5 says why and stays as it was; if the console turns off while they are being put in place, PC5 finishes the job the next time it opens, and then closes so you can open the new version.
+PC5 1.7.0 closes instead of restarting, and the console then shows error CE-108255-1; the update is installed all the same, so just open PC5 again. From 1.8.0 on, PC5 restarts by itself.
+
+PC5 needs room for the download and its unpacked files on the drive it is installed on: about four times the size of the zip, freed again when it is done. It finds its own folder on the console's drives (in `homebrew`, `etaHEN/games` or at the top of a USB or extended drive). The folder stays where it is and only PC5's own files in it change; files you added at the top of the folder stay. If PC5 is on the console more than once, it asks you to delete the copy you don't use first. If something goes wrong before the new files are put in place, PC5 says why and stays as it was; if the console turns off while they are being put in place, PC5 finishes the job the next time it opens, and then restarts as the new version.
 
 ### By hand
 
@@ -51,7 +53,7 @@ The answer is one of these:
 
 | Message | Meaning |
 | --- | --- |
-| You have the newest PC5 (1.7.0) | No newer release is published. |
+| You have the newest PC5 (1.8.0) | No newer release is published. |
 | PC5 1.x.y is available on GitHub | A newer release is out. When PC5 opens it asks whether to update; after Check now, the console shows a notification, once for each new release. |
 | GitHub didn't answer: is the console online? | The check failed. Check the console's internet connection and try again. |
 | Not checked yet | PC5 hasn't asked since it was installed. |

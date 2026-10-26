@@ -22,6 +22,8 @@ or later. Parts from elsewhere, each under its own licence:
 | Inter 4.1 | <https://github.com/rsms/inter> | SIL Open Font License 1.1 | `fonts/` (three of its files, unchanged, and `OFL.txt`) |
 | Wine patches of PS5_MihawkOS v3.0.0-alpha-3, by mihawk-99 | <https://github.com/mihawk-99/PS5_MihawkOS> (`wine/patches/`) | LGPL 2.1 or later, as Wine | its patches 0910, 0913, 0914, 0965 and 1170, unchanged but for their context, as prospero-win's Wine patches 0915 and 0917 to 0920 (in `patches/prospero-win/`); patch 0914's free-memory count follows its patch 0912 |
 | NFS Black Box's prospero-win patch 0004, by lavavex | <https://github.com/lavavex/nfs-blackbox-ps5> | LGPL 2.1 or later, as prospero-win | `patches/prospero-win/` (its author kept): the audio driver logs streams whose buffer runs short |
+| PC5 pull request #78, by SuperLeiyan | <https://github.com/bornaradusin/PC5/pull/78> | LGPL 2.1 or later; its DXVK patch zlib, as DXVK | `patches/prospero-win/` 0036 and 0037 (Wine patch 0491) and `patches/dxvk/` 0003, their author kept: a movie's reads answered at their own offset, the touchpad as the Xbox controller's Back, a shared render target that can be sampled |
+| FAudio a3b49d6 and 2ead980, by Ethan Lee, as prospero-win 0b0f0e3 by Leo Lobato backports them | <https://github.com/FNA-XNA/FAudio>, <https://github.com/mpereiraesaa/prospero-win> | zlib, as FAudio | `patches/prospero-win/` 0035 (Wine patch 0972, its author kept): FAudio's resampler stays inside its output buffer |
 
 Blur5 (<https://github.com/bornaradusin/Blur5>) and sahin (<https://github.com/7tg/sahin>)
 were looked at for ideas only. None of their code is in PC5. PS5_MihawkOS's own code (GPL

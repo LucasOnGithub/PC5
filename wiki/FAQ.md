@@ -87,7 +87,10 @@ Yes, with a [home screen tile](Home-screen-tiles). It needs ShadowMountPlus and 
 In the game's own Windows folder, `/data/prospero-win/prefixes/<game>/`. See [Files and folders](Files-and-folders).
 
 **Does uninstalling a game delete its saves?**
-Yes. Uninstalling deletes the game with its saves, settings, shader cache, cover and home screen tile's folder. There is no backup and no undo. [Back up the saves](Files-and-folders#backing-up-a-games-saves) first if you want to keep them.
+You choose. **Keep saves** deletes the game and keeps its saves and settings for when you install it again; **Delete all** deletes everything, with no backup and no undo. See [Uninstalling a game](Installing-games#uninstalling-a-game).
+
+**How do I update a game to a newer version?**
+Put the newer copy's folder on the USB drive, then choose the game, press **△** and choose **Update**. Its saves, settings and options stay. See [Updating a game](Installing-games#updating-a-game).
 
 **Do I lose my games when I update PC5?**
 No. Games, saves and settings are in `/data/prospero-win`, not in the app's folder. Replace the app's folder and everything stays. See [Updating PC5](Installing-and-updating#updating-pc5).

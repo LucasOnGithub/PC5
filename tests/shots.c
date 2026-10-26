@@ -169,8 +169,8 @@ static Pc5Ui *open_ui(const char *root, int network)
     fmt(tile_template, sizeof(tile_template), "%s/app0/pc5/forwarder", work);
     fmt(file, sizeof(file), "%s/eboot.bin", tile_template);
     pc5_write_file(file, "eboot", 5);
-    platform = (Pc5Platform){ NULL, { NULL, network ? sample_net : offline, NULL }, fake_clock, fake_play, NULL, NULL, NULL, 0, NULL };
-    config = (Pc5UiConfig){ root, template_prefix, fonts, roots, tiles, tile_template, NULL, NULL, NULL, NULL };
+    platform = (Pc5Platform){ NULL, { NULL, network ? sample_net : offline, NULL }, fake_clock, fake_play, NULL, NULL, NULL, 0, NULL, NULL };
+    config = (Pc5UiConfig){ root, template_prefix, fonts, roots, tiles, tile_template, NULL, NULL, NULL, NULL, 0 };
     Pc5Ui *ui = pc5_ui_create(&config, &platform);
     until(ui, "library");
     settle(ui);
@@ -192,7 +192,7 @@ static void crash_shots(const char *root)
     static char usb[PC5_PATH], template_prefix[PC5_PATH];
     char file[PC5_PATH], text[2048];
     Pc5Library library;
-    Pc5Platform platform = { NULL, { NULL, offline, NULL }, fake_clock, fake_play, NULL, NULL, shot_time, 0, NULL };
+    Pc5Platform platform = { NULL, { NULL, offline, NULL }, fake_clock, fake_play, NULL, NULL, shot_time, 0, NULL, NULL };
 
     make_library(root, 3, 1);
     pc5_library_load(root, &library);
@@ -210,7 +210,7 @@ static void crash_shots(const char *root)
     fmt(usb, sizeof(usb), "%s/usb0", work);
     roots[0] = usb;
     fmt(template_prefix, sizeof(template_prefix), "%s/app0/pc5/prefix", work);
-    Pc5UiConfig config = { root, template_prefix, fonts, roots, NULL, NULL, NULL, NULL, NULL, NULL };
+    Pc5UiConfig config = { root, template_prefix, fonts, roots, NULL, NULL, NULL, NULL, NULL, NULL, 0 };
     Pc5Ui *ui = pc5_ui_create(&config, &platform);
     until(ui, "message");
     settle(ui);

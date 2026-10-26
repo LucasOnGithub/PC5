@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later */
 /* PC5: the launcher's screens (pc5_ui.h). */
 #include "pc5_ui.h"
+#include "pc5_backgrounds.h"
 #include "pc5_game.h"
 #include "pc5_home.h"
 #include "pc5_image.h"
@@ -9,6 +10,7 @@
 #include "pc5_qr.h"
 #include "pc5_report.h"
 #include "pc5_settings.h"
+#include "pc5_sound.h"
 #include "pc5_source.h"
 #include "pc5_update.h"
 #include "pc5_upgrade.h"
@@ -20,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 enum { W = 1920, H = 1080, COVER_W = 400, COVER_H = 600, FLOOR_Y = 712, MARGIN = 72 };
@@ -41,14 +44,15 @@ typedef enum Screen {
     S_START, S_COVERS, S_LIBRARY, S_SETTINGS, S_ABOUT, S_SCAN, S_SOURCES, S_READING, S_SEARCH, S_REVIEW,
     S_PROGRAMS, S_INSTALL, S_STOP, S_UNINSTALL_LIST, S_UNINSTALL_CONFIRM, S_REMOVING, S_MESSAGE, S_LAUNCH,
     S_UPDATE, S_CHECKING, S_GAME_MENU, S_GAME_READING, S_QUEUE_READ, S_QUEUE, S_BUTTONS, S_KEYS, S_REPORT,
-    S_UPGRADE_ASK, S_UPGRADING
+    S_UPGRADE_ASK, S_UPGRADING, S_GAME_UPDATE_ASK, S_SAVES_ASK, S_SAVES_CONFIRM
 } Screen;
 
 static const char *const screen_names[] = { "start", "covers", "library", "settings", "about", "scan", "sources",
                                             "reading", "search", "review", "programs", "install", "stop",
                                             "uninstall-list", "uninstall-confirm", "removing", "message", "launch",
                                             "update", "checking", "game-menu", "game-reading", "queue-read", "queue",
-                                            "buttons", "keys", "report", "upgrade-ask", "upgrading" };
+                                            "buttons", "keys", "report", "upgrade-ask", "upgrading", "game-update-ask",
+                                            "saves-ask", "saves-confirm" };
 
 /* One game of several being installed in a row. */
 typedef enum QueueState { Q_WAITING, Q_INSTALLED, Q_FAILED, Q_STOPPED, Q_SKIPPED } QueueState;
@@ -119,13 +123,13 @@ static int page_rows(const Pc5Settings *set, int page, int offer_update, Setting
 /* A game's menu: its rows; Button mapping only while it plays the keyboard and mouse. */
 typedef enum GameRow {
     GR_PLAY, GR_CONTROLLER, GR_BUTTONS, GR_FRAMEGEN, GR_RESOLUTION, GR_ASPECT, GR_MEMORY, GR_PROGRAM, GR_HOME,
-    GR_UNINSTALL
+    GR_UPDATE, GR_UNINSTALL
 } GameRow;
-enum { GAME_ROWS = 10 };
+enum { GAME_ROWS = 11 };
 /* What a game is, for its menu's rows. */
-enum { GAME_32BIT = 1, GAME_VULKAN = 2 };
+enum { GAME_32BIT = 1, GAME_VULKAN = 2, GAME_PC5 = 4 };
 
-/* kind: GAME_32BIT for Memory, GAME_VULKAN for Resolution. */
+/* kind: GAME_32BIT for Memory, GAME_VULKAN for Resolution, GAME_PC5 (PC5 installed it) for Update. */
 static int game_rows(const Pc5Controls *controls, int kind, GameRow rows[GAME_ROWS])
 {
     int n = 0;
@@ -138,6 +142,7 @@ static int game_rows(const Pc5Controls *controls, int kind, GameRow rows[GAME_RO
     if (kind & GAME_32BIT) rows[n++] = GR_MEMORY;
     rows[n++] = GR_PROGRAM;
     rows[n++] = GR_HOME;
+    if (kind & GAME_PC5) rows[n++] = GR_UPDATE;
     rows[n++] = GR_UNINSTALL;
     return n;
 }
@@ -267,11 +272,27 @@ struct Pc5Ui {
     Pc5InstallPhase speed_phase;
     int program_for;               /* S_PROGRAMS for: 0 the review, 1 the game in launch_id */
     Screen uninstall_back;         /* where Cancel in S_UNINSTALL_CONFIRM goes */
+    int update_for;                /* S_SCAN, S_SOURCES and S_READING choose a newer copy of the game in launch_id */
+    int removing_kind;             /* S_REMOVING: 0 an uninstall, 1 one that keeps the saves, 2 kept saves deleted */
+    char use_saves[PC5_PATH];      /* S_SAVES_ASK: the kept saves the game being installed can have */
+    Pc5Saves *saves;               /* Settings › Uninstall game: the kept saves, after the games */
+    int saves_count;
 
     /* several games installed in a row */
     uint8_t ticked[PC5_SOURCES];
     QueueGame *queue;
     int queue_count, queue_at, queue_phase, queue_review, queue_installing, queue_stop_all;
+
+    /* the chosen game's background (pc5_backgrounds.h), faded in over the backdrop */
+    Pc5Backgrounds backgrounds;
+    int library_loads, backgrounds_for;  /* library loads, and the one the worker last looked at */
+    unsigned bg_generation;        /* the worker's count when the background was last looked for */
+    char bg_id[PC5_ID];            /* the game whose background was looked for ("": none yet) */
+    int bg_selected;
+    uint64_t bg_selected_at;       /* when the chosen game changed */
+    uint32_t *bg, *bg_old;         /* the background as drawn (W x H), and the one fading out */
+    int bg_has, bg_old_has;
+    uint64_t bg_fade_at;
 
     uint8_t *falloff;              /* the glow's shape, 0-255 per pixel */
     uint32_t *backdrop;            /* the background without the glow */
@@ -280,12 +301,13 @@ struct Pc5Ui {
     int composed_ready;
 };
 
-/* GAME_32BIT, GAME_VULKAN of the game whose menu is open (0 when it isn't found). */
+/* GAME_32BIT, GAME_VULKAN, GAME_PC5 of the game whose menu is open (0 when it isn't found). */
 static int ui_game_kind(const Pc5Ui *ui)
 {
     int index = pc5_library_find(&ui->library, ui->launch_id);
     if (index < 0) return 0;
-    return (ui->library.games[index].bits == 32 ? GAME_32BIT : 0) | (ui->library.games[index].vulkan ? GAME_VULKAN : 0);
+    return (ui->library.games[index].bits == 32 ? GAME_32BIT : 0) | (ui->library.games[index].vulkan ? GAME_VULKAN : 0) |
+           (ui->library.games[index].pc5 ? GAME_PC5 : 0);
 }
 
 const char *pc5_ui_screen(const Pc5Ui *ui)
@@ -441,6 +463,7 @@ static void library_reload(Pc5Ui *ui, const char *select_id)
         pc5_copy(keep, sizeof(keep), ui->library.games[ui->selected].id);
     covers_clear(ui);
     pc5_library_load(ui->root, &ui->library);
+    ui->library_loads++;
     ui->selected = 0;
     if (keep[0]) {
         int found = pc5_library_find(&ui->library, keep);
@@ -575,6 +598,7 @@ void pc5_ui_destroy(Pc5Ui *ui)
         pc5_upgrade_cancel(&ui->upgrade);
         while (pc5_upgrade_busy(&ui->upgrade)) usleep(10000);
     }
+    pc5_backgrounds_end(&ui->backgrounds, 1);
     if (ui->runtime_state == 1) pc5_runtime_end(&ui->runtime);
     covers_clear(ui);
     queue_free(ui);
@@ -584,9 +608,12 @@ void pc5_ui_destroy(Pc5Ui *ui)
     if (ui->installing) pc5_install_end(&ui->install);
     pc5_remove_end(&ui->remove);
     pc5_fonts_free(&ui->fonts);
+    pc5_free(ui->saves);
     pc5_free(ui->falloff);
     pc5_free(ui->backdrop);
     pc5_free(ui->composed);
+    pc5_free(ui->bg);
+    pc5_free(ui->bg_old);
     pc5_free(ui);
 }
 
@@ -794,6 +821,125 @@ static int missing_cover_step(Pc5Ui *ui)
     return ui->cover_at < ui->cover_count;
 }
 
+/* ---- the games' backgrounds -------------------------------------------------------------------- */
+
+enum { BG_FADE_MS = 320, BG_SETTLE_MS = 160 };
+
+/* The worker on the games that need a background, once for each load of the library
+ * (when it is free: a library loaded again meanwhile is looked at after it). */
+static void backgrounds_refresh(Pc5Ui *ui)
+{
+    if (!ui->config.fetch_backgrounds || ui->backgrounds_for == ui->library_loads || !ui->library.count ||
+        atomic_load(&ui->backgrounds.busy))
+        return;
+    pc5_backgrounds_end(&ui->backgrounds, 0);
+    ui->backgrounds_for = ui->library_loads;
+    Pc5BackgroundGame *games = pc5_alloc(sizeof(*games) * (size_t)ui->library.count);
+    int n = 0;
+    if (!games) return;
+    for (int i = 0; i < ui->library.count; i++) {
+        const Pc5Game *game = &ui->library.games[i];
+        Pc5BackgroundGame *b = &games[n];
+        if (!game->prefix[0] || !strcmp(game->prefix, "default")) continue;
+        memset(b, 0, sizeof(*b));
+        pc5_copy(b->id, sizeof(b->id), game->id);
+        pc5_copy(b->prefix, sizeof(b->prefix), game->prefix);
+        pc5_copy(b->title, sizeof(b->title), game->title);
+        if (pc5_game_folder(ui->root, game->id, b->folder, sizeof(b->folder))) b->folder[0] = 0;
+        if (!pc5_background_needed(ui->root, b)) continue;
+        hint_for_game(ui, game, &b->hint);
+        n++;
+    }
+    if (!n) { pc5_free(games); return; }
+    pc5_copy(ui->backgrounds.root, sizeof(ui->backgrounds.root), ui->root);
+    ui->backgrounds.http = ui->platform.http;
+    ui->backgrounds.log = ui->platform.log;
+    ui->backgrounds.log_context = ui->platform.context;
+    say(ui, "PC5 backgrounds to look for=%d", n);
+    if (pc5_backgrounds_start(&ui->backgrounds, games, n)) say(ui, "PC5 problem backgrounds: no thread");
+}
+
+/* A kept background (960x540) as drawn: twice its size, darkened so the covers and the
+ * text in front of it stand out, most at the top and bottom where the text is. */
+static void background_prepare(const Pc5Image *small, uint32_t *out)
+{
+    static int vertical[H], horizontal[W], x0s[W], x1s[W], fxs[W];
+    for (int y = 0; y < H; y++) {
+        float v = y < 220 ? 0.30f + 0.20f * (float)y / 220 : y < 640 ? 0.50f : 0.50f - 0.36f * (float)(y - 640) / (H - 640);
+        vertical[y] = (int)(v * 256);
+    }
+    /* bilinear: a pixel's centre (x + 0.5) is (x + 0.5) * w / W - 0.5 in the source, in 1/256ths */
+    for (int x = 0; x < W; x++) {
+        float e = fabsf((float)x - W / 2.0f) / (W / 2.0f);
+        horizontal[x] = (int)((1 - 0.30f * e * e) * 256);
+        int sx = (int)((2 * (int64_t)x + 1) * small->w * 128 / W) - 128;
+        if (sx < 0) sx = 0;
+        x0s[x] = sx >> 8;
+        fxs[x] = sx & 255;
+        x1s[x] = x0s[x] + 1 < small->w ? x0s[x] + 1 : x0s[x];
+    }
+    for (int y = 0; y < H; y++) {
+        int sy = (int)((2 * (int64_t)y + 1) * small->h * 128 / H) - 128;
+        if (sy < 0) sy = 0;
+        int y0 = sy >> 8, fy = sy & 255, y1 = y0 + 1 < small->h ? y0 + 1 : y0;
+        const uint32_t *r0 = small->px + (size_t)y0 * (size_t)small->w, *r1 = small->px + (size_t)y1 * (size_t)small->w;
+        for (int x = 0; x < W; x++) {
+            int fx = fxs[x], m = vertical[y] * horizontal[x] >> 8;
+            uint32_t a = r0[x0s[x]], b = r0[x1s[x]], c = r1[x0s[x]], d = r1[x1s[x]], px = 0xff000000u;
+            for (int k = 0; k < 24; k += 8) {
+                int top = (int)((a >> k) & 255) * (256 - fx) + (int)((b >> k) & 255) * fx;
+                int bottom = (int)((c >> k) & 255) * (256 - fx) + (int)((d >> k) & 255) * fx;
+                int v = (top * (256 - fy) + bottom * fy) >> 16;
+                px |= (uint32_t)(v * m >> 8) << k;
+            }
+            out[(size_t)y * W + (size_t)x] = px;
+        }
+    }
+}
+
+/* The chosen game's background, looked for once it stays chosen a moment, and again when
+ * the worker has saved one for a game that had none. */
+static void background_follow(Pc5Ui *ui)
+{
+    char path[PC5_PATH];
+    Pc5Image small = { 0 };
+
+    if (ui->selected != ui->bg_selected) {
+        ui->bg_selected = ui->selected;
+        ui->bg_selected_at = ui->now;
+    }
+    unsigned generation = atomic_load(&ui->backgrounds.generation);
+    const char *id = ui->library.count ? ui->library.games[ui->selected].id : "";
+    int same = !strcmp(id, ui->bg_id) && ui->bg_id[0];
+    if (same && (generation == ui->bg_generation || ui->bg_has)) {
+        ui->bg_generation = generation;
+        return;
+    }
+    if (!same && ui->now - ui->bg_selected_at < BG_SETTLE_MS && ui->bg_id[0]) return;
+    ui->bg_generation = generation;
+    int ok = ui->library.count &&
+             !pc5_background_path(ui->root, ui->library.games[ui->selected].prefix, path, sizeof(path)) &&
+             !pc5_cover_load(path, &small, NULL) && small.w == PC5_BACKGROUND_WIDTH && small.h == PC5_BACKGROUND_HEIGHT;
+    if (same && !ok) { pc5_image_free(&small); return; }
+    pc5_copy(ui->bg_id, sizeof(ui->bg_id), id[0] ? id : "-");
+    if ((ok || ui->bg_has) && !ui->bg && !(ui->bg = pc5_alloc((size_t)W * H * 4))) ok = 0;
+    if ((ok || ui->bg_has) && !ui->bg_old && !(ui->bg_old = pc5_alloc((size_t)W * H * 4))) ok = 0;
+    if (ok || ui->bg_has) {
+        uint32_t *swap = ui->bg_old;
+        ui->bg_old = ui->bg;
+        ui->bg = swap;
+        ui->bg_old_has = ui->bg_has;
+        ui->bg_has = 0;
+        if (ok && ui->bg) {
+            background_prepare(&small, ui->bg);
+            ui->bg_has = 1;
+        }
+        ui->bg_fade_at = ui->now;
+        ui->dirty = 1;
+    }
+    pc5_image_free(&small);
+}
+
 static void speed_reset(Pc5Ui *ui)
 {
     ui->speed_at = ui->now;
@@ -830,12 +976,51 @@ static void begin_install(Pc5Ui *ui)
     }
     ui->install.original = ui->review_original;
     ui->review_original = (Pc5Buf){ 0 };
+    if (ui->use_saves[0]) {
+        if (pc5_install_use_saves(&ui->install, ui->use_saves))
+            say(ui, "PC5 problem saves %s: %s", ui->use_saves, ui->install.error);
+        else
+            say(ui, "PC5 install saves=%s", ui->use_saves);
+        ui->install.error[0] = 0;
+        ui->use_saves[0] = 0;
+    }
+    if (ui->choice >= 0 && ui->choice < ui->search.count) {
+        pc5_copy(ui->install.background, sizeof(ui->install.background), ui->search.choices[ui->choice].background);
+        ui->install.background_appid = ui->search.choices[ui->choice].steam_appid;
+    }
     speed_reset(ui);
     say(ui, "PC5 install id=%s from=%s exe=%s", ui->install.id, ui->folder.path, ui->install.info.exe);
     go(ui, S_INSTALL);
 }
 
 static void queue_summary(Pc5Ui *ui);
+
+/* Settings › Uninstall game: the kept saves listed after the games. */
+static void saves_load(Pc5Ui *ui)
+{
+    enum { MAX = 256 };
+    if (!ui->saves) ui->saves = pc5_alloc(sizeof(*ui->saves) * MAX);
+    ui->saves_count = ui->saves ? pc5_saves_list(ui->root, ui->saves, MAX) : 0;
+}
+
+/* The newer copy in ui->folder over the game in launch_id. */
+static void begin_update(Pc5Ui *ui)
+{
+    int index = pc5_library_find(&ui->library, ui->launch_id);
+    char title[200];
+
+    snprintf(title, sizeof(title), "%s can't be updated", index >= 0 ? ui->library.games[index].title : "The game");
+    if (pc5_update_begin(&ui->install, ui->root, ui->launch_id, &ui->folder)) {
+        say(ui, "PC5 problem update %s: %s", ui->launch_id, ui->install.error);
+        message(ui, 0, title, ui->install.error, S_SOURCES);
+        pc5_install_end(&ui->install);
+        return;
+    }
+    ui->installing = 1;
+    speed_reset(ui);
+    say(ui, "PC5 update id=%s from=%s exe=%s", ui->launch_id, ui->folder.path, ui->install.info.exe);
+    go(ui, S_INSTALL);
+}
 
 /* The queue's next game that is waiting: started, or skipped with why. */
 static void queue_next(Pc5Ui *ui)
@@ -863,6 +1048,19 @@ static void queue_next(Pc5Ui *ui)
         }
         ui->install.original = q->original;
         q->original = (Pc5Buf){ 0 };
+        {
+            /* Without asking only when one set of kept saves is the game's. */
+            char kept[PC5_PATH];
+            if (pc5_saves_find(ui->root, q->folder.name, q->folder.exes[q->exe].path, kept, sizeof(kept)) == 1) {
+                if (pc5_install_use_saves(&ui->install, kept)) say(ui, "PC5 problem saves %s: %s", kept, ui->install.error);
+                else say(ui, "PC5 install saves=%s", kept);
+                ui->install.error[0] = 0;
+            }
+        }
+        if (q->choice >= 0 && q->choice < q->search.count) {
+            pc5_copy(ui->install.background, sizeof(ui->install.background), q->search.choices[q->choice].background);
+            ui->install.background_appid = q->search.choices[q->choice].steam_appid;
+        }
         ui->installing = 1;
         speed_reset(ui);
         say(ui, "PC5 install id=%s from=%s exe=%s queue=%d/%d", ui->install.id, q->folder.path, ui->install.info.exe,
@@ -904,15 +1102,49 @@ static void install_progress(Pc5Ui *ui)
         queue_next(ui);
         return;
     }
+    if (ui->install.update) {
+        /* An update of the game in launch_id. */
+        char title[200], body[700], id[PC5_ID];
+        int moved = ui->install.moving;
+        pc5_copy(id, sizeof(id), ui->install.id);
+        if (phase == PC5_INSTALL_DONE && ui->install.skipped) {
+            snprintf(title, sizeof(title), "%s is partly updated", ui->install.info.title);
+            snprintf(body, sizeof(body), "%u of its files couldn't be put in place. %s Update it again; its saves, settings "
+                     "and options are as they were.", (unsigned)ui->install.skipped, ui->install.error);
+            say(ui, "PC5 problem update %s: %u files left out: %s", id, (unsigned)ui->install.skipped, ui->install.error);
+        } else if (phase == PC5_INSTALL_DONE) {
+            snprintf(title, sizeof(title), "%s is updated", ui->install.info.title);
+            snprintf(body, sizeof(body), "Its saves, settings and options are as they were.");
+            say(ui, "PC5 updated id=%s files=%u", id, (unsigned)ui->install.files_done);
+        } else if (phase == PC5_INSTALL_CANCELLED) {
+            snprintf(title, sizeof(title), "Update stopped");
+            snprintf(body, sizeof(body), "The copy made so far was deleted: the game is as it was. The USB drive wasn't changed.");
+            say(ui, "PC5 update ended cancelled=1 id=%s", id);
+        } else {
+            snprintf(title, sizeof(title), "%s wasn't updated", ui->install.info.title);
+            snprintf(body, sizeof(body), moved ? "%s PC5 finishes the update the next time it starts."
+                                               : "%s The game is as it was.", ui->install.error);
+            say(ui, "PC5 problem update %s: %s", id, ui->install.error);
+        }
+        int good = phase == PC5_INSTALL_DONE && !ui->install.skipped;
+        pc5_install_end(&ui->install);
+        ui->installing = 0;
+        ui->update_for = 0;
+        library_reload(ui, id);
+        message(ui, good, title, body, S_LIBRARY);
+        return;
+    }
     if (phase == PC5_INSTALL_DONE) {
         char title[200], id[PC5_ID];
+        int saves = ui->install.kept[0] != 0;
         pc5_copy(id, sizeof(id), ui->install.id);
         snprintf(title, sizeof(title), "%s is installed", ui->install.info.title);
-        say(ui, "PC5 installed id=%s", id);
+        say(ui, "PC5 installed id=%s saves=%d", id, saves);
         pc5_install_end(&ui->install);
         ui->installing = 0;
         library_reload(ui, id);
-        message(ui, 1, title, "It's in your library. Press the button to play it from there.", S_LIBRARY);
+        message(ui, 1, title, saves ? "It's in your library, with the saves and settings it had before."
+                                    : "It's in your library. Press the button to play it from there.", S_LIBRARY);
     } else {
         char title[200], body[600];
         int cancelled = phase == PC5_INSTALL_CANCELLED;
@@ -1097,7 +1329,7 @@ static void setting_text(Pc5Ui *ui, SettingRow row, const char **label, char *ab
         break;
     case SR_UNINSTALL:
         *label = "Uninstall game";
-        pc5_copy(about, about_size, "Deletes a game, with its saves and settings");
+        pc5_copy(about, about_size, "Deletes a game, or keeps its saves; deletes kept saves");
         break;
     case SR_GAMES:
         *label = "In games";
@@ -1201,8 +1433,8 @@ static void setting_text(Pc5Ui *ui, SettingRow row, const char **label, char *ab
         break;
     case SR_STARTUP_SOUND:
         *label = "Startup sound";
-        pc5_copy(about, about_size, "PC5's sound on the controller's speaker when it opens");
-        pc5_copy(value, value_size, set->startup_sound ? "On" : "Off");
+        pc5_copy(about, about_size, "On the controller's speaker when PC5 opens");
+        pc5_copy(value, value_size, strcmp(set->startup_sound, "off") ? set->startup_sound : "Off");
         break;
     case SR_UPDATE_NOW:
         *label = "Update now";
@@ -1230,12 +1462,25 @@ static int setting_change(Pc5Ui *ui, SettingRow row, int step)
     case SR_LIGHT: set->light_bar = (Pc5Light)((set->light_bar + PC5_LIGHTS + step) % PC5_LIGHTS); break;
     case SR_TRIGGERS: set->triggers = (Pc5Triggers)((set->triggers + PC5_TRIGGERS_COUNT + step) % PC5_TRIGGERS_COUNT); break;
     case SR_CHECK_ON_OPEN: set->check_updates = !set->check_updates; break;
-    case SR_STARTUP_SOUND: set->startup_sound = !set->startup_sound; break;
+    case SR_STARTUP_SOUND: {
+        /* Off, then each sound by name; the one chosen is played. */
+        Pc5SoundList list;
+        int at = -1, next;
+        pc5_sound_list(ui->app, ui->root, &list);
+        for (int i = 0; i < list.count; i++)
+            if (!pc5_casecmp(list.name[i], set->startup_sound)) at = i;
+        next = at + (step < 0 ? -1 : 1);
+        if (next < -1) next = list.count - 1;
+        if (next >= list.count) next = -1;
+        pc5_copy(set->startup_sound, sizeof(set->startup_sound), next < 0 ? "off" : list.name[next]);
+        if (next >= 0 && ui->platform.sound) ui->platform.sound(ui->platform.context, set->startup_sound);
+        break;
+    }
     default: return 0;
     }
     if (pc5_settings_save(ui->root, set)) say(ui, "PC5 problem settings: can't write them");
     say(ui, "PC5 settings fps=%d frame_time=%d cpu=%d cpu_temp=%d soc_temp=%d memory=%d corner=%d vibration=%d light=%d "
-        "triggers=%d trigger_rumble=%d trigger_resistance=%d updates=%d keep_logs=%d startup_sound=%d", set->fps, set->frame_time,
+        "triggers=%d trigger_rumble=%d trigger_resistance=%d updates=%d keep_logs=%d startup_sound=%s", set->fps, set->frame_time,
         set->cpu_usage, set->cpu_temperature, set->soc_temperature, set->memory, (int)set->fps_corner, set->vibration,
         (int)set->light_bar, (int)set->triggers, set->trigger_rumble, set->trigger_resistance, set->check_updates,
         set->keep_logs, set->startup_sound);
@@ -1466,7 +1711,7 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
     case S_START:
         if (!ui->drawn) break;
         if (ui->config.finished && ui->config.finished[0]) {
-            /* An update the console stopped was finished as PC5 opened: the new PC5 is in place, this one closes. */
+            /* An update the console stopped was finished as PC5 opened: the new PC5 is in place, this one restarts into it. */
             pc5_copy(ui->upgrade.version, sizeof(ui->upgrade.version), ui->config.finished);
             ui->config.finished = NULL;
             atomic_store(&ui->upgrade.step, PC5_UPGRADE_DONE);
@@ -1538,8 +1783,8 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
         int step = atomic_load(&ui->upgrade.step);
         if (step == PC5_UPGRADE_DONE) {
             if (k & (accept | back)) {
-                say(ui, "PC5 update closing PC5");
-                if (ui->platform.quit) ui->platform.quit(ui->platform.context);
+                say(ui, "PC5 update restarting PC5");
+                if (ui->platform.restart) ui->platform.restart(ui->platform.context);
                 to_library(ui);
             }
             break;
@@ -1636,10 +1881,11 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
             else go(ui, S_LIBRARY);
         } else if (k & accept) {
             switch (row) {
-            case SR_INSTALL: memset(ui->ticked, 0, sizeof(ui->ticked)); go(ui, S_SCAN); break;
+            case SR_INSTALL: memset(ui->ticked, 0, sizeof(ui->ticked)); ui->update_for = 0; go(ui, S_SCAN); break;
             case SR_UNINSTALL:
                 ui->menu = ui->selected;
                 ui->list_top = 0;
+                saves_load(ui);
                 go(ui, S_UNINSTALL_LIST);
                 break;
             case SR_GAMES: settings_open(ui, PAGE_GAMES, 0); break;
@@ -1672,6 +1918,19 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
         break;
     case S_SOURCES:
         if (list_move(&ui->menu, ui->source_count, k)) ui->dirty = 1;
+        if (ui->update_for) {
+            /* A newer copy of the game in launch_id: one folder, no ticks. */
+            if (k & back) {
+                ui->update_for = 0;
+                ui->menu = game_row_at(&ui->controls, ui_game_kind(ui), GR_UPDATE);
+                go(ui, S_GAME_MENU);
+            } else if (k & PC5_KEY_TRIANGLE) {
+                go(ui, S_SCAN);
+            } else if ((k & accept) && ui->source_count) {
+                go(ui, S_READING);
+            }
+            break;
+        }
         if (k & back) settings_open(ui, 0, 0);
         else if (k & PC5_KEY_TRIANGLE) go(ui, S_SCAN);
         else if ((k & PC5_KEY_SQUARE) && ui->source_count) {
@@ -1696,6 +1955,11 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
             ui->exe = ui->folder.exe_count ? 0 : -1;
             say(ui, "PC5 folder=%s files=%u bytes=%llu exes=%d problem=%s", ui->folder.name, (unsigned)ui->folder.files,
                 (unsigned long long)ui->folder.bytes, ui->folder.exe_count, ui->folder.problem);
+            if (ui->update_for) {
+                ui->button = 1;   /* Update */
+                go(ui, S_GAME_UPDATE_ASK);
+                break;
+            }
             hint_for_folder(&ui->folder, ui->exe, &hint);
             pc5_cover_search_start(&ui->search, &hint);
             ui->choice = 0;
@@ -1785,12 +2049,46 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
                 pc5_size_text(free_bytes, have, sizeof(have));
                 snprintf(body, sizeof(body), "The game needs %s and the console has %s free.", need, have);
                 message(ui, 0, "Not enough space", body, S_REVIEW);
+            } else if (pc5_saves_find(ui->root, ui->folder.name, ui->exe >= 0 ? ui->folder.exes[ui->exe].path : NULL,
+                                      ui->use_saves, sizeof(ui->use_saves)) > 0) {
+                ui->button = 1;   /* Put them back */
+                go(ui, S_SAVES_ASK);
             } else {
+                ui->use_saves[0] = 0;
                 begin_install(ui);
             }
         }
         break;
     }
+    case S_SAVES_ASK:
+        if (k & (PC5_KEY_LEFT | PC5_KEY_RIGHT)) { ui->button = !ui->button; ui->dirty = 1; }
+        if (k & back) {
+            ui->use_saves[0] = 0;
+            go(ui, S_REVIEW);
+        } else if ((k & accept) && ui->now - ui->entered > 300) {
+            if (!ui->button) ui->use_saves[0] = 0;   /* Start fresh: they stay kept */
+            begin_install(ui);
+        }
+        break;
+    case S_GAME_UPDATE_ASK:
+        if (k & (PC5_KEY_LEFT | PC5_KEY_RIGHT)) { ui->button = !ui->button; ui->dirty = 1; }
+        if (k & back) {
+            go(ui, S_SOURCES);
+        } else if ((k & accept) && ui->now - ui->entered > 300) {
+            uint64_t free_bytes = 0;
+            if (!ui->button) {
+                go(ui, S_SOURCES);
+            } else if (!pc5_free_bytes(ui->root, &free_bytes) && free_bytes < pc5_update_needs(&ui->folder)) {
+                char need[32], have[32], body[200];
+                pc5_size_text(pc5_update_needs(&ui->folder), need, sizeof(need));
+                pc5_size_text(free_bytes, have, sizeof(have));
+                snprintf(body, sizeof(body), "The update needs %s and the console has %s free.", need, have);
+                message(ui, 0, "Not enough space", body, S_SOURCES);
+            } else {
+                begin_update(ui);
+            }
+        }
+        break;
     case S_PROGRAMS:
         if (list_move(&ui->menu, ui->folder.exe_count, k)) ui->dirty = 1;
         if (k & back) {
@@ -1866,6 +2164,9 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
                 if (!game->pc5) message(ui, 0, "PC5 didn't install this game",
                                         "Its program is set in its prospero-win profile.", S_GAME_MENU);
                 else go(ui, S_GAME_READING);
+            } else if (row == GR_UPDATE) {
+                ui->update_for = 1;
+                go(ui, S_SCAN);
             } else {
                 ui->menu = index;
                 ui->button = 0;   /* Cancel first */
@@ -1985,17 +2286,43 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
         }
         break;
     case S_UNINSTALL_LIST:
-        if (list_move(&ui->menu, ui->library.count, k)) ui->dirty = 1;
+        /* The games, then the saves kept when games were uninstalled. */
+        if (list_move(&ui->menu, ui->library.count + ui->saves_count, k)) ui->dirty = 1;
         if (k & back) settings_open(ui, 0, 1);
-        else if ((k & accept) && ui->library.count) {
+        else if ((k & accept) && ui->menu < ui->library.count) {
             ui->button = 0;   /* Cancel first */
             ui->uninstall_back = S_UNINSTALL_LIST;
             go(ui, S_UNINSTALL_CONFIRM);
+        } else if ((k & accept) && ui->menu < ui->library.count + ui->saves_count) {
+            ui->button = 0;
+            go(ui, S_SAVES_CONFIRM);
         }
         if (covers_near(ui)) ui->dirty = 1;
         break;
-    case S_UNINSTALL_CONFIRM:
+    case S_SAVES_CONFIRM:
         if (k & (PC5_KEY_LEFT | PC5_KEY_RIGHT)) { ui->button = !ui->button; ui->dirty = 1; }
+        if (k & back) {
+            go(ui, S_UNINSTALL_LIST);
+        } else if ((k & accept) && ui->now - ui->entered > 400) {
+            int at = ui->menu - ui->library.count;
+            if (!ui->button || at < 0 || at >= ui->saves_count) {
+                go(ui, S_UNINSTALL_LIST);
+            } else {
+                const Pc5Saves *saves = &ui->saves[at];
+                snprintf(ui->removing_title, sizeof(ui->removing_title), "%s", saves->title);
+                say(ui, "PC5 saves delete name=%s", saves->name);
+                ui->removing_kind = 2;
+                ui->removing_tiles = 0;
+                pc5_saves_delete_begin(&ui->remove, ui->root, saves->name);
+                go(ui, S_REMOVING);
+            }
+        }
+        break;
+    case S_UNINSTALL_CONFIRM: {
+        /* Cancel, Uninstall; or Cancel, Keep saves, Delete all for a game whose saves can be kept. */
+        int keep = pc5_remove_can_keep(&ui->library.games[ui->menu], &ui->library), buttons = keep ? 3 : 2;
+        if ((k & PC5_KEY_LEFT) && ui->button > 0) { ui->button--; ui->dirty = 1; }
+        if ((k & PC5_KEY_RIGHT) && ui->button < buttons - 1) { ui->button++; ui->dirty = 1; }
         if (k & back) {
             if (ui->uninstall_back == S_GAME_MENU) ui->menu = game_row_at(&ui->controls, ui_game_kind(ui), GR_UNINSTALL);
             go(ui, ui->uninstall_back);
@@ -2006,26 +2333,53 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
             } else {
                 const Pc5Game *game = &ui->library.games[ui->menu];
                 pc5_copy(ui->removing_title, sizeof(ui->removing_title), game->title);
-                say(ui, "PC5 uninstall id=%s prefix=%s", game->id, game->prefix);
+                char id[PC5_ID], folder[PC5_PATH];
+                ui->removing_kind = keep && ui->button == 1;
+                pc5_copy(id, sizeof(id), game->id);
+                say(ui, "PC5 uninstall id=%s prefix=%s keep_saves=%d", game->id, game->prefix, ui->removing_kind);
+                int begun = ui->removing_kind ? pc5_remove_keep_saves(&ui->remove, ui->root, game, &ui->library)
+                                              : pc5_remove_begin(&ui->remove, ui->root, game, &ui->library);
+                /* It couldn't begin and the game's folder is where it was: nothing changed. */
+                if (begun && !pc5_format(folder, sizeof(folder), "%s/prefixes/%s", ui->root, game->prefix) &&
+                    game->prefix[0] && pc5_is_dir(folder) && strcmp(game->prefix, "default")) {
+                    char title[200], body[PC5_ERROR + 64];
+                    snprintf(title, sizeof(title), "%s wasn't uninstalled", game->title);
+                    snprintf(body, sizeof(body), "%s Nothing was changed.", ui->remove.error);
+                    say(ui, "PC5 problem uninstall %s: %s", game->title, ui->remove.error);
+                    pc5_remove_end(&ui->remove);
+                    message(ui, 0, title, body, ui->uninstall_back);
+                    break;
+                }
                 /* Its home screen tile would start nothing now. */
-                ui->removing_tiles = ui->config.tiles_root ? pc5_home_remove(ui->config.tiles_root, game->id) : 0;
-                if (ui->removing_tiles) say(ui, "PC5 home tile removed id=%s count=%d", game->id, ui->removing_tiles);
-                pc5_remove_begin(&ui->remove, ui->root, game, &ui->library);
+                ui->removing_tiles = ui->config.tiles_root ? pc5_home_remove(ui->config.tiles_root, id) : 0;
+                if (ui->removing_tiles) say(ui, "PC5 home tile removed id=%s count=%d", id, ui->removing_tiles);
                 covers_clear(ui);
                 go(ui, S_REMOVING);
             }
         }
         break;
+    }
     case S_REMOVING:
         if (!ui->remove.failed && pc5_remove_step(&ui->remove, 14)) { ui->dirty = 1; break; }
         {
             char title[200], body[400];
             int failed = ui->remove.failed;
-            snprintf(title, sizeof(title), failed ? "%s wasn't fully uninstalled" : "%s is uninstalled", ui->removing_title);
-            if (failed) snprintf(body, sizeof(body), "%s PC5 finishes deleting it the next time it starts.", ui->remove.error);
-            else snprintf(body, sizeof(body), "The game, its saves and its settings were deleted.%s",
-                          ui->removing_tiles > 0 ? " So was its home screen tile's folder: if the tile is still on "
-                                                   "the home screen, delete it there." : "");
+            const char *tile = ui->removing_tiles > 0 ? " Its home screen tile's folder was deleted: if the tile is still on "
+                                                        "the home screen, delete it there." : "";
+            if (ui->removing_kind == 2) {
+                snprintf(title, sizeof(title), failed ? "The saves of %s weren't fully deleted" : "The saves of %s are deleted",
+                         ui->removing_title);
+                if (failed) snprintf(body, sizeof(body), "%s PC5 finishes deleting them the next time it starts.", ui->remove.error);
+                else snprintf(body, sizeof(body), "Its saves and settings, kept when it was uninstalled, are gone.");
+            } else {
+                snprintf(title, sizeof(title), failed ? "%s wasn't fully uninstalled" : "%s is uninstalled", ui->removing_title);
+                if (failed) snprintf(body, sizeof(body), "%s PC5 finishes it the next time it starts.", ui->remove.error);
+                else if (ui->removing_kind == 1)
+                    snprintf(body, sizeof(body), "Its saves and settings are kept: installing it again puts them back. "
+                             "Settings \xe2\x80\xba Uninstall game deletes them.%s", tile);
+                else snprintf(body, sizeof(body), "The game, its saves and its settings were deleted.%s", tile);
+            }
+            if (failed && ui->removing_kind == 2) pc5_copy(body, sizeof(body), ui->remove.error);
             if (failed) say(ui, "PC5 problem uninstall %s: %s", ui->removing_title, ui->remove.error);
             say(ui, "PC5 uninstall done failed=%d removed=%u", failed, (unsigned)ui->remove.removed);
             pc5_remove_end(&ui->remove);
@@ -2104,6 +2458,12 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
         break;
     }
 
+    /* The chosen game's background, behind the library and what opens over it. */
+    if (ui->screen != S_START && ui->screen != S_COVERS && ui->screen != S_UPDATE && ui->screen != S_UPGRADE_ASK) {
+        if (ui->screen == S_LIBRARY) backgrounds_refresh(ui);
+        background_follow(ui);
+    }
+    if (ui->now - ui->bg_fade_at < BG_FADE_MS) ui->dirty = 1;
     /* The covers slide; the glow follows the chosen cover's colour. */
     if (ui->screen != S_START && ui->screen != S_COVERS && ui->screen != S_UPDATE && ui->screen != S_LIBRARY &&
         ui->screen != S_UNINSTALL_LIST && covers_near(ui))
@@ -2250,8 +2610,25 @@ static void backdrop(Pc5Ui *ui, Pc5Canvas *c)
         ui->composed_glow = glow;
         ui->composed_ready = 1;
     }
+    /* The chosen game's background over it, faded in from what was there. */
+    const uint32_t *to = ui->bg_has ? ui->bg : ui->composed, *from = ui->bg_old_has ? ui->bg_old : ui->composed;
+    uint64_t since = ui->now - ui->bg_fade_at;
+    if (from != to && since < BG_FADE_MS) {
+        uint32_t a = (uint32_t)(since * 256 / BG_FADE_MS), b = 256 - a;
+        for (int y = 0; y < H; y++) {
+            const uint32_t *p = from + (size_t)y * W, *q = to + (size_t)y * W;
+            uint32_t *o = c->px + (size_t)y * (size_t)c->stride;
+            for (int x = 0; x < W; x++) {
+                uint32_t u = p[x], v = q[x];
+                uint32_t rb = (((u & 0xff00ffu) * b + (v & 0xff00ffu) * a) >> 8) & 0xff00ffu;
+                uint32_t g = (((u & 0x00ff00u) * b + (v & 0x00ff00u) * a) >> 8) & 0x00ff00u;
+                o[x] = 0xff000000u | rb | g;
+            }
+        }
+        return;
+    }
     for (int y = 0; y < H; y++)
-        memcpy(c->px + (size_t)y * (size_t)c->stride, ui->composed + (size_t)y * W, (size_t)W * 4);
+        memcpy(c->px + (size_t)y * (size_t)c->stride, to + (size_t)y * W, (size_t)W * 4);
 }
 
 /* Where a cover sits d places from the middle. */
@@ -2368,13 +2745,18 @@ static void drawer_row(Pc5Ui *ui, Pc5Canvas *c, float x, float y, float h, int c
                        const char *about, const char *value)
 {
     int value_w = value && value[0] ? pc5_text_width(&ui->fonts, PC5_FACE_LABEL, value) : 0;
+    /* Rows packed closer (a long game menu) keep both lines inside the row. */
+    int compact = h < 100 && about && about[0];
+    float label_y = compact ? 12 + 0.42f * h : 46, about_y = compact ? 0.92f * h + 1 : 82, high = compact ? h - 4 : h - 12;
+    float bar = high - 12 < 56 ? high - 12 : 56;
     if (chosen) {
-        pc5_round_rect(c, x + 36, y, 760 - 72, h - 12, 16, C_ROW);
-        pc5_round_rect(c, x + 36, y + (h - 12) / 2 - 28, 5, 56, 2.5f, C_TEXT);
+        pc5_round_rect(c, x + 36, y, 760 - 72, high, 16, C_ROW);
+        pc5_round_rect(c, x + 36, y + high / 2 - bar / 2, 5, bar, 2.5f, C_TEXT);
     }
-    pc5_text(c, &ui->fonts, PC5_FACE_LABEL, (int)x + 72, (int)y + 46, C_TEXT, label, 600 - value_w, 0);
-    if (about && about[0]) pc5_text(c, &ui->fonts, PC5_FACE_SMALL, (int)x + 72, (int)y + 82, C_DIM, about, 760 - 144, 0);
-    if (value_w) pc5_text(c, &ui->fonts, PC5_FACE_LABEL, (int)x + 760 - 72, (int)y + 46, chosen ? C_TEXT : C_ACCENT, value, 0, 2);
+    pc5_text(c, &ui->fonts, PC5_FACE_LABEL, (int)x + 72, (int)(y + label_y), C_TEXT, label, 600 - value_w, 0);
+    if (about && about[0]) pc5_text(c, &ui->fonts, PC5_FACE_SMALL, (int)x + 72, (int)(y + about_y), C_DIM, about, 760 - 144, 0);
+    if (value_w)
+        pc5_text(c, &ui->fonts, PC5_FACE_LABEL, (int)x + 760 - 72, (int)(y + label_y), chosen ? C_TEXT : C_ACCENT, value, 0, 2);
 }
 
 static void settings_screen(Pc5Ui *ui, Pc5Canvas *c)
@@ -2392,7 +2774,7 @@ static void settings_screen(Pc5Ui *ui, Pc5Canvas *c)
     }
     if (ui->page == PAGE_UPDATES && ui->update.last.state == PC5_UPDATE_AVAILABLE)
         pc5_text_wrap(c, &ui->fonts, PC5_FACE_BODY, (int)x + 72, 196 + (int)pitch * count + 60, 760 - 144, 4, 42, C_DIM,
-                      offer_update(ui) ? "Update now downloads it from GitHub, puts it in place of this PC5 and closes "
+                      offer_update(ui) ? "Update now downloads it from GitHub, puts it in place of this PC5 and restarts "
                                          "PC5. Your games, saves and settings stay."
                                        : "Get it from github.com/bornaradusin/PC5 (Releases) and copy it to the console "
                                          "the way you added PC5. Your games, saves and settings stay.", 0);
@@ -2414,7 +2796,8 @@ static void game_menu_screen(Pc5Ui *ui, Pc5Canvas *c, int chosen)
     GameRow rows[GAME_ROWS];
     int count = game_rows(&ui->controls, ui_game_kind(ui), rows);
 
-    float pitch = count > 9 ? 76 : count > 8 ? 84 : count > 7 ? 92 : count > 6 ? 104 : 118;   /* ten rows fit above the hints */
+    /* Up to eleven rows fit above the hints: the last one's second line ends near y 960. */
+    float pitch = count > 8 ? (float)(960 - 226 - 66) / (float)(count - 1) : count > 7 ? 92 : count > 6 ? 104 : 118;
     pc5_text(c, &ui->fonts, PC5_FACE_SMALL, (int)x + 64, 182, C_DIM, game->playable ? game->detail : game->problem, 760 - 128, 0);
     for (int i = 0; i < count; i++) {
         float y = 226 + pitch * i;
@@ -2469,8 +2852,12 @@ static void game_menu_screen(Pc5Ui *ui, Pc5Canvas *c, int chosen)
             drawer_row(ui, c, x, y, pitch, chosen == i, "Home screen tile",
                        ui->tile[0] ? about : "A tile on the PS5's home screen that starts it", ui->tile[0] ? "On" : "Off");
             break;
+        case GR_UPDATE:
+            drawer_row(ui, c, x, y, pitch, chosen == i, "Update", "A newer copy from USB; its saves and settings stay",
+                       "\xe2\x80\xba");
+            break;
         case GR_UNINSTALL:
-            drawer_row(ui, c, x, y, pitch, chosen == i, "Uninstall", "Deletes the game with its saves and settings", "");
+            drawer_row(ui, c, x, y, pitch, chosen == i, "Uninstall", "Deletes the game, or keeps its saves for later", "");
             break;
         }
     }
@@ -2694,6 +3081,27 @@ static void program_row(Pc5Ui *ui, Pc5Canvas *c, int i, float x, float y, float 
 
 static void game_row(Pc5Ui *ui, Pc5Canvas *c, int i, float x, float y, float w, int chosen)
 {
+    if (i >= ui->library.count) {
+        /* Kept saves, after the games (Settings › Uninstall game). */
+        const Pc5Saves *saves = &ui->saves[i - ui->library.count];
+        char title[PC5_NAME + 16];
+        (void)chosen;
+        pc5_round_frame(c, x, y + 8, 56, 84, 6, 2, 0xff3a404cu);
+        static const char *const months[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+        char about[160];
+        time_t when = (time_t)saves->kept;
+        struct tm day;
+        snprintf(title, sizeof(title), "Saves of %s", saves->title);
+        if (saves->kept > 0 && gmtime_r(&when, &day))
+            snprintf(about, sizeof(about), "Kept %d %s %d; installing it again puts them back", day.tm_mday,
+                     months[day.tm_mon % 12], day.tm_year + 1900);
+        else
+            snprintf(about, sizeof(about), "Kept when it was uninstalled; installing it again puts them back");
+        pc5_text(c, &ui->fonts, PC5_FACE_LABEL, (int)x + 84, (int)y + 44, C_TEXT, title, (int)w - 84, 0);
+        pc5_text(c, &ui->fonts, PC5_FACE_SMALL, (int)x + 84, (int)y + 78, C_DIM, about, (int)w - 84, 0);
+        return;
+    }
     const Pc5Game *game = &ui->library.games[i];
     const Cover *cover = &ui->covers[i];
     (void)chosen;
@@ -2784,12 +3192,15 @@ static void install_screen(Pc5Ui *ui, Pc5Canvas *c)
     int number;
 
     switch (in->phase) {
-    case PC5_INSTALL_PREFIX: step = "Setting up the game's Windows"; number = 1; break;
+    case PC5_INSTALL_PREFIX: step = in->kept[0] ? "Putting back its saves and settings" : "Setting up the game's Windows";
+        number = 1; break;
     case PC5_INSTALL_LIST:
-    case PC5_INSTALL_COPY: step = "Copying the game"; number = 2; break;
-    case PC5_INSTALL_VERIFY: step = "Checking the copy against the USB drive"; number = 3; break;
-    case PC5_INSTALL_FINISH: step = "Finishing"; number = 3; break;
-    default: step = in->cancel ? "Stopping: deleting what was copied" : "Deleting what was copied"; number = 0; break;
+    case PC5_INSTALL_COPY: step = in->update ? "Copying the newer version" : "Copying the game"; number = in->update ? 1 : 2; break;
+    case PC5_INSTALL_VERIFY: step = "Checking the copy against the USB drive"; number = in->update ? 2 : 3; break;
+    case PC5_INSTALL_FINISH: step = in->update ? "Putting the new files in place" : "Finishing"; number = 3; break;
+    default:
+        if (in->tidying) { step = "Finishing"; number = 3; break; }
+        step = in->cancel ? "Stopping: deleting what was copied" : "Deleting what was copied"; number = 0; break;
     }
     dim(c, 150);
     panel(c, x, y, w, h);
@@ -2797,7 +3208,7 @@ static void install_screen(Pc5Ui *ui, Pc5Canvas *c)
         snprintf(line, sizeof(line), "Game %d of %d", ui->queue_at + 1, ui->queue_count);
         pc5_text(c, &ui->fonts, PC5_FACE_SMALL, (int)x + 64, (int)y + 62, C_ACCENT, line, (int)w - 128, 0);
     }
-    snprintf(title, sizeof(title), "Installing %s", in->info.title);
+    snprintf(title, sizeof(title), in->update ? "Updating %s" : "Installing %s", in->info.title);
     pc5_text(c, &ui->fonts, PC5_FACE_HEAD, (int)x + 64, (int)y + 116, C_TEXT, title, (int)w - 128, 0);
     if (number) snprintf(line, sizeof(line), "Step %d of 3 \xc2\xb7 %s", number, step);
     else pc5_copy(line, sizeof(line), step);
@@ -2830,22 +3241,29 @@ static void install_screen(Pc5Ui *ui, Pc5Canvas *c)
     }
 }
 
-static void two_buttons(Pc5Ui *ui, Pc5Canvas *c, float x, float y, const char *one, const char *two, int chosen,
-                        int second_is_danger)
+/* A row of buttons, the one at danger (or -1) red when chosen. */
+static void button_row(Pc5Ui *ui, Pc5Canvas *c, float x, float y, const char *const *labels, int count, int chosen,
+                       int danger)
 {
-    const char *labels[2] = { one, two };
-    for (int i = 0; i < 2; i++) {
-        float bx = x + i * 340, bw = 316, bh = 66;
+    for (int i = 0; i < count; i++) {
+        float bw = count > 2 ? 250 : 316, bx = x + i * (bw + 24), bh = 66;
         if (i == chosen) {
-            uint32_t fill = i == 1 && second_is_danger ? C_RED : 0xffeef0f4u;
+            uint32_t fill = i == danger ? C_RED : 0xffeef0f4u;
             pc5_round_rect(c, bx, y, bw, bh, 33, fill);
             pc5_text(c, &ui->fonts, PC5_FACE_LABEL, (int)(bx + bw / 2), (int)y + 43,
-                     i == 1 && second_is_danger ? C_TEXT : 0xff111318u, labels[i], (int)bw - 40, 1);
+                     i == danger ? C_TEXT : 0xff111318u, labels[i], (int)bw - 40, 1);
         } else {
             pc5_round_frame(c, bx, y, bw, bh, 33, 2, 0xff3a404cu);
             pc5_text(c, &ui->fonts, PC5_FACE_LABEL, (int)(bx + bw / 2), (int)y + 43, C_DIM, labels[i], (int)bw - 40, 1);
         }
     }
+}
+
+static void two_buttons(Pc5Ui *ui, Pc5Canvas *c, float x, float y, const char *one, const char *two, int chosen,
+                        int second_is_danger)
+{
+    const char *labels[2] = { one, two };
+    button_row(ui, c, x, y, labels, 2, chosen, second_is_danger ? 1 : -1);
 }
 
 static void confirm_dialog(Pc5Ui *ui, Pc5Canvas *c, const char *title, const char *body, const char *one,
@@ -2861,6 +3279,23 @@ static void confirm_dialog(Pc5Ui *ui, Pc5Canvas *c, const char *title, const cha
     pc5_text_wrap(c, &ui->fonts, PC5_FACE_HEAD, (int)tx, (int)y + 110, (int)(x + w - 64 - tx), 2, 50, C_TEXT, title, 0);
     pc5_text_wrap(c, &ui->fonts, PC5_FACE_BODY, (int)tx, (int)y + 200, (int)(x + w - 64 - tx), 3, 42, C_DIM, body, 0);
     two_buttons(ui, c, tx, y + h - 120, one, two, ui->button, danger);
+}
+
+/* The same with three buttons, the third the dangerous one. */
+static void confirm3_dialog(Pc5Ui *ui, Pc5Canvas *c, const char *title, const char *body, const char *one,
+                            const char *two, const char *three, const Pc5Picture *thumb)
+{
+    float w = 1100, h = 500, x = (W - w) / 2, y = (H - h) / 2, tx = x + 64;
+    const char *labels[3] = { one, two, three };
+    dim(c, 170);
+    panel(c, x, y, w, h);
+    if (thumb && thumb->levels) {
+        pc5_draw_cover(c, thumb, x + 64, y + 64 + 120, 160, 240, 240, 10, 256, 256, 0);
+        tx = x + 64 + 160 + 56;
+    }
+    pc5_text_wrap(c, &ui->fonts, PC5_FACE_HEAD, (int)tx, (int)y + 110, (int)(x + w - 64 - tx), 2, 50, C_TEXT, title, 0);
+    pc5_text_wrap(c, &ui->fonts, PC5_FACE_BODY, (int)tx, (int)y + 200, (int)(x + w - 64 - tx), 4, 42, C_DIM, body, 0);
+    button_row(ui, c, tx, y + h - 120, labels, 3, ui->button, 2);
 }
 
 static void message_dialog(Pc5Ui *ui, Pc5Canvas *c)
@@ -2957,9 +3392,8 @@ static void upgrade_screen(Pc5Ui *ui, Pc5Canvas *c)
         snprintf(title, sizeof(title), "PC5 %s is installed", u->version);
         pc5_text(c, &ui->fonts, PC5_FACE_HEAD, (int)x + 140, (int)y + 122, C_TEXT, title, (int)w - 204, 0);
         pc5_text_wrap(c, &ui->fonts, PC5_FACE_BODY, (int)x + 140, (int)y + 200, (int)w - 204, 5, 42, C_DIM,
-                      "PC5 closes now. Open it again from the home screen. Your games, saves and settings are as they "
-                      "were. If the old version still opens, restart the console.", 0);
-        Hint list[] = { { accept_glyph(ui), "Close PC5" } };
+                      "PC5 restarts now with the new version. Your games, saves and settings are as they were.", 0);
+        Hint list[] = { { accept_glyph(ui), "Restart PC5" } };
         hints(ui, c, (int)x + 140, (int)(y + h - 48), list, 1);
         return;
     }
@@ -3055,9 +3489,8 @@ void pc5_ui_draw(Pc5Ui *ui, Pc5Canvas *c)
         char title[120], body[400], size[32];
         pc5_size_text(ui->update.last.asset_size, size, sizeof(size));
         snprintf(title, sizeof(title), "PC5 %s is available", ui->update.last.version);
-        snprintf(body, sizeof(body), "You have %s. PC5 can download it from GitHub (%s), install it and close; then "
-                 "open it again. Your games, saves and settings stay. Later: Settings \xe2\x80\xba Updates.",
-                 PC5_VERSION, size);
+        snprintf(body, sizeof(body), "You have %s. PC5 can download it from GitHub (%s), install it and restart. "
+                 "Your games, saves and settings stay. Later: Settings \xe2\x80\xba Updates.", PC5_VERSION, size);
         confirm_dialog(ui, c, title, body, "Update now", "Later", 0, NULL);
         break;
     }
@@ -3094,6 +3527,17 @@ void pc5_ui_draw(Pc5Ui *ui, Pc5Canvas *c)
     case S_ABOUT: about_screen(ui, c); break;
     case S_SCAN: busy_dialog(ui, c, "Looking at the USB drives", NULL, 0); break;
     case S_SOURCES: {
+        if (ui->update_for) {
+            int index = pc5_library_find(&ui->library, ui->launch_id);
+            char title[PC5_NAME + 32];
+            Hint list[] = { { accept_glyph(ui), "Choose" }, { G_TRIANGLE, "Look again" }, { back_glyph(ui), "Back" } };
+            snprintf(title, sizeof(title), "Update %s from USB", index >= 0 ? ui->library.games[index].title : "the game");
+            list_panel(ui, c, title, ui->source_count, source_row, "No game folders found",
+                       "Put the newer copy's folder (the one with the game's .exe in it) at the top of a USB drive formatted "
+                       "as exFAT, plug the drive into the PS5, then look again.",
+                       list, 3, 96);
+            break;
+        }
         int ticked = ticked_count(ui);
         char install[40];
         snprintf(install, sizeof(install), "Install ticked (%d)", ticked);
@@ -3114,6 +3558,26 @@ void pc5_ui_draw(Pc5Ui *ui, Pc5Canvas *c)
         snprintf(line, sizeof(line), "Reading %s", ui->sources[ui->menu].name);
         busy_dialog(ui, c, line, "Counting its files and finding its program", 0);
         break;
+    case S_GAME_UPDATE_ASK: {
+        int index = pc5_library_find(&ui->library, ui->launch_id);
+        const char *name = index >= 0 ? ui->library.games[index].title : "the game";
+        char title[300], body[500], size[32];
+        pc5_size_text(ui->folder.bytes, size, sizeof(size));
+        snprintf(title, sizeof(title), "Update %s?", name);
+        snprintf(body, sizeof(body), "PC5 copies %s (%s) from the USB drive over the game's folder: the files it has replace "
+                 "the game's, the others stay. Its saves, settings and options stay too.", ui->folder.name, size);
+        confirm_dialog(ui, c, title, body, "Cancel", "Update", 0,
+                       index >= 0 && ui->covers[index].state ? &ui->covers[index].picture : NULL);
+        break;
+    }
+    case S_SAVES_ASK: {
+        char title[300];
+        snprintf(title, sizeof(title), "Put back the saves of %s?", ui->folder.name);
+        review_screen(ui, c);
+        confirm_dialog(ui, c, title, "They were kept when it was uninstalled: its saves, settings and options come back "
+                       "with it. Start fresh: they stay kept, for later.", "Start fresh", "Put them back", 0, NULL);
+        break;
+    }
     case S_SEARCH:
         busy_dialog(ui, c, "Looking for the cover", "On Steam, GOG and Wikipedia", 1);
         break;
@@ -3127,7 +3591,10 @@ void pc5_ui_draw(Pc5Ui *ui, Pc5Canvas *c)
     case S_INSTALL: install_screen(ui, c); break;
     case S_STOP:
         install_screen(ui, c);
-        if (ui->queue_installing)
+        if (ui->install.update)
+            confirm_dialog(ui, c, "Stop updating?", "The copy made so far is deleted and the game stays as it was. The USB "
+                           "drive isn't changed.", "Keep updating", "Stop", 1, NULL);
+        else if (ui->queue_installing)
             confirm_dialog(ui, c, "Stop installing?",
                            "What this game copied so far is deleted; games already installed stay. The USB drive isn't "
                            "changed. Press the back button to keep installing.",
@@ -3137,21 +3604,38 @@ void pc5_ui_draw(Pc5Ui *ui, Pc5Canvas *c)
                            "Keep installing", "Stop", 1, NULL);
         break;
     case S_UNINSTALL_LIST: {
-        Hint list[] = { { accept_glyph(ui), "Uninstall" }, { back_glyph(ui), "Back" } };
-        list_panel(ui, c, "Uninstall game", ui->library.count, game_row, "There are no games to uninstall", "", list, 2, 112);
+        Hint list[] = { { accept_glyph(ui), ui->menu < ui->library.count ? "Uninstall" : "Delete" }, { back_glyph(ui), "Back" } };
+        list_panel(ui, c, "Uninstall game", ui->library.count + ui->saves_count, game_row, "There are no games to uninstall",
+                   "", list, 2, 112);
+        break;
+    }
+    case S_SAVES_CONFIRM: {
+        Hint list[] = { { accept_glyph(ui), "Delete" }, { back_glyph(ui), "Back" } };
+        int at = ui->menu - ui->library.count;
+        list_panel(ui, c, "Uninstall game", ui->library.count + ui->saves_count, game_row, "", "", list, 2, 112);
+        snprintf(line, sizeof(line), "Delete the saves of %s?", at >= 0 && at < ui->saves_count ? ui->saves[at].title : "the game");
+        confirm_dialog(ui, c, line, "Its saves and settings, kept when it was uninstalled, are deleted. There is no backup "
+                       "and no undo.", "Cancel", "Delete", 1, NULL);
         break;
     }
     case S_UNINSTALL_CONFIRM: {
         const Pc5Game *game = &ui->library.games[ui->menu];
+        const Pc5Picture *thumb = ui->covers[ui->menu].state ? &ui->covers[ui->menu].picture : NULL;
         if (ui->uninstall_back == S_GAME_MENU) game_menu_screen(ui, c, game_row_at(&ui->controls, ui_game_kind(ui), GR_UNINSTALL));
         snprintf(line, sizeof(line), "Uninstall %s?", game->title);
-        confirm_dialog(ui, c, line,
-                       "This deletes the game and all its saves and settings. There is no backup and no undo.",
-                       "Cancel", "Uninstall", 1, ui->covers[ui->menu].state ? &ui->covers[ui->menu].picture : NULL);
+        if (pc5_remove_can_keep(game, &ui->library))
+            confirm3_dialog(ui, c, line,
+                            "Keep saves: the game goes, its saves and settings stay, and installing it again puts them back. "
+                            "Delete all: the game, its saves and settings go, with no backup and no undo.",
+                            "Cancel", "Keep saves", "Delete all", thumb);
+        else
+            confirm_dialog(ui, c, line,
+                           "This deletes the game and all its saves and settings. There is no backup and no undo.",
+                           "Cancel", "Uninstall", 1, thumb);
         break;
     }
     case S_REMOVING:
-        snprintf(line, sizeof(line), "Uninstalling %s", ui->removing_title);
+        snprintf(line, sizeof(line), ui->removing_kind == 2 ? "Deleting the saves of %s" : "Uninstalling %s", ui->removing_title);
         {
             char count[64];
             snprintf(count, sizeof(count), "%u files and folders deleted", (unsigned)ui->remove.removed);

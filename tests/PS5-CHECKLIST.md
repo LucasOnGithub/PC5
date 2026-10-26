@@ -207,14 +207,31 @@ With ShadowMountPlus and elfldr running.
 | # | Do | Expect | Expect in the log |
 | --- | --- | --- | --- |
 | 90 | Open PC5 | its sound plays on the controller's speaker | `PC5 startup sound user=… init=0 port=…` (port not negative), then `played=… output=0` |
+| 90a | Settings › In games › Startup sound: step through the sounds | each plays as it is chosen; Off plays nothing; the one left chosen plays when PC5 next opens | `PC5 settings … startup_sound=<name>` |
+| 90b | Put a `.wav` (44.1 kHz stereo) in `/data/prospero-win/sounds/`, open Settings | it is in the list under its name and plays | |
+| 90c | With games installed by 1.7.x, open the library and wait | each game's background fades in behind the covers once found; scrolling through games fades between them | `PC5 backgrounds to look for=…`, `PC5 background game=… from=Steam` (or GOG) |
+| 90d | Put `/data/prospero-win/backgrounds/<game name>.jpg`, close and open PC5 | that picture is the game's background | `PC5 background game=… from=your picture` |
 | 91 | Start a game, leave it | no sound when PC5's screens are back | no `PC5 startup sound` line in that session |
 | 92 | Settings › In games › Startup sound: Off; close PC5 and open it | no sound | no `PC5 startup sound` line |
 | 93 | With a newer release on GitHub, open PC5 | it asks: Update now or Later | `PC5 update state=4 latest=… zip=1` |
 | 94 | Later | the library; Settings › Updates shows Update now | `PC5 update later` |
 | 95 | Update now, then ○ during the download | it stops; PC5 is as it was | `PC5 update stopped: Cancelled.` |
-| 96 | Update now, let it finish | the progress bar through download and unpacking, then "PC5 x.y.z is installed"; ✕ closes PC5 | `PC5 update folder=…`, `download rc=0 status=200`, `replaced=…`, `registration copies=…`, `done` |
-| 97 | Open PC5 from the home screen | the new version (Settings › About PC5); games, saves and settings as before | `PC5 start version=…` the new one |
+| 96 | Update now, let it finish | the progress bar through download, unpacking and putting the files in place, then "PC5 x.y.z is installed"; ✕ (Restart PC5) starts the new version, with no error from the console | `PC5 update folder=…`, `download rc=0 status=200`, `placed=…`, `registration copies=…`, `done`, `PC5 restarting after its update` |
+| 97 | After the restart, Settings › About PC5; then close PC5 and open it from the home screen | the new version both times; games, saves and settings as before | `PC5 start version=…` the new one |
 | 98 | PC5 installed on a USB drive (homebrew folder), Update now | as on /data; the work folder `pc5-update` on that drive is gone afterwards | `PC5 update folder=/mnt/usb…` |
+
+## Updating games, kept saves, movies and the touchpad (1.8.0)
+
+| # | Do | Expect | Expect in the log |
+| --- | --- | --- | --- |
+| 99 | Play a game and save; put a newer copy of its folder (another file changed) on the USB drive; △ › Update, choose it, Update | "Updating …" through copying, checking and putting the files in place, then "… is updated"; the game starts with its save; the changed file is the new one | `PC5 update id=… from=…`, `PC5 updated id=… files=…` |
+| 99a | △ › Update, choose another game's folder | "… can't be updated: This folder doesn't have …" | `PC5 problem update …` |
+| 99b | △ › Update, then ○ while it copies, Stop | "Update stopped"; the game plays as before | `PC5 update ended cancelled=1` |
+| 100 | △ › Uninstall › Keep saves | "… is uninstalled", saves kept; Options › Uninstall game lists "Saves of …" after the games | `PC5 uninstall id=… keep_saves=1` |
+| 100a | Install the same game again | "Put back the saves of …?"; Put them back: the game starts with its save and its options | `PC5 install saves=…/saves/…` |
+| 100b | Keep saves again; Options › Uninstall game › Saves of … › Delete | "The saves of … are deleted"; the row is gone | `PC5 saves delete name=…` |
+| 101 | A game with WebM or ASF movies | the movies play smoothly, in time with their sound | no `EBML` warnings from FFmpeg |
+| 102 | A game whose Back opens a menu, Xbox controller mode: press the touchpad | the game's Back menu, and no share menu from the console | |
 
 A non-zero `rc=` on the light bar or triggers lines means the console refused that call; send
 that log. On the startup sound line, a negative `port=` means the console refused the

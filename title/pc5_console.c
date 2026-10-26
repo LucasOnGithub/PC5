@@ -32,6 +32,7 @@
 #include <unistd.h>
 
 int sceSystemServiceParamGetInt(int id, int *value);
+int sceSystemServiceLoadExec(const char *path, char *const argv[]);
 
 /* The console's notification (libkernel): text in the request's message. */
 typedef struct NotifyRequest {
@@ -163,15 +164,16 @@ static PwPadPs5 pad;
 static int video_status = PW_ERR_STATE, pad_status = PW_ERR_STATE;
 
 /* ---- the startup sound -----------------------------------------------------------------------
- * The app's pc5/startup.wav on the controller's speaker (sceAudioOut's pad speaker port: the
- * user's controller, 16-bit mono at 48 kHz), on a thread of its own, once when PC5 is opened:
- * not when its screens come back after a game (the title restarted, cycle above 0). */
+ * The chosen sound (pc5_sound.h) on the controller's speaker (sceAudioOut's pad speaker port:
+ * the user's controller, 16-bit mono at 48 kHz), on a thread of its own, once when PC5 is
+ * opened: not when its screens come back after a game (the title restarted, cycle above 0).
+ * Settings plays a sound when it is chosen. */
 enum { AUDIO_PORT_PADSPK = 4, AUDIO_FORMAT_S16_MONO = 0, AUDIO_GRAIN = 256, AUDIO_VOLUME_0DB = 0x8000,
        AUDIO_VOLUME_FLAG_CH0 = 1 };
 
 static Pc5Sound startup_sound;
 static pthread_t sound_thread;
-static int sound_started, sound_user;
+static int sound_started, sound_user = -1;
 static atomic_int sound_stop;
 
 static void *play_sound(void *argument)
@@ -211,29 +213,8 @@ static void *play_sound(void *argument)
     return NULL;
 }
 
-static void sound_start(const Pc5Console *config, int32_t user)
-{
-    char path[PC5_PATH], line[PC5_PATH + 80];
-    Pc5Buf file = { 0 };
-    Pc5Settings settings;
-
-    pc5_settings_load(config->root, &settings);
-    if (!settings.startup_sound || config->cycle || (config->start && config->start[0]) || user < 0) return;
-    if (pc5_format(path, sizeof(path), "%s/pc5/startup.wav", config->app) || pc5_read_file(path, &file, 16u << 20) ||
-        pc5_sound_from_wav(file.data, file.len, &startup_sound)) {
-        snprintf(line, sizeof(line), "PC5 startup sound: can't read %s", path);
-        plain_log(line);
-        pc5_buf_free(&file);
-        return;
-    }
-    pc5_buf_free(&file);
-    sound_user = user;
-    atomic_store(&sound_stop, 0);
-    sound_started = !pthread_create(&sound_thread, NULL, play_sound, NULL);
-    if (!sound_started) pc5_sound_free(&startup_sound);
-}
-
-/* Before the title is replaced or closed: the sound stops and its port is closed. */
+/* Before the title is replaced or closed, or another sound plays: the sound stops and its
+ * port is closed. */
 static void sound_end(void)
 {
     if (!sound_started) return;
@@ -242,16 +223,79 @@ static void sound_end(void)
     sound_started = 0;
 }
 
-/* PC5 updated itself: it closes, and the console shows its home screen. */
-static void quit(void *context)
+/* The sound of that name (the default one when it is gone), from its start. */
+static void sound_play(const char *name)
+{
+    char path[PC5_PATH], line[PC5_PATH + 80];
+    Pc5Buf file = { 0 };
+
+    sound_end();
+    if (sound_user < 0 || !console) return;
+    if (pc5_sound_path(console->app, console->root, name, path, sizeof(path)) &&
+        pc5_sound_path(console->app, console->root, PC5_SOUND_DEFAULT, path, sizeof(path))) {
+        snprintf(line, sizeof(line), "PC5 startup sound: no %.64s", name);
+        plain_log(line);
+        return;
+    }
+    if (pc5_read_file(path, &file, 32u << 20) || pc5_sound_from_wav(file.data, file.len, &startup_sound)) {
+        snprintf(line, sizeof(line), "PC5 startup sound: can't read %s", path);
+        plain_log(line);
+        pc5_buf_free(&file);
+        return;
+    }
+    pc5_buf_free(&file);
+    atomic_store(&sound_stop, 0);
+    sound_started = !pthread_create(&sound_thread, NULL, play_sound, NULL);
+    if (!sound_started) pc5_sound_free(&startup_sound);
+}
+
+static void sound_start(const Pc5Console *config, int32_t user)
+{
+    Pc5Settings settings;
+
+    sound_user = user;
+    pc5_settings_load(config->root, &settings);
+    if (!strcmp(settings.startup_sound, "off") || config->cycle || (config->start && config->start[0])) return;
+    sound_play(settings.startup_sound);
+}
+
+/* Settings tries a sound. */
+static void sound_try(void *context, const char *name)
 {
     (void)context;
+    sound_play(name);
+}
+
+/* PC5 updated itself: the new PC5 starts in its place, as a game does (the console's
+ * LoadExec, the eboot as /app0 or the sandbox shows it), fresh as when it is opened. If
+ * the console refuses, PC5 closes as an app does. Never exit(): the console takes that
+ * for a crash (CE-108255-1). */
+static void restart(void *context)
+{
+    static char launcher[] = "launcher=1", cycle[] = "cycle=0";
+    char *argv[] = { launcher, cycle, NULL };
+    char sandbox[PC5_PATH], line[PC5_PATH + 64];
+    const char *const eboots[] = { "/app0/eboot.bin", sandbox };
+    (void)context;
+
     sound_end();
-    plain_log("PC5 closing after its update");
     if (pad_status == PW_OK) pw_pad_ps5_close(&pad);
     if (video_status == PW_OK) pw_videoout_ps5_close(&video);
+    pad_status = video_status = PW_ERR_STATE;
+    snprintf(sandbox, sizeof(sandbox), "%s/eboot.bin", console->app);
+    for (size_t i = 0; i < sizeof(eboots) / sizeof(eboots[0]); i++) {
+        snprintf(line, sizeof(line), "PC5 restarting after its update eboot=%s", eboots[i]);
+        plain_log(line);
+        pw_diagnostics_close("pc5-update");
+        int rc = sceSystemServiceLoadExec(eboots[i], argv);
+        pw_diagnostics_resume();
+        snprintf(line, sizeof(line), "PC5 restart refused rc=0x%08x", (unsigned)rc);
+        plain_log(line);
+    }
+    plain_log("PC5 closing after its update");
     pw_diagnostics_close("pc5-update");
-    _exit(0);
+    sceSystemServiceLoadExec("exit", NULL);
+    for (;;) usleep(100000);   /* the console ends the process */
 }
 
 /* The game gets the screen and the pad: PC5 lets go of them first, and
@@ -366,10 +410,10 @@ void pc5_console_run(const Pc5Console *config)
 
     watch_for_crashes(config->root);
     platform = (Pc5Platform){ NULL, { NULL, pc5_net_get, pc5_net_download }, clock_text, play, log_line, notify_text,
-                              unix_time, enter == 0, quit };
+                              unix_time, enter == 0, restart, sound_try };
     {
         Pc5UiConfig ui_config = { config->root, template_prefix, fonts, usb_roots, PC5_HOME_ROOT, tile_template,
-                                  config->start, pc5_upgrade_drives, "/user", finished };
+                                  config->start, pc5_upgrade_drives, "/user", finished, 1 };
         ui = pc5_ui_create(&ui_config, &platform);
     }
     if (!ui) {
