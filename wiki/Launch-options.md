@@ -38,6 +38,8 @@ For example, this file starts the game with `-nointro`, and keeps another option
 -nointro
 ```
 
+A game that starts from a `.bat` file gets the options in the batch file first, then the ones in `launch.txt` (placed beside the `.bat` file). See [Games that start from a .bat file](Installing-games#games-that-start-from-a-bat-file).
+
 ## Changing or removing options
 
 - To change them, edit the line and start the game again.

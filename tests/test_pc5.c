@@ -439,6 +439,49 @@ static void test_sources(void)
         CHECK(!pc5_folder_inspect(dir, "Installer only", &folder) && strstr(folder.problem, "only has installers"),
               "an installer alone isn't a game: %s", folder.problem);
     }
+    /* A game that starts from a batch file: read as cmd.exe would, its program found whatever
+     * the case of its name, offered first when it is the folder's one way to start. */
+    {
+        char file[PC5_PATH], from[PC5_PATH];
+        Pc5Batch batch;
+        int game = -1, windowed = -1, setup = -1, readme = -1;
+        path(from, sizeof(from), "%s/game64.exe", programs);
+        path(file, sizeof(file), "%s/stubs/Witch Tale/Binaries/Win64/WitchTale.exe", work);
+        copy_file(from, file);
+        path(file, sizeof(file), "%s/stubs/Witch Tale/Launch.bat", work);
+        write_text(file, "\xef\xbb\xbf@echo off\r\n:: starts the game\r\ncd /d \"%~dp0\"\r\nset GAME=Binaries\\Win64\r\n"
+                         "if exist \"%GAME%\\WitchTale.exe\" (\r\n"
+                         "  start \"\" /d \"%GAME%\" \"%GAME%\\witchtale.exe\" -dx12 -log=\"%LOCALAPPDATA%\\WitchTale\\log.txt\" %* >nul 2>&1\r\n"
+                         ")\r\nexit\r\n");
+        path(file, sizeof(file), "%s/stubs/Witch Tale/Windowed.bat", work);
+        write_text(file, "@cd /d \"%~dp0Binaries\\Win64\" && WitchTale -windowed ^& pause\n");
+        path(file, sizeof(file), "%s/stubs/Witch Tale/Setup.bat", work);
+        write_text(file, "Binaries\\Win64\\WitchTale.exe -install\n");
+        path(file, sizeof(file), "%s/stubs/Witch Tale/Readme.bat", work);
+        write_text(file, "notepad readme.txt\nstart C:\\windows\\system32\\cmd.exe\nstart ..\\Other\\x.exe\n");
+        path(dir, sizeof(dir), "%s/stubs/Witch Tale", work);
+        CHECK(!pc5_folder_inspect(dir, "Witch Tale", &folder) && !folder.problem[0], "inspect a batch game: %s", folder.problem);
+        for (int i = 0; i < folder.exe_count; i++) {
+            if (!strcmp(folder.exes[i].path, "Binaries/Win64/WitchTale.exe")) game = i;
+            if (!strcmp(folder.exes[i].path, "Windowed.bat")) windowed = i;
+            if (!strcmp(folder.exes[i].path, "Setup.bat")) setup = i;
+            if (!strcmp(folder.exes[i].path, "Readme.bat")) readme = i;
+        }
+        CHECK(folder.exe_count && !strcmp(folder.exes[0].path, "Launch.bat"), "its batch file first: %s",
+              folder.exe_count ? folder.exes[0].path : "");
+        CHECK(folder.exe_count && folder.exes[0].pe.bits == 64 && pc5_folder_api(&folder, 0) == PC5_API_D3D11,
+              "with its program's bits and drawing");
+        CHECK(game > 0 && windowed > game && setup < 0 && readme < 0, "the others after it: %d %d %d %d", game, windowed,
+              setup, readme);
+        CHECK(!pc5_batch_read(dir, "Launch.bat", &batch) && !strcmp(batch.exe, "Binaries/Win64/WitchTale.exe") &&
+              !strcmp(batch.cwd, "Binaries/Win64") &&
+              !strcmp(batch.arguments, "-dx12 -log=\"C:\\users\\prospero\\AppData\\Local\\WitchTale\\log.txt\""),
+              "Launch.bat: %s | %s | %s", batch.exe, batch.cwd, batch.arguments);
+        CHECK(!pc5_batch_read(dir, "Windowed.bat", &batch) && !strcmp(batch.exe, "Binaries/Win64/WitchTale.exe") &&
+              !strcmp(batch.cwd, "Binaries/Win64") && !strcmp(batch.arguments, "-windowed & pause"),
+              "Windowed.bat: %s | %s | %s", batch.exe, batch.cwd, batch.arguments);
+        CHECK(pc5_batch_read(dir, "Readme.bat", &batch) == -1, "nothing of the game's started: nothing");
+    }
 }
 
 /* ---- the library: installing and uninstalling -------------------------------------------------- */
@@ -662,6 +705,10 @@ static void test_install(void)
         flat.api = PC5_API_DDRAW;
         CHECK(!pc5_profile_text("flat", &flat, "", &controls, NULL, text, sizeof(text)) && strstr(text, "desktop = 1920x1080\n"),
               "DirectDraw at 1080p");
+        CHECK(strstr(text, "graphics = opengl\n") != NULL, "DirectDraw through Wine's Direct3D on Zink");
+        flat.api = PC5_API_GDI;
+        CHECK(!pc5_profile_text("flat", &flat, "", &controls, NULL, text, sizeof(text)) && strstr(text, "graphics = gdi\n"),
+              "plain Windows drawing stays with Wine");
     }
     /* Overrides stay within prospero-win's 256 characters: whole names only. */
     {
@@ -728,6 +775,39 @@ static void test_install(void)
         CHECK(pc5_handoff_take(root, "neondrift", error, sizeof(error)) == 1, "a new chain");
         CHECK(!pc5_profile_refresh(root, "neondrift", error, sizeof(error)), "and back");
         path(file, sizeof(file), "%s/neondrift/drive_c/Games/NeonDrift/bin/Real Game.exe", prefixes);
+        unlink(file);
+    }
+    /* A batch file chosen as the game's program: the profile starts the program it starts,
+     * with its options, then launch.txt's, in its folder. */
+    {
+        char error[PC5_ERROR], game_dir[PC5_PATH], program[PC5_PATH];
+        static Pc5Folder copy;
+        int batch = -1, own = -1;
+        path(file, sizeof(file), "%s/neondrift/drive_c/Games/NeonDrift/Start Game.cmd", prefixes);
+        write_text(file, "@echo off\nrem from a repack\npushd \"%~dp0data\"\nset OPTS=-windowed -lang en\n"
+                         "\"%~dp0NeonDrift\" %OPTS%\npopd\n");
+        path(game_dir, sizeof(game_dir), "%s/neondrift/drive_c/Games/NeonDrift", prefixes);
+        CHECK(!pc5_folder_inspect(game_dir, "NeonDrift", &copy), "inspect the copy");
+        for (int i = 0; i < copy.exe_count; i++) {
+            if (!strcmp(copy.exes[i].path, "Start Game.cmd")) batch = i;
+            if (!strcmp(copy.exes[i].path, "NeonDrift.exe")) own = i;
+        }
+        CHECK(batch == 0 && own > 0, "the batch file first: %d %d", batch, own);
+        CHECK(batch >= 0 && !pc5_game_set_program(root, "neondrift", &copy, batch, error, sizeof(error)), "batch: %s", error);
+        pw_wine_library_load(pw, root);
+        profile = pw_wine_library_find(pw, "neondrift");
+        CHECK(profile && !strcmp(profile->app.executable, "C:\\Games\\NeonDrift\\NeonDrift.exe") &&
+              !strcmp(profile->app.arguments, "-windowed -lang en -fullscreen") &&
+              !strcmp(profile->app.working_directory, "C:\\Games\\NeonDrift\\data"),
+              "its program, options and folder: %s | %s | %s", profile ? profile->app.executable : "",
+              profile ? profile->app.arguments : "", profile ? profile->app.working_directory : "");
+        CHECK(!pc5_game_program(root, "neondrift", program, sizeof(program)) && strstr(program, "/NeonDrift/NeonDrift.exe"),
+              "the program it starts: %s", program);
+        /* A batch file that no longer starts one of the game's programs: refused, said why. */
+        write_text(file, "echo nothing\n");
+        CHECK(pc5_profile_refresh(root, "neondrift", error, sizeof(error)) == -1 &&
+              strstr(error, "doesn't start any of the game's programs"), "said why: %s", error);
+        CHECK(own >= 0 && !pc5_game_set_program(root, "neondrift", &copy, own, error, sizeof(error)), "back: %s", error);
         unlink(file);
     }
 

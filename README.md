@@ -5,7 +5,7 @@
 A launcher for your own PC games on a PS5 that runs homebrew. PC5 shows your games as a row
 of covers, installs games from a USB drive in one copy each, and uninstalls them with their
 saves. It runs the games with [prospero-win](https://github.com/mpereiraesaa/prospero-win)
-(Wine on the PS5). The app is `PPSA11018`, its tile is called **PC5**. This is version 1.6.5.
+(Wine on the PS5). The app is `PPSA11018`, its tile is called **PC5**. This is version 1.6.6.
 
 No game is part of PC5, and PC5 downloads none: you install the games you own.
 
@@ -53,7 +53,8 @@ Everything else is in the [wiki](https://github.com/bornaradusin/PC5/wiki):
 
 PC5 reads each game's program to see whether it is 32- or 64-bit and what it draws with:
 Direct3D 8 to 11 run through DXVK (with PC5's patch), Direct3D 12 through VKD3D-Proton,
-Vulkan on RADV, OpenGL on Mesa Zink, DirectDraw and plain Windows drawing on Wine itself.
+Vulkan on RADV, OpenGL on Mesa Zink, DirectDraw through Wine's own Direct3D on Mesa Zink,
+and plain Windows drawing on Wine itself.
 .NET Framework games run with Wine Mono. Games that need a store's launcher or client
 running (Steam, EA app, Ubisoft Connect, Rockstar Games Launcher), online DRM, anti-cheat or
 kernel drivers don't run. Whether a game runs is only known by trying it: PC5 makes no
@@ -87,7 +88,7 @@ itself in Docker (`tools/Dockerfile`). A first build takes a few hours, most of 
 `tests/test.sh` runs the host checks (after `tools/build.sh sources`), `tests/test.sh --shots`
 also draws every screen, and `tests/PS5-CHECKLIST.md` is what to try on a console.
 
-**Releasing**: the update check reads the newest release's tag (`v1.6.5`). Raise `PC5_VERSION`
+**Releasing**: the update check reads the newest release's tag (`v1.6.6`). Raise `PC5_VERSION`
 in `title/pc5.h` and `contentVersion` in `sce_sys/param.json`, and attach `PPSA11018.zip`,
 `PPSA11018-sources.tar.xz` and `wine-mono-11.3.0-src.tar.xz` to the release.
 

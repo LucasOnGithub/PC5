@@ -193,5 +193,14 @@ With ShadowMountPlus and elfldr running.
 | 84 | The same with two controllers signed in | the game lists two "Controller (XBOX 360 For Windows)" | |
 | 85 | A game that reads both XInput and DirectInput (most from after 2006) | each controller counts once, not twice | |
 
+## DirectDraw and batch files (1.6.6)
+
+| # | Do | Expect | Expect in the log |
+| --- | --- | --- | --- |
+| 86 | A DirectDraw game that draws in 3D (Breath of Fire IV): start it | it shows its picture instead of closing after a few seconds | `zink provider=ok … architecture=pe32`, no `Failed to get a GL context` |
+| 87 | A 2D DirectDraw game that ran before | it runs as before | `zink provider=ok` |
+| 88 | Install a game whose folder has a `Launch.bat` that starts its program with options | the review screen offers `Launch.bat` first, with the program's bits and graphics; the game starts with the batch file's options | `PC5 install … exe=Launch.bat`, the profile's `arguments =` holds them |
+| 89 | △ › Change program on that game, choose the game's `.exe`, then the `.bat` again | each starts the game | |
+
 A non-zero `rc=` on the light bar or triggers lines means the console refused that call; send
 that log.

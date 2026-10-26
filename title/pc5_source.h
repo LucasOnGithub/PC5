@@ -47,4 +47,23 @@ int pc5_folder_inspect(const char *path, const char *name, Pc5Folder *folder);
 /* The API of the chosen program, with the libraries beside it. */
 Pc5Api pc5_folder_api(const Pc5Folder *folder, int exe);
 
+/* ---- batch files ---------------------------------------------------------------------
+ * A game that starts from a batch file (.bat or .cmd): the console runs one program, so
+ * PC5 reads the batch file the way cmd.exe would and starts the program it starts, with
+ * its options and in its folder. cd, chdir, pushd, popd, set, start and call are followed;
+ * %~dp0, %CD%, %% and variables set before are expanded; other commands are passed over. */
+typedef struct Pc5Batch {
+    char exe[PC5_PATH];       /* the program it starts: inside the game's folder, with '/' */
+    char arguments[512];      /* what it starts it with */
+    char cwd[PC5_PATH];       /* the folder it starts it in: inside the game's folder, with '/', "" for its top */
+} Pc5Batch;
+
+/* A .bat or .cmd file's name. */
+int pc5_is_batch(const char *name);
+/* The program batch (inside top, with '/') starts among the game's own: top is the game's
+ * folder on disk, and C:\Games\<its name> on Windows. The first .exe in the game's folder
+ * it starts that isn't a helper by its name (an installer, a crash reporter, a server),
+ * else the first .exe at all. 0 when it starts one, -1 when it starts none. */
+int pc5_batch_read(const char *top, const char *batch, Pc5Batch *out);
+
 #endif

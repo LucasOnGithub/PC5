@@ -257,17 +257,38 @@ static int starter_of(const char *a, const char *b)
     return 0;
 }
 
+/* A batch file another way to start the game (a safe mode, windowed, another renderer, a
+ * benchmark), not the way it is meant to start. */
+static int variant_batch(const char *name)
+{
+    static const char *const words[] = { "safe", "window", "debug", "log", "test", "bench", "editor", "server",
+                                         "config", "setting", "dx", "vulkan", "opengl", "nosound", "lowspec" };
+    for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); i++)
+        if (contains_ci(name, words[i])) return 1;
+    return 0;
+}
+
+/* The program a choice starts, inside the folder at top: a batch file's program, or itself. */
+static void program_of(const char *top, const char *choice, Pc5Batch *batch, char *out, size_t size)
+{
+    if (pc5_is_batch(choice) && !pc5_batch_read(top, choice, batch)) pc5_copy(out, size, batch->exe);
+    else pc5_copy(out, size, choice);
+}
+
 int pc5_folder_inspect(const char *path, const char *name, Pc5Folder *folder)
 {
+    enum { BATCHES = 32 };
     enum { STACK = 4096 };
     char (*stack)[PC5_PATH] = pc5_alloc(sizeof(*stack) * STACK);
     Walk walk = { folder, pc5_alloc(sizeof(Pc5Exe) * 256), 0, 256, pc5_alloc(sizeof(DllDir) * 256), 0, 256 };
-    int top = 0, status = 0;
+    char (*batches)[PC5_PATH] = pc5_alloc(sizeof(*batches) * BATCHES);
+    Pc5Batch *batch = pc5_alloc(sizeof(*batch));
+    int top = 0, status = 0, batch_count = 0;
 
     memset(folder, 0, sizeof(*folder));
     pc5_copy(folder->path, sizeof(folder->path), path);
     pc5_copy(folder->name, sizeof(folder->name), name);
-    if (!stack || !walk.all || !walk.dlls || !pc5_is_dir(path)) { status = -1; goto out; }
+    if (!stack || !walk.all || !walk.dlls || !batches || !batch || !pc5_is_dir(path)) { status = -1; goto out; }
     stack[top++][0] = 0;   /* "": the folder itself */
     while (top > 0) {
         char relative[PC5_PATH], dir_path[PC5_PATH], entry_path[PC5_PATH], child[PC5_PATH];
@@ -322,6 +343,9 @@ int pc5_folder_inspect(const char *path, const char *name, Pc5Folder *folder)
                         exe->score = score_program(folder, exe, child);
                     }
                     folder->imports |= pe.imports;
+                } else if (pc5_is_batch(entry->d_name)) {
+                    if (depth <= PC5_DEPTH && !helper_folder(child) && batch_count < BATCHES)
+                        memcpy(batches[batch_count++], child, PC5_PATH);
                 } else if (!relative[0] && !pc5_casecmp(entry->d_name, "steam_appid.txt")) {
                     Pc5Buf text = { 0 };
                     if (!pc5_read_file(entry_path, &text, 64)) folder->steam_appid = (uint32_t)strtoul((char *)text.data, NULL, 10);
@@ -345,6 +369,34 @@ int pc5_folder_inspect(const char *path, const char *name, Pc5Folder *folder)
         const char *slash = strrchr(walk.all[0].path, '/'), *name = slash ? slash + 1 : walk.all[0].path;
         if (!helper_folder(walk.all[0].path) && !installer_program(name)) walk.all[0].score += 1000;
     }
+    /* Batch files that start one of the game's programs, offered with that program's bits and
+     * drawing. A folder with one such file (Launch.bat, Start Game.bat) is meant to start from
+     * it, so it comes first; others come after the program they start. */
+    {
+        int programs = walk.all_count, best = -100000, lone = -1, starting = 0;
+        for (int i = 0; i < programs; i++)
+            if (walk.all[i].score > best) best = walk.all[i].score;
+        for (int i = 0; i < batch_count && walk.all_count < walk.all_max; i++) {
+            const char *slash = strrchr(batches[i], '/'), *file = slash ? slash + 1 : batches[i];
+            int k = 0;
+            if (pc5_batch_read(path, batches[i], batch)) continue;
+            while (k < programs && strcmp(walk.all[k].path, batch->exe)) k++;
+            if (k == programs || walk.all[k].pe.dll) continue;
+            Pc5Exe *exe = &walk.all[walk.all_count++];
+            *exe = walk.all[k];
+            pc5_copy(exe->path, sizeof(exe->path), batches[i]);
+            if (installer_program(file) || helper_program(file) || walk.all[k].score <= -500) {
+                exe->score = -1000;
+            } else {
+                exe->score = walk.all[k].score - 1;
+                if (!variant_batch(file)) {
+                    starting++;
+                    lone = walk.all_count - 1;
+                }
+            }
+        }
+        if (starting == 1) walk.all[lone].score = best + 5;
+    }
     qsort(walk.all, (size_t)walk.all_count, sizeof(Pc5Exe), by_score);
     for (int i = 0; i < walk.all_count && folder->exe_count < PC5_EXES; i++)
         if (walk.all[i].score > -500 || folder->exe_count == 0) folder->exes[folder->exe_count++] = walk.all[i];
@@ -352,7 +404,7 @@ int pc5_folder_inspect(const char *path, const char *name, Pc5Folder *folder)
     for (int i = 0; i < folder->exe_count; i++) {
         char dir[PC5_PATH];
         char *slash;
-        pc5_copy(dir, sizeof(dir), folder->exes[i].path);
+        program_of(path, folder->exes[i].path, batch, dir, sizeof(dir));
         slash = strrchr(dir, '/');
         if (slash) *slash = 0; else dir[0] = 0;
         for (int k = 0; k < walk.dll_count; k++)
@@ -362,8 +414,9 @@ int pc5_folder_inspect(const char *path, const char *name, Pc5Folder *folder)
      * time: what its likeliest programs name (pc5_pe_named_libraries), read only then. */
     if (!(folder->imports & PC5_IMPORT_DRAWING)) {
         for (int i = 0; i < folder->exe_count && i < 3; i++) {
-            char file[PC5_PATH * 2];
-            if (pc5_format(file, sizeof(file), "%s/%s", path, folder->exes[i].path)) continue;
+            char file[PC5_PATH * 2], program[PC5_PATH];
+            program_of(path, folder->exes[i].path, batch, program, sizeof(program));
+            if (pc5_format(file, sizeof(file), "%s/%s", path, program)) continue;
             folder->exes[i].pe.imports |= pc5_pe_named_libraries(file);
         }
     }
@@ -375,6 +428,8 @@ out:
     pc5_free(stack);
     pc5_free(walk.all);
     pc5_free(walk.dlls);
+    pc5_free(batches);
+    pc5_free(batch);
     return status;
 }
 
@@ -389,4 +444,485 @@ Pc5Api pc5_folder_api(const Pc5Folder *folder, int index)
     if (own & drawing) return pc5_api_from_imports(own);
     if (beside & drawing) return pc5_api_from_imports(beside);
     return pc5_api_from_imports(folder->imports);
+}
+
+/* ---- batch files ------------------------------------------------------------------- */
+
+int pc5_is_batch(const char *name)
+{
+    return pc5_ends_with_ci(name, ".bat") || pc5_ends_with_ci(name, ".cmd");
+}
+
+enum { BATCH_VARS = 32, BATCH_PUSHES = 8, BATCH_LINE = 4096 };
+
+typedef struct BatchVar {
+    char name[64];
+    char value[512];
+} BatchVar;
+
+typedef struct Batch {
+    const char *top;                     /* the game's folder on disk */
+    char windows[PC5_PATH];              /* the same on Windows: C:\Games\<its name> */
+    char file[PC5_PATH];                 /* the batch file, inside top, with '/' */
+    char cwd[PC5_PATH];                  /* the current folder, inside top, with '/' ("" for top) */
+    char pushed[BATCH_PUSHES][PC5_PATH]; /* pushd's folders */
+    int pushes;
+    BatchVar vars[BATCH_VARS];           /* set's variables */
+    int var_count;
+    Pc5Batch first, game;                /* the first program it starts, and the first that isn't a helper */
+    int have_first, have_game;
+    char line[BATCH_LINE], expanded[BATCH_LINE], command[BATCH_LINE];
+} Batch;
+
+/* Windows' own variables in a game's Windows (the user "prospero"), as Wine sets them. */
+static const struct { const char *name, *value; } batch_environment[] = {
+    { "SystemDrive", "C:" },
+    { "SystemRoot", "C:\\windows" },
+    { "windir", "C:\\windows" },
+    { "ComSpec", "C:\\windows\\system32\\cmd.exe" },
+    { "ProgramFiles", "C:\\Program Files" },
+    { "ProgramFiles(x86)", "C:\\Program Files (x86)" },
+    { "ProgramW6432", "C:\\Program Files" },
+    { "CommonProgramFiles", "C:\\Program Files\\Common Files" },
+    { "ProgramData", "C:\\ProgramData" },
+    { "ALLUSERSPROFILE", "C:\\ProgramData" },
+    { "PUBLIC", "C:\\users\\Public" },
+    { "USERNAME", "prospero" },
+    { "USERPROFILE", "C:\\users\\prospero" },
+    { "HOMEDRIVE", "C:" },
+    { "HOMEPATH", "\\users\\prospero" },
+    { "APPDATA", "C:\\users\\prospero\\AppData\\Roaming" },
+    { "LOCALAPPDATA", "C:\\users\\prospero\\AppData\\Local" },
+    { "TEMP", "C:\\users\\prospero\\AppData\\Local\\Temp" },
+    { "TMP", "C:\\users\\prospero\\AppData\\Local\\Temp" },
+    { "OS", "Windows_NT" },
+};
+
+/* relative (inside the game's folder, with '/') as Windows names it. */
+static void batch_windows(const Batch *b, const char *relative, char *out, size_t size)
+{
+    if (pc5_format(out, size, "%s%s%s", b->windows, relative[0] ? "\\" : "", relative)) out[0] = 0;
+    for (char *p = out; *p; p++) if (*p == '/') *p = '\\';
+}
+
+/* %0, %~dp0 and the like: the batch file on Windows, or the parts asked for (d the drive,
+ * p the folder, n the name, x the extension; f or none the whole). */
+static void batch_self(const Batch *b, const char *parts, char *out, size_t size)
+{
+    char full[PC5_PATH + 16];
+    int d = 0, p = 0, n = 0, x = 0, f = !parts[0];
+
+    for (const char *c = parts; *c; c++) {
+        switch (pc5_lower((unsigned char)*c)) {
+        case 'd': d = 1; break;
+        case 'p': p = 1; break;
+        case 'n': n = 1; break;
+        case 'x': x = 1; break;
+        case 'f': f = 1; break;
+        default: break;   /* s: short names, which are the same here */
+        }
+    }
+    batch_windows(b, b->file, full, sizeof(full));
+    if (f || !(d || p || n || x)) {
+        pc5_copy(out, size, full);
+        return;
+    }
+    const char *slash = strrchr(full, '\\'), *base = slash ? slash + 1 : full, *dot = strrchr(base, '.');
+    size_t path_len = slash ? (size_t)(slash + 1 - full) : 0, base_len = dot ? (size_t)(dot - base) : strlen(base);
+    if (path_len < 2) path_len = 2;
+    snprintf(out, size, "%.*s%.*s%.*s%s", d ? 2 : 0, full, p ? (int)(path_len - 2) : 0, full + 2, n ? (int)base_len : 0,
+             base, x && dot ? dot : "");
+}
+
+/* A variable's value: %CD%, one the batch file set, or Windows' own; "" when there is none,
+ * as cmd.exe makes it in a batch file. */
+static const char *batch_variable(const Batch *b, const char *name, char *buf, size_t size)
+{
+    if (!pc5_casecmp(name, "CD")) {
+        batch_windows(b, b->cwd, buf, size);
+        return buf;
+    }
+    for (int i = b->var_count - 1; i >= 0; i--)
+        if (!pc5_casecmp(name, b->vars[i].name)) return b->vars[i].value;
+    for (size_t i = 0; i < sizeof(batch_environment) / sizeof(batch_environment[0]); i++)
+        if (!pc5_casecmp(name, batch_environment[i].name)) return batch_environment[i].value;
+    return "";
+}
+
+/* A line with its variables expanded, as cmd.exe does before it runs the line. */
+static void batch_expand(const Batch *b, const char *in, char *out, size_t size)
+{
+    char piece[PC5_PATH + 16], name[128];
+    size_t n = 0;
+
+    for (const char *p = in; *p && n + 1 < size;) {
+        const char *value;
+        if (*p != '%') {
+            out[n++] = *p++;
+            continue;
+        }
+        if (p[1] == '%') {
+            out[n++] = '%';
+            p += 2;
+            continue;
+        }
+        if (p[1] == '*' || (p[1] >= '1' && p[1] <= '9')) {   /* the batch file is given no arguments */
+            p += 2;
+            continue;
+        }
+        if (p[1] == '0' || p[1] == '~') {
+            const char *q = p + 1, *parts = q;
+            size_t count = 0;
+            if (*q == '~') {
+                parts = ++q;
+                while (*q && strchr("dpnxfsDPNXFS", *q)) q++;
+                count = (size_t)(q - parts);
+            }
+            if (*q != '0' || count >= sizeof(name)) {
+                out[n++] = *p++;
+                continue;
+            }
+            memcpy(name, parts, count);
+            name[count] = 0;
+            batch_self(b, name, piece, sizeof(piece));
+            value = piece;
+            p = q + 1;
+        } else {
+            const char *close = strchr(p + 1, '%');
+            size_t len = close ? (size_t)(close - p - 1) : 0;
+            if (!len || len >= sizeof(name) || memchr(p + 1, ':', len) || memchr(p + 1, ' ', len)) {
+                out[n++] = *p++;   /* a lone %, or an edit (%x:~0,3%): as it is */
+                continue;
+            }
+            memcpy(name, p + 1, len);
+            name[len] = 0;
+            value = batch_variable(b, name, piece, sizeof(piece));
+            p = close + 1;
+        }
+        for (; *value && n + 1 < size; value++) out[n++] = *value;
+    }
+    out[n] = 0;
+}
+
+/* The next word of text in out, its quotes taken off; returns where the text goes on. */
+static const char *batch_token(const char *text, char *out, size_t size)
+{
+    size_t n = 0;
+    int quoted = 0;
+
+    while (*text == ' ' || *text == '\t') text++;
+    for (; *text && (quoted || (*text != ' ' && *text != '\t')); text++) {
+        if (*text == '"') {
+            quoted = !quoted;
+            continue;
+        }
+        if (n + 1 < size) out[n++] = *text;
+    }
+    out[n] = 0;
+    return text;
+}
+
+/* 1 when text starts with prefix, letters of either case alike. */
+static int starts_ci(const char *text, const char *prefix, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        if (!text[i] || pc5_lower((unsigned char)text[i]) != pc5_lower((unsigned char)prefix[i])) return 0;
+    return 1;
+}
+
+/* path, as the batch file names it (in the game's folder on Windows, or from base), as a path
+ * inside the game's folder with each name in its own case: a folder when want_dir, else a
+ * file. -1 when it is outside the game's folder or not there. */
+static int batch_resolve(const Batch *b, const char *base, const char *path, int want_dir, char *out, size_t size)
+{
+    char joined[PC5_PATH * 2], found[PC5_PATH], disk[PC5_PATH * 2];
+    size_t w = strlen(b->windows), n = 0;
+    const char *from = path;
+
+    if (starts_ci(path, b->windows, w) && (path[w] == '\\' || path[w] == '/' || !path[w])) {
+        from = path + w;
+        base = "";
+    } else if ((path[0] && path[1] == ':') || path[0] == '\\' || path[0] == '/') {
+        return -1;   /* another drive, or C: outside the game */
+    }
+    if (pc5_format(joined, sizeof(joined), "%s/%s", base, from)) return -1;
+    /* Its names one by one: "." and ".." taken, each found whatever its case. */
+    found[0] = 0;
+    for (char *name = joined, *next; name; name = next) {
+        next = name + strcspn(name, "/\\");
+        if (*next) *next++ = 0; else next = NULL;
+        if (!name[0] || !strcmp(name, ".")) continue;
+        if (!strcmp(name, "..")) {
+            char *slash = strrchr(found, '/');
+            if (!found[0]) return -1;
+            if (slash) *slash = 0; else found[0] = 0;
+            n = strlen(found);
+            continue;
+        }
+        if (pc5_format(disk, sizeof(disk), "%s%s%s/%s", b->top, found[0] ? "/" : "", found, name)) return -1;
+        if (!pc5_exists(disk)) {
+            DIR *dir;
+            struct dirent *entry;
+            int match = 0;
+            disk[strlen(disk) - strlen(name) - 1] = 0;
+            if (!(dir = opendir(disk))) return -1;
+            while ((entry = readdir(dir)))
+                if (!pc5_casecmp(entry->d_name, name)) {
+                    match = !pc5_format(name, strlen(name) + 1, "%s", entry->d_name);
+                    break;
+                }
+            closedir(dir);
+            if (!match) return -1;
+        }
+        if (pc5_format(found + n, sizeof(found) - n, "%s%s", n ? "/" : "", name)) return -1;
+        n = strlen(found);
+    }
+    if (pc5_format(disk, sizeof(disk), "%s%s%s", b->top, found[0] ? "/" : "", found)) return -1;
+    if (want_dir ? !pc5_is_dir(disk) : !pc5_is_file(disk)) return -1;
+    pc5_copy(out, size, found);
+    return 0;
+}
+
+/* The arguments after a program: redirections (>nul, 2>&1) taken out, one space between. */
+static void batch_arguments(const char *in, char *out, size_t size)
+{
+    size_t n = 0;
+    int skip_next = 0;
+
+    out[0] = 0;
+    for (const char *p = in;;) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        const char *start = p;
+        int quoted = 0;
+        while (*p && (quoted || (*p != ' ' && *p != '\t'))) {
+            if (*p == '"') quoted = !quoted;
+            p++;
+        }
+        size_t len = (size_t)(p - start);
+        if (skip_next) {
+            skip_next = 0;
+            continue;
+        }
+        if (start[0] == '>' || start[0] == '<' || (start[0] >= '0' && start[0] <= '9' && len > 1 && start[1] == '>')) {
+            const char *q = start;
+            while (q < p && (*q == '>' || *q == '<' || (*q >= '0' && *q <= '9'))) q++;
+            skip_next = q == p;   /* the operator alone: its file is the next word */
+            continue;
+        }
+        if (n + (n ? 1 : 0) + len + 1 > size) break;
+        if (n) out[n++] = ' ';
+        memcpy(out + n, start, len);
+        n += len;
+        out[n] = 0;
+    }
+}
+
+/* word, a program the batch file names, found from base: as it is, or with .exe after a name
+ * without an extension, as cmd.exe finds it. */
+static int batch_find(const Batch *b, const char *base, const char *word, char *exe, size_t size)
+{
+    char with_exe[PC5_PATH + 8];
+    const char *slash = strrchr(word, '\\');
+
+    if (!batch_resolve(b, base, word, 0, exe, size)) return 0;
+    if (strchr(slash ? slash : word, '.') || pc5_format(with_exe, sizeof(with_exe), "%s.exe", word)) return -1;
+    return batch_resolve(b, base, with_exe, 0, exe, size);
+}
+
+/* A program the batch file starts in cwd, found from there or from the batch file's own
+ * current folder (start /d): kept when it is one of the game's. */
+static void batch_program(Batch *b, const char *line, const char *cwd)
+{
+    char word[PC5_PATH], exe[PC5_PATH];
+    const char *rest = batch_token(line, word, sizeof(word)), *slash, *name;
+
+    if (!word[0]) return;
+    if (batch_find(b, cwd, word, exe, sizeof(exe)) && (!strcmp(cwd, b->cwd) || batch_find(b, b->cwd, word, exe, sizeof(exe))))
+        return;
+    if (!pc5_ends_with_ci(exe, ".exe")) return;
+    slash = strrchr(exe, '/');
+    name = slash ? slash + 1 : exe;
+    int helper = helper_folder(exe) || installer_program(name) || helper_program(name);
+    for (int i = 0; i < 2; i++) {
+        Pc5Batch *slot = i ? &b->game : &b->first;
+        int *have = i ? &b->have_game : &b->have_first;
+        if (*have || (i && helper)) continue;
+        pc5_copy(slot->exe, sizeof(slot->exe), exe);
+        pc5_copy(slot->cwd, sizeof(slot->cwd), cwd);
+        batch_arguments(rest, slot->arguments, sizeof(slot->arguments));
+        *have = 1;
+    }
+}
+
+/* cd, chdir and pushd's folder: the rest of the line, /d and quotes taken off. */
+static void batch_cd(Batch *b, const char *arg)
+{
+    char path[PC5_PATH], dir[PC5_PATH];
+    size_t n = 0;
+    const char *p;
+
+    while (*arg == ' ' || *arg == '\t') arg++;
+    if (arg[0] == '/' && pc5_lower((unsigned char)arg[1]) == 'd' && (arg[2] == ' ' || arg[2] == '\t' || arg[2] == '"'))
+        arg += 2;
+    for (; *arg && n + 1 < sizeof(path); arg++)
+        if (*arg != '"') path[n++] = *arg;
+    while (n && (path[n - 1] == ' ' || path[n - 1] == '\t')) n--;
+    path[n] = 0;
+    for (p = path; *p == ' ' || *p == '\t'; p++) {}
+    if (*p && !batch_resolve(b, b->cwd, p, 1, dir, sizeof(dir))) pc5_copy(b->cwd, sizeof(b->cwd), dir);
+}
+
+/* set NAME=value and set "NAME=value"; set /a and set /p are passed over. */
+static void batch_set(Batch *b, const char *arg)
+{
+    char text[sizeof(b->vars[0].name) + sizeof(b->vars[0].value)], *name, *value, *equals;
+    size_t n;
+
+    while (*arg == ' ' || *arg == '\t') arg++;
+    if (*arg == '/' || !*arg) return;
+    pc5_copy(text, sizeof(text), arg);
+    name = text;
+    if (*name == '"') {
+        char *close = strrchr(++name, '"');
+        if (close) *close = 0;
+    }
+    if (!(equals = strchr(name, '=')) || equals == name) return;
+    *equals = 0;
+    value = equals + 1;
+    for (n = strlen(name); n && (name[n - 1] == ' ' || name[n - 1] == '\t'); n--) name[n - 1] = 0;
+    for (n = strlen(value); n && (value[n - 1] == ' ' || value[n - 1] == '\t'); n--) value[n - 1] = 0;
+    if (!name[0] || strlen(name) >= sizeof(b->vars[0].name)) return;
+    int i = 0;
+    while (i < b->var_count && pc5_casecmp(b->vars[i].name, name)) i++;
+    if (i == b->var_count) {
+        if (b->var_count == BATCH_VARS) return;
+        b->var_count++;
+    }
+    pc5_copy(b->vars[i].name, sizeof(b->vars[i].name), name);
+    pc5_copy(b->vars[i].value, sizeof(b->vars[i].value), value);
+}
+
+/* start ["title"] [/d folder] [/b /wait /min ...] program [arguments] */
+static void batch_start(Batch *b, const char *arg)
+{
+    char word[PC5_PATH], cwd[PC5_PATH], dir[PC5_PATH];
+
+    pc5_copy(cwd, sizeof(cwd), b->cwd);
+    while (*arg == ' ' || *arg == '\t') arg++;
+    if (*arg == '"') arg = batch_token(arg, word, sizeof(word));   /* the window's title */
+    for (;;) {
+        while (*arg == ' ' || *arg == '\t') arg++;
+        if (*arg != '/') break;
+        arg = batch_token(arg, word, sizeof(word));
+        if (pc5_lower((unsigned char)word[1]) == 'd' && (!word[2] || word[2] == ':' || !strchr("ae", pc5_lower((unsigned char)word[2])))) {
+            const char *folder = word + 2;
+            if (!*folder) {
+                arg = batch_token(arg, word, sizeof(word));
+                folder = word;
+            }
+            if (!batch_resolve(b, b->cwd, folder, 1, dir, sizeof(dir))) pc5_copy(cwd, sizeof(cwd), dir);
+        } else if (!pc5_casecmp(word, "/affinity") || !pc5_casecmp(word, "/node")) {
+            arg = batch_token(arg, word, sizeof(word));   /* its value */
+        }
+    }
+    batch_program(b, arg, cwd);
+}
+
+static void batch_command(Batch *b, char *cmd)
+{
+    char word[PC5_PATH], arg[PC5_PATH * 2];
+    const char *rest;
+    size_t n;
+
+    while (*cmd == ' ' || *cmd == '\t' || *cmd == '@' || *cmd == '(') cmd++;
+    n = strlen(cmd);
+    while (n && (cmd[n - 1] == ' ' || cmd[n - 1] == '\t' || cmd[n - 1] == '\r')) cmd[--n] = 0;
+    if (n && cmd[n - 1] == ')' && !strchr(cmd, '(')) cmd[--n] = 0;   /* the end of a ( ) block */
+    if (!*cmd || *cmd == ':') return;                                   /* labels and :: notes */
+    rest = batch_token(cmd, word, sizeof(word));
+    if (!pc5_casecmp(word, "rem")) return;
+    if (!pc5_casecmp(word, "cd") || !pc5_casecmp(word, "chdir")) {
+        batch_cd(b, rest);
+    } else if (starts_ci(word, "cd", 2) && (word[2] == '.' || word[2] == '\\' || word[2] == '/')) {
+        if (!pc5_format(arg, sizeof(arg), "%s%s", word + 2, rest)) batch_cd(b, arg);   /* cd.. */
+    } else if (!pc5_casecmp(word, "pushd")) {
+        if (b->pushes < BATCH_PUSHES) pc5_copy(b->pushed[b->pushes++], PC5_PATH, b->cwd);
+        batch_cd(b, rest);
+    } else if (!pc5_casecmp(word, "popd")) {
+        if (b->pushes) pc5_copy(b->cwd, sizeof(b->cwd), b->pushed[--b->pushes]);
+    } else if (!pc5_casecmp(word, "set")) {
+        batch_set(b, rest);
+    } else if (!pc5_casecmp(word, "start")) {
+        batch_start(b, rest);
+    } else if (!pc5_casecmp(word, "call")) {
+        batch_program(b, rest, b->cwd);
+    } else {
+        batch_program(b, cmd, b->cwd);
+    }
+}
+
+/* One line: its commands, split at &, &&, | and || outside quotes, ^ escaping the next sign. */
+static void batch_line(Batch *b, const char *line)
+{
+    size_t n = 0;
+    int quoted = 0;
+
+    for (const char *p = line;; p++) {
+        char c = *p;
+        if (c == '"') quoted = !quoted;
+        if (!c || (!quoted && (c == '&' || c == '|') && !(n && (b->command[n - 1] == '>' || b->command[n - 1] == '<')))) {
+            b->command[n] = 0;
+            batch_command(b, b->command);
+            n = 0;
+            if (!c) break;
+            while (p[1] == '&' || p[1] == '|') p++;
+            continue;
+        }
+        if (!quoted && c == '^' && p[1]) c = *++p;
+        if (n + 1 < sizeof(b->command)) b->command[n++] = c;
+    }
+}
+
+int pc5_batch_read(const char *top, const char *batch, Pc5Batch *out)
+{
+    char path[PC5_PATH];
+    const char *name, *slash;
+    size_t top_len = strlen(top);
+    Pc5Buf text = { 0 };
+    Batch *b;
+    int status = -1;
+
+    memset(out, 0, sizeof(*out));
+    while (top_len > 1 && top[top_len - 1] == '/') top_len--;
+    for (name = top + top_len; name > top && name[-1] != '/'; name--) {}
+    if (!(b = pc5_alloc(sizeof(*b)))) return -1;
+    b->top = top;
+    if (pc5_format(b->windows, sizeof(b->windows), "C:\\Games\\%.*s", (int)(top + top_len - name), name) ||
+        pc5_format(b->file, sizeof(b->file), "%s", batch) || pc5_join(path, sizeof(path), top, batch) ||
+        pc5_read_file(path, &text, 64 * 1024) || pc5_buf_terminate(&text))
+        goto out;
+    /* It starts in its own folder, as when it is opened on Windows. */
+    pc5_copy(b->cwd, sizeof(b->cwd), batch);
+    slash = strrchr(b->cwd, '/');
+    if (slash) b->cwd[slash - b->cwd] = 0; else b->cwd[0] = 0;
+    char *at = (char *)text.data;
+    if (!strncmp(at, "\xef\xbb\xbf", 3)) at += 3;   /* a UTF-8 mark */
+    for (char *next; at; at = next) {
+        next = strchr(at, '\n');
+        if (next) *next++ = 0;
+        size_t len = strlen(at);
+        if (len && at[len - 1] == '\r') at[len - 1] = 0;
+        pc5_copy(b->line, sizeof(b->line), at);
+        batch_expand(b, b->line, b->expanded, sizeof(b->expanded));
+        batch_line(b, b->expanded);
+    }
+    if (b->have_game) *out = b->game;
+    else if (b->have_first) *out = b->first;
+    else goto out;
+    status = 0;
+out:
+    pc5_buf_free(&text);
+    pc5_free(b);
+    return status;
 }

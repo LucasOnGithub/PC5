@@ -206,7 +206,12 @@ int pc5_profile_text_at(const char *id, const Pc5Info *info, const char *argumen
 {
     char exe[PC5_PATH + 32], cwd[PC5_PATH + 32], options[600] = "", input[1600], dlls[260];
     Pc5Controls defaults;
-    const char *graphics = info->api == PC5_API_OPENGL ? "opengl" : info->api <= PC5_API_DDRAW ? "gdi" : "dxvk";
+    /* DirectDraw through Wine's own Direct3D (wined3d), which draws with OpenGL: Mesa Zink, as
+     * for OpenGL games. Without OpenGL a DirectDraw game's Direct3D (7 and older) can't start
+     * and its 2D is drawn on the CPU. Plain Windows drawing stays with Wine itself. */
+    const char *graphics = info->api == PC5_API_OPENGL || info->api == PC5_API_DDRAW ? "opengl"
+                         : info->api == PC5_API_GDI                                  ? "gdi"
+                                                                                     : "dxvk";
     /* Direct3D 8 to 11 and DXGI through DXVK, as prospero-win's own profiles. Direct3D 12
      * through VKD3D-Proton only for a game whose program draws with it; any other game gets
      * Wine's own d3d12, as on prospero-win, so a library that merely tries Direct3D 12 (GTA
@@ -344,6 +349,49 @@ int pc5_game_set_program(const char *root, const char *id, const Pc5Folder *fold
     return pc5_profile_refresh(root, id, error, size);
 }
 
+/* What Wine starts for a PC5 game: its program, or the one its batch file starts, with the
+ * batch file's arguments and its working folder (a Windows path, "" for the program's own). */
+static int start_program(const char *root, const char *id, const Pc5Info *info, Pc5Info *program, char *arguments,
+                         size_t arguments_size, char *work, size_t work_size, char *error, size_t size)
+{
+    char top[PC5_PATH], own[PC5_PATH];
+    Pc5Batch *batch;
+    char *slash;
+
+    *program = *info;
+    arguments[0] = work[0] = 0;
+    if (!pc5_is_batch(info->exe)) return 0;
+    if (!(batch = pc5_alloc(sizeof(*batch)))) {
+        snprintf(error, size, "PC5 is out of memory.");
+        return -1;
+    }
+    if (pc5_format(top, sizeof(top), "%s/prefixes/%s/drive_c/Games/%s", root, id, info->folder) ||
+        pc5_batch_read(top, info->exe, batch)) {
+        snprintf(error, size, "%.200s doesn't start any of the game's programs.", info->exe);
+        pc5_free(batch);
+        return -1;
+    }
+    pc5_copy(program->exe, sizeof(program->exe), batch->exe);
+    pc5_copy(arguments, arguments_size, batch->arguments);
+    pc5_copy(own, sizeof(own), batch->exe);
+    slash = strrchr(own, '/');
+    if (slash) *slash = 0; else own[0] = 0;
+    if (strcmp(own, batch->cwd)) windows_path(info->folder, batch->cwd, 1, work, work_size);
+    pc5_free(batch);
+    return 0;
+}
+
+int pc5_game_program(const char *root, const char *id, char *out, size_t size)
+{
+    Pc5Info info, program;
+    char arguments[512], work[PC5_PATH + 32], error[PC5_ERROR];
+
+    if (pc5_info_read(root, id, &info) ||
+        start_program(root, id, &info, &program, arguments, sizeof(arguments), work, sizeof(work), error, sizeof(error)))
+        return -1;
+    return pc5_format(out, size, "%s/prefixes/%s/drive_c/Games/%s/%s", root, id, info.folder, program.exe);
+}
+
 /* profiles.lst, when there is one: the line for file added or taken out. */
 static int index_update(const char *root, const char *file, int add)
 {
@@ -374,9 +422,10 @@ static int index_update(const char *root, const char *file, int add)
 
 int pc5_profile_refresh(const char *root, const char *id, char *error, size_t size)
 {
-    Pc5Info info;
+    Pc5Info info, program;
     Pc5Controls controls;
-    char arguments[512], path[PC5_PATH], file[PC5_ID + 16], folder[PC5_PATH], own[256];
+    char arguments[512], options[512], work[PC5_PATH + 32], path[PC5_PATH], file[PC5_ID + 16], folder[PC5_PATH],
+         own[256];
     static char text[4096];
     Pc5Buf old = { 0 };
     int status = 0;
@@ -385,24 +434,35 @@ int pc5_profile_refresh(const char *root, const char *id, char *error, size_t si
         snprintf(error, size, "PC5's notes on this game are missing.");
         return -1;
     }
+    /* A game started from a batch file: the program it starts, with its arguments and folder. */
+    if (start_program(root, id, &info, &program, arguments, sizeof(arguments), work, sizeof(work), error, size))
+        return -1;
     /* A game installed as drawing with Windows itself may load Direct3D or Vulkan at run
      * time (before 1.6.1 PC5 didn't look): what its program names, kept in its notes. */
     if (info.api == PC5_API_GDI &&
-        !pc5_format(path, sizeof(path), "%s/prefixes/%s/drive_c/Games/%s/%s", root, id, info.folder, info.exe)) {
+        !pc5_format(path, sizeof(path), "%s/prefixes/%s/drive_c/Games/%s/%s", root, id, info.folder, program.exe)) {
         uint32_t named = pc5_pe_named_libraries(path) & PC5_IMPORT_DRAWING;
         if (named) {
-            info.api = pc5_api_from_imports(named);
+            info.api = program.api = pc5_api_from_imports(named);
             if (!pc5_info_text(&info, text, sizeof(text)) &&
                 !pc5_format(path, sizeof(path), "%s/prefixes/%s/pc5/info.txt", root, id))
                 pc5_write_file(path, text, strlen(text));
         }
     }
-    launch_options(root, id, &info, arguments, sizeof(arguments));
+    /* launch.txt beside the program chosen (a batch file's options come first). */
+    launch_options(root, id, &info, options, sizeof(options));
+    if (options[0]) {
+        size_t n = strlen(arguments);
+        if (pc5_format(arguments + n, sizeof(arguments) - n, "%s%s", n ? " " : "", options)) {
+            snprintf(error, size, "The game's launch options are too long: 511 characters at most.");
+            return -1;
+        }
+    }
     pc5_controls_load(root, id, &controls);
-    program_folder(root, id, &info, folder, sizeof(folder));
+    program_folder(root, id, &program, folder, sizeof(folder));
     pc5_own_dlls(folder, own, sizeof(own));
     snprintf(file, sizeof(file), "%s.profile", id);
-    if (pc5_profile_text(id, &info, arguments, &controls, own, text, sizeof(text)) ||
+    if (pc5_profile_text_at(id, &program, arguments, &controls, own, work[0] ? work : NULL, text, sizeof(text)) ||
         pc5_format(path, sizeof(path), "%s/profiles/%s", root, file)) {
         snprintf(error, size, "The game's path is too long for Windows.");
         return -1;

@@ -122,6 +122,15 @@ PC5 says "*Game* starts *program* now". The change takes effect the next time yo
 
 Choose the game itself rather than a launcher that starts it: Wine on the console doesn't start a second program from a launcher. Change program only works for games PC5 installed.
 
+### Games that start from a .bat file
+
+Some games start from a batch file (`.bat` or `.cmd`) that starts the game's program with options it needs. The console runs one program at a time, so it can't run the batch file itself: PC5 reads it and starts the program it starts, with its options, in the folder it would start it in.
+
+- A batch file that starts one of the game's programs is listed with the programs, with that program's bits and graphics. When the game's folder has one such batch file, PC5 picks it, unless its name says it is another way to start (safe mode, windowed, a benchmark).
+- PC5 follows `cd`, `pushd`, `set` and `start` (with `/d`), and fills in `%~dp0`, `%CD%` and the variables the batch file sets. Everything else in it (copying files, registry changes, messages) is left out.
+- PC5 reads the batch file each time the game starts, so a change to it takes effect at the next start.
+- Don't turn the batch file into an `.exe` with a converter: such a program starts the batch file as a second program, which the console can't run.
+
 ## Uninstalling a game
 
 There are two ways:
@@ -146,7 +155,8 @@ PC5 handles every game the same way. It reads the game's program to see whether 
 | Direct3D 12 | VKD3D-Proton 3.0.1 |
 | Vulkan | RADV directly |
 | OpenGL | Mesa Zink |
-| DirectDraw or plain Windows drawing | Wine itself |
+| DirectDraw (and its Direct3D 7 and older) | Wine's own Direct3D, on Mesa Zink |
+| Plain Windows drawing | Wine itself |
 | .NET Framework | Wine Mono 11.3.0 |
 
 Games that write text with Windows' fonts get Liberation for Arial, Times New Roman and Courier New (made to take the same space), and Droid Sans Fallback for Windows' Chinese, Japanese and Korean fonts.

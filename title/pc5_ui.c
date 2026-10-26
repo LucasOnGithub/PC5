@@ -610,6 +610,15 @@ static void start_review_cover(Pc5Ui *ui)
 /* The cover of *choice for a folder, or the card made from its program's
  * icon and its name (choice -1, or when no choice can be had: those that
  * can't are taken out of the search). */
+/* The program a folder's choice starts, on disk: a batch file's program, or itself. */
+static int folder_program(const Pc5Folder *folder, int exe, char *out, size_t size)
+{
+    Pc5Batch batch;
+    const char *path = folder->exes[exe].path;
+    if (pc5_is_batch(path) && !pc5_batch_read(folder->path, path, &batch)) path = batch.exe;
+    return pc5_join(out, size, folder->path, path);
+}
+
 static void make_cover(Pc5Ui *ui, const Pc5Folder *folder, int exe, Pc5CoverSearch *search, int *choice_io,
                        Pc5Image *cover, uint32_t *tint, char *source, size_t source_size, Pc5Buf *original)
 {
@@ -633,7 +642,7 @@ static void make_cover(Pc5Ui *ui, const Pc5Folder *folder, int exe, Pc5CoverSear
     if (!cover->px) {
         Pc5Image icon = { 0 };
         char program[PC5_PATH];
-        if (exe >= 0 && exe < folder->exe_count && !pc5_join(program, sizeof(program), folder->path, folder->exes[exe].path))
+        if (exe >= 0 && exe < folder->exe_count && !folder_program(folder, exe, program, sizeof(program)))
             pc5_pe_icon(program, &icon);
         pc5_make_card(&ui->fonts, folder->name, icon.px ? &icon : NULL, cover, tint);
         pc5_image_free(&icon);
@@ -666,7 +675,9 @@ static void fetch_review_cover(Pc5Ui *ui)
 
 static void hint_for_folder(const Pc5Folder *folder, int exe, Pc5CoverHint *hint)
 {
-    const char *path = exe >= 0 && exe < folder->exe_count ? folder->exes[exe].path : "";
+    char program[PC5_PATH] = "";
+    if (exe >= 0 && exe < folder->exe_count) folder_program(folder, exe, program, sizeof(program));
+    const char *path = program;
     const char *name = strrchr(path, '/') ? strrchr(path, '/') + 1 : path;
 
     memset(hint, 0, sizeof(*hint));
@@ -1922,13 +1933,10 @@ int pc5_ui_update(Pc5Ui *ui, const Pc5Input *input, uint64_t now_ms)
             /* A .NET game started the first time: Wine Mono's runtime is copied to the
              * console first, a step each frame, under "Starting". */
             if (ui->runtime_state == 0) {
-                Pc5Info info;
                 char program[PC5_PATH];
                 ui->runtime_state = 2;
                 if (index >= 0 && ui->library.games[index].pc5 && ui->app[0] &&
-                    !pc5_info_read(ui->root, ui->launch_id, &info) &&
-                    !pc5_format(program, sizeof(program), "%s/prefixes/%s/drive_c/Games/%s/%s", ui->root, ui->launch_id,
-                                info.folder, info.exe)) {
+                    !pc5_game_program(ui->root, ui->launch_id, program, sizeof(program))) {
                     int begun = pc5_runtime_begin(&ui->runtime, ui->root, ui->app, program);
                     if (begun < 0) {
                         snprintf(title, sizeof(title), "%s can't start", ui->library.games[index].title);

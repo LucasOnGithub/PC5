@@ -85,6 +85,9 @@ int pc5_profile_refresh(const char *root, const char *id, char *error, size_t si
  * there, or a fourth hand-off in a row. */
 int pc5_handoff_env(const char *root, const char *id, char *file, size_t file_size, char *dir, size_t dir_size);
 int pc5_handoff_take(const char *root, const char *id, char *error, size_t size);
+/* The program a PC5 game starts, on the console: its program, or the one its batch file
+ * (.bat or .cmd) starts. 0, or -1 when there is none. */
+int pc5_game_program(const char *root, const char *id, char *out, size_t size);
 /* The folder PC5 copied a game into (prefixes/<id>/drive_c/Games/<folder>). */
 int pc5_game_folder(const char *root, const char *id, char *out, size_t size);
 /* Makes a PC5 game start another of its programs (folder: its copy, read with
