@@ -67,7 +67,7 @@ def answers(body: str) -> dict:
     line, as a report edited by hand may have it ("### Issue #43"), counts too."""
     fields, label, lines = {}, None, []
     for line in body.replace("\r\n", "\n").split("\n"):
-        heading = re.match(r"^###\s+(.+?)\s*$", line)
+        heading = re.match(r"^ {0,3}###\s+(.+?)\s*$", line)   # Markdown allows 3 spaces before it
         if heading:
             if label is not None:
                 fields[label] = "\n".join(lines).strip()
