@@ -38,36 +38,27 @@ jobs:
           ln -s /mnt/pc5/build .build
           sudo fallocate -l 8G /mnt/pc5/swap && sudo chmod 600 /mnt/pc5/swap
           sudo mkswap /mnt/pc5/swap >/dev/null && sudo swapon /mnt/pc5/swap
-          df -h / /mnt | tail -2; free -g | head -2
+          df -h / /mnt; free -g
 
-      - name: 1/12 Packages
-        timeout-minutes: 15
-        # Only Ubuntu's own sources, without man-db's index (rebuilt after every package). A
-        # download that stalls, as GitHub's machines' sometimes do, is stopped after two
-        # minutes and tried again, up to three times.
+      - name: Packages
+        timeout-minutes: 30
+        # Only Ubuntu's own sources (the machine's others, Microsoft's and the like, can stall a
+        # download), short timeouts with retries, and without man-db's index, which is rebuilt
+        # after every package.
         run: |
           mkdir -p .build/logs
-          bash tools/ci-step.sh 1
-          sudo rm -f /var/lib/man-db/auto-update
-          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete
-          apt="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Dpkg::Use-Pty=0"
-          try() { # what, command...
-            local what=$1; shift
-            for attempt in 1 2 3; do
-              echo "$what (try $attempt)"
-              if sudo env DEBIAN_FRONTEND=noninteractive timeout 120 "$@" >> .build/logs/packages.log 2>&1; then return 0; fi
-              echo "  stopped or failed; trying again"
-              sudo killall -q apt-get dpkg 2>/dev/null; sleep 5
-            done
-            tail -30 .build/logs/packages.log; return 1
-          }
-          try "Package lists" apt-get update -q $apt
-          try "Installing $(wc -w < tools/packages.txt) packages" \
-            apt-get install -y -q --no-install-recommends $apt -o DPkg::Lock::Timeout=60 $(cat tools/packages.txt)
-          echo "✓ Packages done"
+          {
+            sudo rm -f /var/lib/man-db/auto-update
+            sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete
+            apt="-o Acquire::Retries=5 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+            sudo apt-get update -q $apt
+            sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends $apt \
+              -o Dpkg::Use-Pty=0 -o DPkg::Lock::Timeout=300 $(cat tools/packages.txt)
+          } 2>&1 | tee .build/logs/packages.log
+          exit "${PIPESTATUS[0]}"
 
-      - name: 2/12 Sources
-        run: bash tools/ci-step.sh 2 sources
+      - name: Sources
+        run: bash tools/build.sh sources
 
       - name: Cache keys
         id: keys
@@ -91,27 +82,27 @@ jobs:
           path: .build/dxvk
           key: ${{ steps.keys.outputs.dxvk }}
 
-      - name: 3/12 Title (PC5 itself)
-        run: bash tools/ci-step.sh 3 title
+      - name: Title
+        run: bash tools/build.sh title
 
-      - name: 4/12 RADV (the PS5's Vulkan driver)
-        run: bash tools/ci-step.sh 4 radv
+      - name: RADV
+        run: bash tools/build.sh radv
 
-      - name: 5/12 Wine for this computer
-        run: bash tools/ci-step.sh 5 hostwine
+      - name: Wine for this computer
+        run: bash tools/build.sh hostwine
 
-      - name: 6/12 Wine for the PS5
-        run: bash tools/ci-step.sh 6 wineps5
+      - name: Wine for the PS5
+        run: bash tools/build.sh wineps5
 
-      - name: 7/12 32-bit games' CPU
-        run: bash tools/ci-step.sh 7 cpu
+      - name: 32-bit games' CPU
+        run: bash tools/build.sh cpu
 
-      - name: 8/12 DXVK
-        run: bash tools/ci-step.sh 8 dxvk
+      - name: DXVK
+        run: bash tools/build.sh dxvk
 
-      - name: 9/12 Zink
+      - name: Zink
         if: steps.zink.outputs.cache-hit != 'true'
-        run: bash tools/ci-step.sh 9 zink
+        run: bash tools/build.sh zink
 
       - name: Keep Zink
         if: steps.zink.outputs.cache-hit != 'true'
@@ -127,13 +118,12 @@ jobs:
           path: .build/dxvk
           key: ${{ steps.keys.outputs.dxvk }}
 
-      - name: 10/12 Package, app and sources
-        run: bash tools/ci-step.sh 10 package app bundle
+      - name: Package, app and sources
+        run: bash tools/build.sh package app bundle
 
-      - name: 11/12 The archives
+      - name: The archives
         id: archives
         run: |
-          bash tools/ci-step.sh 11
           mono=$(sed -n 's/^MONO_VERSION=//p' tools/build.sh)
           cp ".build/downloads/wine-mono-$mono-src.tar.xz" "$PC5_RELEASE/"
           version=$(sed -n 's/^#define PC5_VERSION "\(.*\)"/\1/p' title/pc5.h)
@@ -148,7 +138,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: 12/12 Draft release
+      - name: Draft release
         if: inputs.draft_release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -156,7 +146,6 @@ jobs:
         # Notes from release-notes/<version>.md. A draft left by an earlier run is replaced;
         # a published release is never touched.
         run: |
-          bash tools/ci-step.sh 12
           tag="v$VERSION"
           state=$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null || echo none)
           if [ "$state" = false ]; then
