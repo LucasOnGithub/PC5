@@ -168,9 +168,9 @@ jobs:
 
       - name: The archives
         id: archives
+        # The sources step (bundle) has already put Wine Mono's source beside the other two.
         run: |
           mono=$(sed -n 's/^MONO_VERSION=//p' tools/build.sh)
-          cp ".build/downloads/wine-mono-$mono-src.tar.xz" "$PC5_RELEASE/"
           version=$(sed -n 's/^#define PC5_VERSION "\(.*\)"/\1/p' title/pc5.h)
           echo "version=$version" >> "$GITHUB_OUTPUT"
           cd "$PC5_RELEASE"
