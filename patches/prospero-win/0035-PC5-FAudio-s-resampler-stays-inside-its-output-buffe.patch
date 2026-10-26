@@ -1,5 +1,5 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: prospero-win <prospero-win@invalid>
+From: Leo Lobato <leo@lobato.org>
 Date: Sat, 17 Oct 2026 09:40:48 +0200
 Subject: [PATCH] PC5: FAudio's resampler stays inside its output buffer (Wine
  patch 0972)
@@ -16,7 +16,6 @@ inside the heap. It now plays on.
 - FAudio is a static library, so every `xaudio2_*` and `xactengine*` module is now cross-built (`PE_MODULES`). The staging
 test reads every `PE_MODULES` line and checks that XAudio2 and XACT are built for both architectures.
 
-Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  PUBLICATION_ALLOWLIST.txt                     |  1 +
  docs/WINE_PS5_BUILD.md                        |  1 +

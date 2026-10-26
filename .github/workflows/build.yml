@@ -1,0 +1,169 @@
+# Builds PC5 from source on GitHub's machines (tools/build.sh, every step) and, when asked,
+# makes a draft release with its three archives for the maintainer to check and publish.
+# Run it from the Actions tab: Build › Run workflow.
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      draft_release:
+        description: "Make a draft release v<PC5_VERSION> with the archives (otherwise they are kept as the run's artifacts)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    env:
+      PC5_RELEASE: /mnt/pc5/release
+      PC5_ZINK_JOBS: "2"
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Room to build
+        # The build needs about 30 GB and Zink's link about 8 GB of memory: the machine's
+        # second disk (/mnt) holds the build and a swap file, and unused tools make room.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo mkdir -p /mnt/pc5/build /mnt/pc5/release
+          sudo chown -R "$USER" /mnt/pc5
+          ln -s /mnt/pc5/build .build
+          sudo fallocate -l 8G /mnt/pc5/swap && sudo chmod 600 /mnt/pc5/swap
+          sudo mkswap /mnt/pc5/swap >/dev/null && sudo swapon /mnt/pc5/swap
+          df -h / /mnt; free -g
+
+      - name: Packages
+        run: |
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends $(cat tools/packages.txt)
+
+      - name: Sources
+        run: bash tools/build.sh sources
+
+      - name: Cache keys
+        id: keys
+        # Zink: Mesa and llvm-mingw as prospero-win pins them. DXVK: its commit with patches/dxvk
+        # (step dxvk itself rebuilds when the patched source differs from the one kept).
+        run: |
+          pw=.build/prospero-win
+          echo "zink=zink-$(cat "$pw/tools/build_mesa_zink.sh" "$pw/tools/mesa_zink_manifest.py" | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          echo "dxvk=dxvk-$(git -C .build/dxvk-source rev-parse HEAD)-$(sed -n 's/^DXVK_NAME=//p' tools/build.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Zink
+        id: zink
+        uses: actions/cache/restore@v4
+        with:
+          path: .build/mesa-zink/artifacts
+          key: ${{ steps.keys.outputs.zink }}
+
+      - name: Restore DXVK
+        uses: actions/cache/restore@v4
+        with:
+          path: .build/dxvk
+          key: ${{ steps.keys.outputs.dxvk }}
+
+      - name: Title
+        run: bash tools/build.sh title
+
+      - name: RADV
+        run: bash tools/build.sh radv
+
+      - name: Wine for this computer
+        run: bash tools/build.sh hostwine
+
+      - name: Wine for the PS5
+        run: bash tools/build.sh wineps5
+
+      - name: 32-bit games' CPU
+        run: bash tools/build.sh cpu
+
+      - name: DXVK
+        run: bash tools/build.sh dxvk
+
+      - name: Zink
+        if: steps.zink.outputs.cache-hit != 'true'
+        run: bash tools/build.sh zink
+
+      - name: Keep Zink
+        if: steps.zink.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .build/mesa-zink/artifacts
+          key: ${{ steps.keys.outputs.zink }}
+
+      - name: Keep DXVK
+        uses: actions/cache/save@v4
+        continue-on-error: true   # already kept under this key
+        with:
+          path: .build/dxvk
+          key: ${{ steps.keys.outputs.dxvk }}
+
+      - name: Package, app and sources
+        run: bash tools/build.sh package app bundle
+
+      - name: The archives
+        id: archives
+        run: |
+          mono=$(sed -n 's/^MONO_VERSION=//p' tools/build.sh)
+          cp ".build/downloads/wine-mono-$mono-src.tar.xz" "$PC5_RELEASE/"
+          version=$(sed -n 's/^#define PC5_VERSION "\(.*\)"/\1/p' title/pc5.h)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          cd "$PC5_RELEASE"
+          ls -l PPSA11018.zip PPSA11018-sources.tar.xz "wine-mono-$mono-src.tar.xz"
+          sha256sum PPSA11018.zip PPSA11018-sources.tar.xz "wine-mono-$mono-src.tar.xz" | tee SHA256SUMS.txt
+          {
+            echo "### PC5 $version"
+            echo '```'
+            cat SHA256SUMS.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Draft release
+        if: inputs.draft_release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.archives.outputs.version }}
+        # Notes from release-notes/<version>.md. A draft left by an earlier run is replaced;
+        # a published release is never touched.
+        run: |
+          tag="v$VERSION"
+          state=$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null || echo none)
+          if [ "$state" = false ]; then
+            echo "::error::$tag is already published; raise PC5_VERSION in title/pc5.h for a new release"
+            exit 1
+          fi
+          [ "$state" = none ] || gh release delete "$tag" --yes
+          notes="release-notes/$VERSION.md"
+          [ -f "$notes" ] || { echo "PC5 $VERSION" > "$RUNNER_TEMP/notes.md"; notes=$RUNNER_TEMP/notes.md; }
+          mono=$(sed -n 's/^MONO_VERSION=//p' tools/build.sh)
+          gh release create "$tag" --draft --target "$GITHUB_SHA" --title "PC5 $VERSION" --notes-file "$notes" \
+            "$PC5_RELEASE/PPSA11018.zip" "$PC5_RELEASE/PPSA11018-sources.tar.xz" "$PC5_RELEASE/wine-mono-$mono-src.tar.xz"
+          echo "Draft release $tag is ready: check it and publish it from the Releases page." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the archives
+        if: ${{ !inputs.draft_release }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: PC5-${{ steps.archives.outputs.version }}
+          path: |
+            /mnt/pc5/release/PPSA11018.zip
+            /mnt/pc5/release/PPSA11018-sources.tar.xz
+            /mnt/pc5/release/wine-mono-*-src.tar.xz
+          compression-level: 0
+          retention-days: 7
+
+      - name: The logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: /mnt/pc5/build/logs/
+          retention-days: 14
