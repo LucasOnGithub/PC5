@@ -1,0 +1,120 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bornaradusin <bornaradusin@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 22:40:00 +0000
+Subject: [PATCH] PC5: sound with more than 8 channels, folded to stereo
+
+A game whose sound engine asks Windows for spatial audio (7.1.4, 12
+channels: CRIWARE, among others) had its stream refused by the PS5's
+audio driver, which took 8 channels at most, and played nothing. The
+mixer now takes every Windows speaker position (18 channels); more than
+8 only with a channel mask naming that many speakers. The height
+speakers fold into their sides, as the surround ones do.
+---
+ src/pw_audio_mix.c        |  8 ++++++--
+ src/pw_audio_mix.h        |  6 ++++--
+ tests/test_pw_audio_mix.c | 18 +++++++++++++++++-
+ 3 files changed, 27 insertions(+), 5 deletions(-)
+
+diff --git a/src/pw_audio_mix.c b/src/pw_audio_mix.c
+index aa24a6a..fe35c21 100644
+--- a/src/pw_audio_mix.c
++++ b/src/pw_audio_mix.c
+@@ -18,7 +18,7 @@ enum {
+ #define CENTER (FRONT_CENTER|BACK_CENTER|TOP_CENTER|TOP_FRONT_CENTER|TOP_BACK_CENTER)
+ 
+ /* The layout a format without a usable mask has (Wine's OSS driver, get_channel_mask). */
+-static const uint32_t usual_mask[PW_AUDIO_MIX_MAX_CHANNELS+1]={
++static const uint32_t usual_mask[PW_AUDIO_MIX_USUAL_CHANNELS+1]={
+     0,FRONT_CENTER,FRONT_LEFT|FRONT_RIGHT,FRONT_LEFT|FRONT_RIGHT|LOW_FREQUENCY,
+     FRONT_LEFT|FRONT_RIGHT|BACK_LEFT|BACK_RIGHT,
+     FRONT_LEFT|FRONT_RIGHT|BACK_LEFT|BACK_RIGHT|LOW_FREQUENCY,
+@@ -40,6 +40,9 @@ int pw_audio_mix_format_check(const PwAudioMixFormat *format)
+     if(format->channels<1 || format->channels>PW_AUDIO_MIX_MAX_CHANNELS ||
+        format->rate<PW_AUDIO_MIX_MIN_RATE || format->rate>PW_AUDIO_MIX_MAX_RATE)
+         return PW_ERR_UNSUPPORTED;
++    /* more channels than the usual layouts have: only with a mask naming their speakers */
++    if(format->channels>PW_AUDIO_MIX_USUAL_CHANNELS && bit_count(format->channel_mask)<format->channels)
++        return PW_ERR_UNSUPPORTED;
+     if(format->encoding==PW_AUDIO_MIX_PCM) {
+         if(format->bits!=8 && format->bits!=16 && format->bits!=24 && format->bits!=32)
+             return PW_ERR_UNSUPPORTED;
+@@ -53,7 +56,8 @@ static void fold_weights(PwAudioMixStream *stream)
+ {
+     const PwAudioMixFormat *format=&stream->format;
+     uint32_t mask=format->channel_mask;
+-    if(bit_count(mask)<format->channels)mask=usual_mask[format->channels];
++    if(bit_count(mask)<format->channels && format->channels<=PW_AUDIO_MIX_USUAL_CHANNELS)
++        mask=usual_mask[format->channels];
+     for(unsigned channel=0;channel<format->channels;channel++) {
+         uint32_t speaker=mask&-mask;
+         float left=0,right=0;
+diff --git a/src/pw_audio_mix.h b/src/pw_audio_mix.h
+index d689c53..ae79e28 100644
+--- a/src/pw_audio_mix.h
++++ b/src/pw_audio_mix.h
+@@ -19,7 +19,9 @@
+ 
+ enum {
+     PW_AUDIO_MIX_RATE=48000,
+-    PW_AUDIO_MIX_MAX_CHANNELS=8,
++    /* every WAVEFORMATEXTENSIBLE speaker position: up to 8 channels take the usual
++     * layout without a mask, more need one (7.1.4, Windows' spatial audio beds) */
++    PW_AUDIO_MIX_MAX_CHANNELS=18,PW_AUDIO_MIX_USUAL_CHANNELS=8,
+     PW_AUDIO_MIX_MIN_RATE=1000,PW_AUDIO_MIX_MAX_RATE=384000,
+     /* PCM: 8-bit unsigned, 16/24/32-bit signed little-endian; FLOAT: 32-bit */
+     PW_AUDIO_MIX_PCM=1,PW_AUDIO_MIX_FLOAT=3,
+@@ -27,7 +29,7 @@ enum {
+ 
+ typedef struct PwAudioMixFormat {
+     uint32_t rate;              /* frames per second */
+-    uint16_t channels;          /* 1..PW_AUDIO_MIX_MAX_CHANNELS */
++    uint16_t channels;          /* 1..PW_AUDIO_MIX_MAX_CHANNELS; above 8 with a mask */
+     uint16_t bits;              /* container bits per sample */
+     uint16_t block_align;       /* bytes per frame: channels * bits / 8 */
+     uint16_t encoding;          /* PW_AUDIO_MIX_PCM or PW_AUDIO_MIX_FLOAT */
+diff --git a/tests/test_pw_audio_mix.c b/tests/test_pw_audio_mix.c
+index c50b7b5..1aa5ff6 100644
+--- a/tests/test_pw_audio_mix.c
++++ b/tests/test_pw_audio_mix.c
+@@ -29,6 +29,12 @@ static void test_format_check(void)
+     f=pcm(48000,2,12);assert(pw_audio_mix_format_check(&f)==PW_ERR_UNSUPPORTED);
+     f=pcm(48000,0,16);assert(pw_audio_mix_format_check(&f)==PW_ERR_UNSUPPORTED);
+     f=pcm(48000,9,16);assert(pw_audio_mix_format_check(&f)==PW_ERR_UNSUPPORTED);
++    /* more than 8 channels with a mask naming them: 7.1.4, Windows' spatial audio bed */
++    f=pcm(48000,12,32);f.encoding=PW_AUDIO_MIX_FLOAT;f.channel_mask=0x2d63f;
++    assert(pw_audio_mix_format_check(&f)==PW_OK);
++    f.channel_mask=0x63f;assert(pw_audio_mix_format_check(&f)==PW_ERR_UNSUPPORTED);
++    f=pcm(48000,18,16);f.channel_mask=0x3ffff;assert(pw_audio_mix_format_check(&f)==PW_OK);
++    f=pcm(48000,19,16);f.channel_mask=0x7ffff;assert(pw_audio_mix_format_check(&f)==PW_ERR_UNSUPPORTED);
+     f=pcm(999,2,16);assert(pw_audio_mix_format_check(&f)==PW_ERR_UNSUPPORTED);
+     f=pcm(384001,2,16);assert(pw_audio_mix_format_check(&f)==PW_ERR_UNSUPPORTED);
+     f=pcm(1000,2,16);assert(pw_audio_mix_format_check(&f)==PW_OK);
+@@ -41,7 +47,7 @@ static void test_format_check(void)
+ 
+ static void test_init_errors(void)
+ {
+-    PwAudioMixStream s;uint8_t ring[16];
++    PwAudioMixStream s;uint8_t ring[16]={0};
+     PwAudioMixFormat f=pcm(48000,2,16),bad=pcm(48000,2,12);
+     assert(pw_audio_mix_stream_init(NULL,&f,ring,4)==PW_ERR_PRECONDITION);
+     assert(pw_audio_mix_stream_init(&s,&f,NULL,4)==PW_ERR_PRECONDITION);
+@@ -149,6 +155,16 @@ static void test_channel_folding(void)
+     assert(near(mixed[2],0.5f*side*3));
+     assert(near(mixed[3],0.5f*side*2));
+ 
++    /* 7.1.4 (FL FR FC LFE BL BR SL SR TFL TFR TBL TBR): the height speakers fold
++     * into their sides as the surround ones do */
++    float twelve[2*12]={0};
++    twelve[0]=0.5f;twelve[8]=0.5f;twelve[11]=0.25f;
++    f=pcm(48000,12,32);f.encoding=PW_AUDIO_MIX_FLOAT;f.channel_mask=0x2d63f;
++    assert(pw_audio_mix_stream_init(&s,&f,(const uint8_t *)twelve,2)==PW_OK);s.held=2;
++    assert(mix(&s,2)==2);
++    assert(near(mixed[2],0.5f+0.5f*side));
++    assert(near(mixed[3],0.25f*side));
++
+     /* the usual 3-channel layout is FL FR LFE: the LFE is dropped */
+     int16_t three[2*3]={0,0,32767, 0,0,0};
+     f=pcm(48000,3,16);
+-- 
+2.43.0
+

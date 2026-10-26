@@ -1,0 +1,96 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bornaradusin <bornaradusin@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 22:10:00 +0000
+Subject: [PATCH] PC5: the library's root and logs folder open to every account
+
+pw_diagnostics_open made /data/prospero-win and its logs folder 0700
+when it was the first to make them, which on a new console it is: open
+only to the account that made them. FTP and file managers couldn't open
+the library, and the title couldn't either when the folder was another
+account's. They are now made 0777 less the umask, as every other folder
+PC5 makes, and one made 0700 before is opened up when the title can.
+---
+ native/pw_diagnostics.c     | 21 +++++++++++++++++++--
+ tests/test_pw_diagnostics.c | 13 ++++++++++++-
+ 2 files changed, 31 insertions(+), 3 deletions(-)
+
+diff --git a/native/pw_diagnostics.c b/native/pw_diagnostics.c
+index e3b2a68..286d386 100644
+--- a/native/pw_diagnostics.c
++++ b/native/pw_diagnostics.c
+@@ -292,6 +292,23 @@ static void start_threads(void)
+     pthread_cond_signal(&wake);
+ }
+ 
++/* The library's root or its logs folder, made open to every account as every other folder
++ * PC5 makes is (mkdir 0777, less the umask). Before, they were made 0700: open only to the
++ * account that made them, which kept FTP and file managers out of the whole library, and
++ * the title too when the folder was another account's. One made that way and left with
++ * no access for the others is opened up when the title can (it is the title's own). */
++static int open_folder(const char *path)
++{
++    struct stat st;
++
++    if (mkdir(path, 0777) == 0) return 0;
++    if (errno != EEXIST) return -1;
++    if (stat(path, &st) != 0) return -1;
++    if (!S_ISDIR(st.st_mode)) { errno = ENOTDIR; return -1; }
++    if (!(st.st_mode & 0077)) (void)chmod(path, 0777);
++    return 0;
++}
++
+ int pw_diagnostics_open(const char *root, const char *build, const char *profile, uint32_t cycle)
+ {
+     char directory[448], index[512], number[32];
+@@ -307,8 +324,8 @@ int pw_diagnostics_open(const char *root, const char *build, const char *profile
+     if (!root || snprintf(directory, sizeof(directory), "%s/logs", root) >= (int)sizeof(directory)) {
+         disk_error = ENAMETOOLONG; goto out;
+     }
+-    if (mkdir(root, 0700) != 0 && errno != EEXIST) { disk_error = errno; goto out; }
+-    if (mkdir(directory, 0700) != 0 && errno != EEXIST) { disk_error = errno; goto out; }
++    if (open_folder(root) != 0) { disk_error = errno; goto out; }
++    if (open_folder(directory) != 0) { disk_error = errno; goto out; }
+     snprintf(index, sizeof(index), "%s/next.txt", directory);
+     counter = open(index, O_RDONLY);
+     if (counter >= 0) {
+diff --git a/tests/test_pw_diagnostics.c b/tests/test_pw_diagnostics.c
+index b9ba721..c7aca18 100644
+--- a/tests/test_pw_diagnostics.c
++++ b/tests/test_pw_diagnostics.c
+@@ -85,7 +85,9 @@ static uint64_t wait_saved(const char *root, const char *text, unsigned limit_ms
+ int main(void)
+ {
+     char root[] = "/tmp/pw-diagnostics-XXXXXX", path[512], status[80];
+-    assert(mkdtemp(root));
++    struct stat folder;
++    assert(mkdtemp(root));   /* 0700, as the title made the library's root before */
++    umask(022);
+     pw_diagnostics_test_retry_interval(20000000ull);
+     online = 1;
+     /* When the writer thread cannot start, close still saves and sends the
+@@ -93,6 +95,10 @@ int main(void)
+     pw_diagnostics_test_refuse_writer(1);
+     pw_diagnostics_log("no-writer-record");
+     assert(pw_diagnostics_open(root, "test-build", "pinball", 2) == 0);
++    /* The root made 0700 is opened up; the logs folder is made as any other folder. */
++    assert(stat(root, &folder) == 0 && (folder.st_mode & 0777) == 0777);
++    snprintf(path, sizeof(path), "%s/logs", root);
++    assert(stat(path, &folder) == 0 && (folder.st_mode & 0777) == 0755);
+     pw_diagnostics_log("no-writer-record-2");
+     pw_diagnostics_close("no-writer");
+     assert(closed == 1 && sent == 3 && !strcmp(last_sent, "PW_WINE64 session_end reason=no-writer"));
+@@ -245,6 +251,11 @@ int main(void)
+     assert(read_chunk(root, 0) && strstr(data, "build=next-build") && !strstr(data, "profile=pinball"));
+     snprintf(path, sizeof(path), "%s/logs/session-0.previous.log", root); assert(access(path, F_OK) != 0);
+     snprintf(path, sizeof(path), "%s/logs/session-0.start.log", root); assert(access(path, F_OK) != 0);
++    /* A folder the owner left some access to is left as it is. */
++    assert(chmod(root, 0750) == 0);
++    assert(pw_diagnostics_open(root, "next-build", "launcher", 9) == 0);
++    pw_diagnostics_close("launcher");
++    assert(stat(root, &folder) == 0 && (folder.st_mode & 0777) == 0750);
+     assert(pw_diagnostics_open("/dev/null", "build", "game", 0) == -1);
+     pw_diagnostics_status(status, sizeof(status)); assert(strstr(status, "UNAVAILABLE"));
+     /* Without a file, records still reach the network through the writer. */
+-- 
+2.43.0
+
