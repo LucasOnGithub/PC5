@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SuperLeiyan <5438286+SuperLeiyan@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 21:26:56 +1030
+Subject: [PATCH] PC5: the touchpad press is the Xbox controller's Back
+
+In Xbox controller mode, Back (View) was the Create button only. The
+console answers Create with its own share menu, so a game whose menu or
+map is on Back brought that up as well. The touchpad press, which was
+Guide (a button games read only through XInput's hidden ordinal), is now
+Back too; Create stays Back for the games and players that use it.
+---
+ docs/WINE_PS5_BUILD.md       | 2 +-
+ native/pw_wine_display.c     | 4 +++-
+ native/pw_wine_display.h     | 2 +-
+ tests/test_pw_wine_display.c | 2 +-
+ 4 files changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/docs/WINE_PS5_BUILD.md b/docs/WINE_PS5_BUILD.md
+index 1a50af3..d959433 100644
+--- a/docs/WINE_PS5_BUILD.md
++++ b/docs/WINE_PS5_BUILD.md
+@@ -1176,7 +1176,7 @@ The title runs one game per process (`src/pw_wine_launch.h`):
+     0 (see [XInput controller](#xinput-controller)).
+     - Cross, Circle, Square and Triangle are A, B, X and Y. L1/R1 are the
+       shoulders, L2/R2 the analog triggers and L3/R3 the stick clicks.
+-      Options is Start, Create is Back and the touchpad is Guide.
++      Options is Start; the touchpad and Create are Back (Create also opens the console's share menu).
+     - The sticks are scaled to XInput's range, with y up.
+     - The rumble a game asks for runs the DualSense's motors through
+       `scePadSetVibration`: XInput's left motor is the large one. The
+diff --git a/native/pw_wine_display.c b/native/pw_wine_display.c
+index 58fab4d..ac55d02 100644
+--- a/native/pw_wine_display.c
++++ b/native/pw_wine_display.c
+@@ -116,7 +116,9 @@ static const struct { uint32_t dualsense; uint16_t xinput; } pad_buttons[] = {
+     { 0x4000u, 0x1000u }, { 0x2000u, 0x2000u }, { 0x8000u, 0x4000u }, { 0x1000u, 0x8000u },
+     { 0x400u, 0x0100u }, { 0x800u, 0x0200u }, { 0x2u, 0x0040u }, { 0x4u, 0x0080u },
+     { 0x10u, 0x0001u }, { 0x40u, 0x0002u }, { 0x80u, 0x0004u }, { 0x20u, 0x0008u },
+-    { 0x8u, 0x0010u }, { 0x1u, 0x0020u }, { 0x100000u, 0x0400u },
++    /* Back is the touchpad's press as well as Create's: the console answers
++     * Create with its own share menu, so a game's Back would bring that up. */
++    { 0x8u, 0x0010u }, { 0x1u, 0x0020u }, { 0x100000u, 0x0020u },
+ };
+ 
+ /* One stick axis (0..255, 0x80 centred) as XInput's -32768..32767, centre
+diff --git a/native/pw_wine_display.h b/native/pw_wine_display.h
+index a80671f..230331e 100644
+--- a/native/pw_wine_display.h
++++ b/native/pw_wine_display.h
+@@ -61,7 +61,7 @@ size_t pw_wine_dialog_inputs(uint32_t pressed, uint32_t released, PwWineInput *o
+ 
+ /* The DualSense as an XInput gamepad: its held buttons (Cross A, Circle B,
+  * Square X, Triangle Y, L1/R1 shoulders, L3/R3 thumbs, Options Start,
+- * Create Back, the touchpad Guide), the analog triggers, and the sticks
++ * the touchpad and Create Back), the analog triggers, and the sticks
+  * scaled to -32768..32767 with y up. 1 and the state in out while the pad
+  * is connected; 0 and a neutral state otherwise. The sink numbers the
+  * packets. */
+diff --git a/tests/test_pw_wine_display.c b/tests/test_pw_wine_display.c
+index dcce4d8..afc9da8 100644
+--- a/tests/test_pw_wine_display.c
++++ b/tests/test_pw_wine_display.c
+@@ -212,7 +212,7 @@ static void test_pad(void)
+         { 0x10u, 0x0001u /* up */ }, { 0x40u, 0x0002u /* down */ },
+         { 0x80u, 0x0004u /* left */ }, { 0x20u, 0x0008u /* right */ },
+         { 0x8u, 0x0010u /* options: start */ }, { 0x1u, 0x0020u /* create: back */ },
+-        { 0x100000u, 0x0400u /* touchpad: guide */ },
++        { 0x100000u, 0x0020u /* touchpad: back, away from the console's share menu */ },
+     };
+     for (size_t i = 0; i < sizeof(buttons) / sizeof(buttons[0]); i++) {
+         pad.core.previous_buttons = buttons[i].dualsense;
