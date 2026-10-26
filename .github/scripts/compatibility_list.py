@@ -106,7 +106,7 @@ def main() -> int:
     while True:
         page = graphql("""query($owner: String!, $name: String!, $category: ID!, $after: String) {
             repository(owner: $owner, name: $name) {
-              discussions(first: 100, after: $after, categoryId: $category,
+              discussions(first: 100, after: $after, categoryId: $category, states: [OPEN, CLOSED],
                           orderBy: {field: CREATED_AT, direction: ASC}) {
                 pageInfo { hasNextPage endCursor }
                 nodes { id number title url body createdAt author { login } upvoteCount locked closed
@@ -127,6 +127,10 @@ def main() -> int:
             if result in NOT_RUNNING and author.casefold() != owner.casefold():
                 issue = linked_issue(owner, name, fields.get("Issue", ""))
                 asked = any(MARK in (c["body"] or "") for c in discussion["comments"]["nodes"])
+                print(f"::notice::compatibility list: #{discussion['number']} {game}: {result}, "
+                      f"issue field {fields.get('Issue', '')!r}, issue "
+                      f"{'unknown' if issue is UNKNOWN else issue and (issue['number'], issue['state'], issue['labels'])}, "
+                      f"closed={discussion['closed']}, asked={asked}")
                 if issue is UNKNOWN:
                     continue   # not listed this time, and nothing said or closed on a failed lookup
                 if issue is None:
