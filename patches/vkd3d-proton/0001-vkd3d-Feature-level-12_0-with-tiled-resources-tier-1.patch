@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: bornaradusin <bornaradusin@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 22:00:00 +0000
+Subject: [PATCH] vkd3d: Feature level 12_0 with tiled resources tier 1.
+
+The PS5's RADV binds sparse resources but has no PRT, so vkd3d-proton
+reports tiled resources tier 1, and feature level 12_0 asks for tier 2:
+the device stopped at 11_1, and games that need 12_0 (Unreal Engine 5's)
+refused to start. 12_0 is now given with tier 1. The tier reported stays
+1, so a game that checks it for tier 2's residency feedback doesn't use
+it.
+---
+ libs/vkd3d/device.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/libs/vkd3d/device.c b/libs/vkd3d/device.c
+index 63a82c3..4a630ff 100644
+--- a/libs/vkd3d/device.c
++++ b/libs/vkd3d/device.c
+@@ -9729,8 +9729,12 @@ static void d3d12_device_caps_init_feature_level(struct d3d12_device *device)
+             vk_info->device_limits.maxPerStageDescriptorStorageImages >= D3D12_UAV_SLOT_COUNT)
+         caps->max_feature_level = D3D_FEATURE_LEVEL_11_1;
+ 
++    /* PC5: 12_0 with tiled resources tier 1, which the PS5's RADV gives: it binds
++     * sparse resources but has no PRT, so no residency feedback (tier 2's). The tier
++     * reported stays 1, so games that check it for tier 2 features don't use them,
++     * and games that need 12_0 (Unreal Engine 5's, among others) start. */
+     if (caps->max_feature_level >= D3D_FEATURE_LEVEL_11_1 &&
+-            caps->options.TiledResourcesTier >= D3D12_TILED_RESOURCES_TIER_2 &&
++            caps->options.TiledResourcesTier >= D3D12_TILED_RESOURCES_TIER_1 &&
+             caps->options.ResourceBindingTier >= D3D12_RESOURCE_BINDING_TIER_2 &&
+             caps->options.TypedUAVLoadAdditionalFormats)
+         caps->max_feature_level = D3D_FEATURE_LEVEL_12_0;
+-- 
+2.43.0
+

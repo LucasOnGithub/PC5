@@ -66,12 +66,13 @@ jobs:
         # and built again only when that changes. Wine (both), RADV and the 32-bit CPU: the
         # build's pins and packages and patches/prospero-win and patches/radv (PC5's own code
         # in title/ goes into the eboot only). Zink: Mesa and llvm-mingw as prospero-win pins
-        # them. DXVK: its commit with patches/dxvk.
+        # them. DXVK: its commit with patches/dxvk. VKD3D-Proton: its commit with patches/vkd3d-proton.
         run: |
           pw=.build/prospero-win
           echo "wine=wine-$(cat tools/build.sh tools/packages.txt patches/prospero-win/*.patch patches/radv/*.patch | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
           echo "zink=zink-$(cat "$pw/tools/build_mesa_zink.sh" "$pw/tools/mesa_zink_manifest.py" | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
           echo "dxvk=dxvk-$(git -C .build/dxvk-source rev-parse HEAD)-$(sed -n 's/^DXVK_NAME=//p' tools/build.sh)" >> "$GITHUB_OUTPUT"
+          echo "vkd3d=vkd3d-$(git -C .build/vkd3d-proton-source rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       # What packaging and the sources archive take from the Wine, RADV and CPU steps.
       - name: Restore Wine
@@ -103,6 +104,13 @@ jobs:
         with:
           path: /mnt/pc5/build/dxvk
           key: ${{ steps.keys.outputs.dxvk }}
+
+      - name: Restore VKD3D-Proton
+        id: vkd3d
+        uses: actions/cache/restore@v4
+        with:
+          path: /mnt/pc5/build/vkd3d
+          key: ${{ steps.keys.outputs.vkd3d }}
 
       - name: Title
         run: bash tools/build.sh title
@@ -150,6 +158,17 @@ jobs:
         with:
           path: /mnt/pc5/build/dxvk
           key: ${{ steps.keys.outputs.dxvk }}
+
+      - name: VKD3D-Proton
+        run: bash tools/build.sh vkd3d
+
+      - name: Keep VKD3D-Proton
+        if: steps.vkd3d.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: /mnt/pc5/build/vkd3d
+          key: ${{ steps.keys.outputs.vkd3d }}
 
       - name: Zink
         if: steps.zink.outputs.cache-hit != 'true'

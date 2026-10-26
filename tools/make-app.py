@@ -39,7 +39,7 @@ def main() -> int:
     if param.get("titleId") != TITLE:
         problems.append(f"sce_sys/param.json is {param.get('titleId')}, not {TITLE}")
     for needed in ("eboot.bin", "lapy.elf", "sce_sys/icon0.png", "sce_sys/pic0.png", "sce_module/libc.prx",
-                   "pc5/fonts.bin", "pc5/sounds/PC5.wav", "pc5/ca-certificates.crt", "pc5/prefix.list", "pc5/prefix/system.reg",
+                   "pc5/fonts.bin", "pc5/sounds/cheap chinese speaker.wav", "pc5/ca-certificates.crt", "pc5/prefix.list", "pc5/prefix/system.reg",
                    "pc5/prefix-media.reg", "win/wine/lib/wine/x86_64-unix/winedmo.prx",
                    "win/wine/lib/wine/x86_64-unix/winegstreamer.prx", "LICENSES/ps5-framegen/COPYING",
                    "win/wine/lib/wine/x86_64-windows/winegstreamer.dll",
@@ -122,8 +122,9 @@ Built from <https://github.com/bornaradusin/PC5> at commit {repo_commit}:
   2.6.2-prospero2 (<https://github.com/mpereiraesaa/dxvk>, zlib licence) built with that
   repository's `patches/dxvk` (textures shared within the game's process, including a
   shared render target a game samples; `pc5/dxvk.txt` names the build) and VKD3D-Proton
-  3.0.1 (<https://github.com/HansKristian-Work/vkd3d-proton>, LGPL 2.1 or later, its
-  release's DLLs unchanged). Each game PC5 installs gets its own
+  3.0.1 (<https://github.com/HansKristian-Work/vkd3d-proton>, LGPL 2.1 or later) built from
+  its release's source with that repository's `patches/vkd3d-proton` (feature level 12_0 with
+  tiled resources tier 1). Each game PC5 installs gets its own
   copy, and a game installed with an earlier DXVK gets this one's DLLs when it next starts.
   `pc5/prefix-media.reg` is what registering Wine's media decoders adds to it, which PC5
   adds to the prefix of a game installed before they were part of the app.

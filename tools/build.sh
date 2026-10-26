@@ -7,7 +7,7 @@
 #
 # Steps, in order (default: all):
 #   sources   clone the pinned projects below into .build/, patch prospero-win, download
-#             the pinned archives (llvm-mingw for Zink, VKD3D-Proton, mbedTLS)
+#             the pinned archives (llvm-mingw for Zink, mbedTLS)
 #   title     the PS5 payload SDK, the Lapy helper for PPSA11018, mbedTLS for the console,
 #             the eboot with PC5 in it
 #   radv      RADV, the console's Vulkan driver (PS5_Vulkan, PS5_Mesa with patches/radv)
@@ -16,6 +16,7 @@
 #   wineps5   Wine's PS5 side (PRX modules)
 #   cpu       wowprospero and the native WoW64 CPU (32-bit games)
 #   dxvk      DXVK 2.6.2-prospero2 with patches/dxvk, 64- and 32-bit, for the Windows template
+#   vkd3d     VKD3D-Proton 3.0.1 with patches/vkd3d-proton, 64- and 32-bit, for the Windows template
 #   zink      Mesa's WGL/Zink, OpenGL for the games that draw with it
 #   package   prospero-win's tools/package_release.sh, with Zink
 #   app       release/PPSA11018/ (art, fonts, the Windows template) and release/PPSA11018.zip
@@ -49,8 +50,6 @@ WINE_URL=https://github.com/wine-mirror/wine.git
 # boilerplate (build_wine_ps5.sh), PS5_Mesa for RADV (build-radv.sh) and for Zink
 # (build_mesa_zink.sh, with its llvm-mingw), the SDK fork (setup-native-dependencies.sh).
 VKD3D_VERSION=3.0.1                                       # needs DXVK 2.1's dxgi or newer (its CHANGELOG)
-VKD3D_URL=https://github.com/HansKristian-Work/vkd3d-proton/releases/download/v$VKD3D_VERSION/vkd3d-proton-$VKD3D_VERSION.tar.zst
-VKD3D_SHA256=3cf2315522af5e43605ef6d3c41dad91387040bf97199934f3f7ab76caaa2f0c
 MBEDTLS_VERSION=3.6.7                                     # LTS: the covers' HTTPS
 # Wine Mono, .NET Framework for the games: the version and SHA-256 Wine's appwiz.cpl names
 # (dlls/appwiz.cpl/addons.c, MONO_VERSION and MONO_SHA), from its release on GitHub.
@@ -90,9 +89,12 @@ QRCODEGEN_URL=https://github.com/nayuki/QR-Code-generator.git
 QRCODEGEN_COMMIT=3c6d0b3cefb4e049dc337e82237c9644399716a8
 VKD3D_SOURCE_URL=https://github.com/HansKristian-Work/vkd3d-proton.git
 VKD3D_SOURCE_COMMIT=3b10bd7a7ec6a7347e616cf8bea59333afec2255   # tag v3.0.1, the release's build
+# Built here with patches/vkd3d-proton (step vkd3d); app/pc5/dxvk.txt names the result with
+# DXVK's, and PC5 gives installed games its DLLs when the name changes.
+VKD3D_NAME=3.0.1-pc5.1
 
 TITLE=PPSA11018
-STEPS="sources title radv hostwine wineps5 cpu dxvk zink package app bundle"
+STEPS="sources title radv hostwine wineps5 cpu dxvk vkd3d zink package app bundle"
 
 # ---- here on Debian 13 or Ubuntu 24.04, else in the build image ----------------------
 supported() {
@@ -219,7 +221,6 @@ step_sources() {
     download "$B/downloads/llvm-mingw-$llvm-ubuntu-22.04-x86_64.tar.xz" \
         "https://github.com/mstorsjo/llvm-mingw/releases/download/${llvm%-ucrt}/llvm-mingw-$llvm-ubuntu-22.04-x86_64.tar.xz" \
         "$(value "$zink" LLVM_MINGW_SHA256)"
-    download "$B/downloads/vkd3d-proton-$VKD3D_VERSION.tar.zst" "$VKD3D_URL" "$VKD3D_SHA256"
     download "$B/downloads/mbedtls-$MBEDTLS_VERSION.tar.bz2" "$MBEDTLS_URL" "$MBEDTLS_SHA256"
     download "$B/downloads/wine-mono-$MONO_VERSION-x86.msi" "$MONO_URL" "$MONO_SHA256"
     # Its source, unchanged, for the source bundle (parts of Mono are under the LGPL and GPL).
@@ -229,9 +230,13 @@ step_sources() {
     download "$B/downloads/liberation-fonts-$LIBERATION_VERSION-LICENSE" "$LIBERATION_LICENSE_URL" "$LIBERATION_LICENSE_SHA256"
     download "$B/downloads/DroidSansFallbackFull.ttf" "$DROID_FALLBACK_URL" "$DROID_FALLBACK_SHA256"
     download "$B/downloads/DroidSansFallbackFull-NOTICE" "$DROID_FALLBACK_NOTICE_URL" "$DROID_FALLBACK_NOTICE_SHA256"
-    # VKD3D-Proton's source at its release's commit, for the source bundle.
+    # VKD3D-Proton at its release's commit with PC5's patch (step vkd3d), committed with fixed
+    # names and dates; the source bundle has it.
     fetch "$B/vkd3d-proton-source" "$VKD3D_SOURCE_URL" "$VKD3D_SOURCE_COMMIT"
+    git -C "$B/vkd3d-proton-source" reset -q --hard "$VKD3D_SOURCE_COMMIT"
+    git -C "$B/vkd3d-proton-source" clean -q -fdx
     git -C "$B/vkd3d-proton-source" submodule -q update --init --recursive
+    git -C "$B/vkd3d-proton-source" "${id[@]}" am -q --committer-date-is-author-date "$here"/patches/vkd3d-proton/*.patch
     [[ -f $B/mbedtls-$MBEDTLS_VERSION/include/mbedtls/ssl.h ]] || tar -xjf "$B/downloads/mbedtls-$MBEDTLS_VERSION.tar.bz2" -C "$B"
     # Python tools for Mesa's builds (meson 1.9 and the rest, as prospero-win pins them).
     [[ -x $B/venv/bin/meson ]] || {
@@ -351,6 +356,37 @@ step_dxvk() {
     ls -l "$out"/x64 "$out"/x32
 }
 
+step_vkd3d() {
+    # 64- and 32-bit into $B/vkd3d/vkd3d-proton-<version>.tar.zst, laid out as VKD3D-Proton's own
+    # releases are (its package-release.sh: x64/ and x86/); not again while the source (the
+    # release with patches/vkd3d-proton, step sources) is the same.
+    local arch out=$B/vkd3d tree stage
+    tree=$(git -C "$B/vkd3d-proton-source" rev-parse HEAD)
+    if [[ -f $out/vkd3d-proton-$VKD3D_VERSION.tar.zst && $(cat "$out/SOURCE" 2>/dev/null) == "$tree" ]]; then
+        echo "$VKD3D_NAME" > "$out/NAME"   # the name may have changed without the source
+        echo "VKD3D-Proton $(cat "$out/NAME") already built from $tree"
+        return 0
+    fi
+    rm -rf "$out"
+    stage=$out/vkd3d-proton-$VKD3D_VERSION
+    for arch in 64 86; do
+        rm -rf "$B/vkd3d-build.x$arch"
+        (cd "$B/vkd3d-proton-source" && "$B/venv/bin/meson" setup --cross-file "build-win${arch/86/32}.txt" \
+            --buildtype release --strip --prefix "$stage" --bindir "x$arch" --libdir "x$arch" "$B/vkd3d-build.x$arch")
+        ninja -C "$B/vkd3d-build.x$arch" -j"$jobs" install
+        find "$stage/x$arch" -type f ! -name '*.dll' -delete
+        for dll in d3d12 d3d12core; do
+            [[ -f $stage/x$arch/$dll.dll ]] || { echo "no x$arch/$dll.dll" >&2; return 1; }
+        done
+    done
+    tar -C "$out" --sort=name --owner=0 --group=0 --numeric-owner --mtime=2026-10-22 \
+        -c "vkd3d-proton-$VKD3D_VERSION" | zstd -q -19 -o "$out/vkd3d-proton-$VKD3D_VERSION.tar.zst"
+    rm -rf "$stage"
+    echo "$tree" > "$out/SOURCE"
+    echo "$VKD3D_NAME" > "$out/NAME"
+    ls -l "$out"
+}
+
 step_cpu() {
     cd "$PW"
     local build=$PW/.deps/wine-host/build sdk=$PW/.deps/ps5-native-app-boilerplate/.deps/native/ps5-payload-sdk tree
@@ -427,11 +463,11 @@ EOF_SOURCES
     for root in /usr/share/ca-certificates/mozilla/*.crt; do cat "$root"; echo; done > "$app/pc5/ca-certificates.crt"
     python3 "$here/tools/make-prefix.py" --pw "$PW" --wine "$PW/.deps/wine-host/install/usr/bin/wine" \
         --cpu-dll "$PW/.deps/wine-host/build/dlls/wowprospero/x86_64-windows/wowprospero.dll" \
-        --vkd3d "$B/downloads/vkd3d-proton-$VKD3D_VERSION.tar.zst" --dxvk "$B/dxvk" \
+        --vkd3d "$B/vkd3d/vkd3d-proton-$VKD3D_VERSION.tar.zst" --dxvk "$B/dxvk" \
         --mono "$B/downloads/wine-mono-$MONO_VERSION-x86.msi" --mono-version "$MONO_VERSION" --out "$app"
     # The DXVK the template has, which PC5 gives games installed with an earlier one (pc5_game.c).
     # DXVK and VKD3D-Proton by name: a game installed before either changed gets both again.
-    printf '%s vkd3d-proton-%s\n' "$(cat "$B/dxvk/NAME")" "$VKD3D_VERSION" > "$app/pc5/dxvk.txt"
+    printf '%s vkd3d-proton-%s\n' "$(cat "$B/dxvk/NAME")" "$(cat "$B/vkd3d/NAME")" > "$app/pc5/dxvk.txt"
     mkdir -p "$app/LICENSES/dxvk" "$app/LICENSES/wine-mono"
     cp "$B/dxvk-source/LICENSE" "$app/LICENSES/dxvk/LICENSE"
     cp "$B/downloads/wine-mono-$MONO_VERSION-COPYING" "$app/LICENSES/wine-mono/COPYING"
@@ -446,6 +482,20 @@ EOF_SOURCES
     mkdir -p "$app/LICENSES/liberation-fonts" "$app/LICENSES/droid-sans-fallback"
     cp "$B/downloads/liberation-fonts-$LIBERATION_VERSION-LICENSE" "$app/LICENSES/liberation-fonts/LICENSE"
     cp "$B/downloads/DroidSansFallbackFull-NOTICE" "$app/LICENSES/droid-sans-fallback/NOTICE"
+    # XAudio2 and XACT come from the PS5 Wine build (its FAudio fix) with their debug data in,
+    # five times their size: stripped as Wine's own install strips its modules. Wine's
+    # builtin mark (the DOS stub's "Wine builtin DLL") stays.
+    local dll format
+    while IFS= read -r -d '' dll; do
+        format=$(x86_64-w64-mingw32-objdump -f "$dll" | sed -n 's/.*file format //p')
+        case $format in
+            pei-x86-64) x86_64-w64-mingw32-strip "$dll" ;;
+            pei-i386) i686-w64-mingw32-strip "$dll" ;;
+            *) echo "build.sh: $dll is $format, not a PE module" >&2; return 1 ;;
+        esac
+        [[ $(head -c 80 "$dll" | tail -c 16) == "Wine builtin DLL" ]] ||
+            { echo "build.sh: $dll lost Wine's builtin mark" >&2; return 1; }
+    done < <(find "$app" -type f \( -name 'xaudio2_*.dll' -o -name 'xactengine*.dll' \) -print0)
     python3 "$here/tools/make-app.py" "$app" "$release/$TITLE.zip" --repo "$here" --pw "$PW"
 }
 
@@ -486,7 +536,8 @@ step_bundle() {
     part QR-Code-generator "$B/qrcodegen" "$QRCODEGEN_COMMIT" "$QRCODEGEN_URL (Report on GitHub's QR codes)"
     mkdir -p "$stage/vkd3d-proton"
     tar -C "$B/vkd3d-proton-source" --exclude=.git -cf - . | tar -x -C "$stage/vkd3d-proton"
-    printf '%-28s %s at %s, with its submodules\n' "vkd3d-proton/" "$VKD3D_SOURCE_URL" "$VKD3D_SOURCE_COMMIT" >> "$stage/PARTS.txt"
+    printf '%-28s %s at %s (tag v%s), with its submodules and PC5'"'"'s patches/vkd3d-proton applied\n' \
+        "vkd3d-proton/" "$VKD3D_SOURCE_URL" "$VKD3D_SOURCE_COMMIT" "$VKD3D_VERSION" >> "$stage/PARTS.txt"
     mkdir -p "$stage/freetype"
     cp -a "$PW/.deps/wine-ps5/freetype/src/." "$stage/freetype/"
     local ft_from="its release archive"
