@@ -52,7 +52,16 @@ jobs:
           {
             sudo rm -f /var/lib/man-db/auto-update
             sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete
-            apt="-o Acquire::Retries=5 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+            # The Azure mirror intermittently stalls on large MinGW packages.
+            # Use the official Ubuntu archive directly instead of Azure's mirrorlist.
+            sudo tee /etc/apt/sources.list.d/ubuntu.sources >/dev/null <<'SOURCES'
+            Types: deb
+            URIs: http://archive.ubuntu.com/ubuntu/
+            Suites: noble noble-updates noble-backports noble-security
+            Components: main restricted universe multiverse
+            Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+            SOURCES
+            apt="-o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15"
             sudo apt-get update -q $apt
             sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends $apt \
               -o Dpkg::Use-Pty=0 -o DPkg::Lock::Timeout=300 $(cat tools/packages.txt)
