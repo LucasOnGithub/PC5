@@ -54,19 +54,19 @@ jobs:
             sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete
             # The Azure mirror intermittently stalls on large MinGW packages.
             # Use the official Ubuntu archive directly instead of Azure's mirrorlist.
-            sudo tee /etc/apt/sources.list.d/ubuntu.sources >/dev/null <<'SOURCES'
-            Types: deb
-            URIs: http://archive.ubuntu.com/ubuntu/
-            Suites: noble noble-updates noble-backports
-            Components: main restricted universe multiverse
-            Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-
-            Types: deb
-            URIs: http://security.ubuntu.com/ubuntu/
-            Suites: noble-security
-            Components: main restricted universe multiverse
-            Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
-            SOURCES
+            printf '%s\n' \
+              'Types: deb' \
+              'URIs: http://archive.ubuntu.com/ubuntu/' \
+              'Suites: noble noble-updates noble-backports' \
+              'Components: main restricted universe multiverse' \
+              'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+              '' \
+              'Types: deb' \
+              'URIs: http://security.ubuntu.com/ubuntu/' \
+              'Suites: noble-security' \
+              'Components: main restricted universe multiverse' \
+              'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+              | sudo tee /etc/apt/sources.list.d/ubuntu.sources >/dev/null
             apt="-o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15"
             sudo apt-get update -q $apt
             sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends $apt \
